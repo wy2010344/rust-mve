@@ -2,10 +2,10 @@
 //!
 //! 提供 [`FlexLayout`]、[`StackLayout`]、[`AbsoluteLayout`] 等布局原语。
 
+mod absolute;
 mod flex;
 mod stack;
-mod absolute;
 
+pub use absolute::AbsoluteLayout;
 pub use flex::FlexLayout;
 pub use stack::StackLayout;
-pub use absolute::AbsoluteLayout;

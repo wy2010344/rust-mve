@@ -9,11 +9,30 @@ pub struct Scene {
 /// 绘制图元。
 pub enum Primitive {
     /// 填充矩形。
-    Rect { x: f32, y: f32, w: f32, h: f32, color: u32 },
+    Rect {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        color: u32,
+    },
     /// 圆角填充矩形。
-    RoundRect { x: f32, y: f32, w: f32, h: f32, radius: f32, color: u32 },
+    RoundRect {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        color: u32,
+    },
     /// 文本。
-    Text { x: f32, y: f32, text: String, font_size: f32, color: u32 },
+    Text {
+        x: f32,
+        y: f32,
+        text: String,
+        font_size: f32,
+        color: u32,
+    },
     /// 裁剪入栈。
     ClipPush { x: f32, y: f32, w: f32, h: f32 },
     /// 裁剪出栈。
@@ -22,7 +41,9 @@ pub enum Primitive {
 
 impl Scene {
     pub fn new() -> Self {
-        Self { primitives: Vec::new() }
+        Self {
+            primitives: Vec::new(),
+        }
     }
 
     pub fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: u32) {
@@ -30,14 +51,23 @@ impl Scene {
     }
 
     pub fn fill_round_rect(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: u32) {
-        self.primitives.push(Primitive::RoundRect { x, y, w, h, radius, color });
+        self.primitives.push(Primitive::RoundRect {
+            x,
+            y,
+            w,
+            h,
+            radius,
+            color,
+        });
     }
 
     pub fn draw_text(&mut self, x: f32, y: f32, text: &str, font_size: f32, color: u32) {
         self.primitives.push(Primitive::Text {
-            x, y,
+            x,
+            y,
             text: text.to_string(),
-            font_size, color,
+            font_size,
+            color,
         });
     }
 

@@ -8,14 +8,22 @@ pub struct DrawContext {
 
 impl DrawContext {
     /// 节点外框宽度。
-    pub fn outer_width(&self) -> f32 { self.outer_width }
+    pub fn outer_width(&self) -> f32 {
+        self.outer_width
+    }
 
     /// 节点外框高度。
-    pub fn outer_height(&self) -> f32 { self.outer_height }
+    pub fn outer_height(&self) -> f32 {
+        self.outer_height
+    }
 
     /// 内容区 X 偏移（含 padding）。
-    pub fn inner_x(&self) -> f32 { self.inner_x }
+    pub fn inner_x(&self) -> f32 {
+        self.inner_x
+    }
 
     /// 内容区 Y 偏移（含 padding）。
-    pub fn inner_y(&self) -> f32 { self.inner_y }
+    pub fn inner_y(&self) -> f32 {
+        self.inner_y
+    }
 }
