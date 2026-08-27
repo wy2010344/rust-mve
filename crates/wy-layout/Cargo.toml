@@ -1,0 +1,9 @@
+[package]
+name = "wy-layout"
+description = "布局引擎：Flex/Stack/Absolute，基于 Taffy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+taffy = { workspace = true }

@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/your-name/wy-ui"
+
+[workspace.dependencies]
+# 内部 crate
+wy-signal = { path = "crates/wy-signal" }
+wy-layout = { path = "crates/wy-layout" }
+wy-render = { path = "crates/wy-render" }
+wy-text = { path = "crates/wy-text" }
+wy-engine = { path = "crates/wy-engine" }
+
+# 渲染
+vello = "0.10"
+wgpu = "24"
+winit = "0.30"
+
+# 布局
+taffy = "0.7"
+
+# 文本
+parley = "0.11"
+swash = "0.2"
+fontique = "0.11"
+
+# 无障碍
+accesskit = "0.24"
+
+# 工具
+log = "0.4"
+thiserror = "2"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+opt-level = 3

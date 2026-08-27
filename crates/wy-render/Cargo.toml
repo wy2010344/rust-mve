@@ -1,0 +1,13 @@
+[package]
+name = "wy-render"
+description = "渲染管线：Scene 中间层、Widget trait、Vello 集成"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wy-signal = { workspace = true }
+wy-layout = { workspace = true }
+vello = { workspace = true }
+wgpu = { workspace = true }
+log = { workspace = true }

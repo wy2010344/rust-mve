@@ -1,0 +1,12 @@
+[package]
+name = "wy-text"
+description = "文本排版：Parley/shaping、字体缓存、行布局缓存"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+parley = { workspace = true }
+swash = { workspace = true }
+fontique = { workspace = true }
+log = { workspace = true }
