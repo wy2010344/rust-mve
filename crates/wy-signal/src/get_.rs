@@ -55,6 +55,9 @@ impl<T: Clone + PartialEq + 'static> ValBox for T {
 /// 闭包捕获依赖自身，读取时返回类型擦除的值。
 pub(crate) type ReGet = Rc<dyn Fn() -> Box<dyn ValBox>>;
 
+/// 观察者节点的强引用句柄。
+pub(crate) type TrackRef = Rc<dyn TrackDyn>;
+
 /// 观察者节点（TrackEffect / Memo 共同实现）。
 ///
 /// 信号被写入时，会查询注册表并通过此 trait 把观察者推入批次；

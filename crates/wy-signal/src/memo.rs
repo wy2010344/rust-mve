@@ -73,9 +73,10 @@ impl<T: Clone + PartialEq + 'static> Memo<T> {
 
     /// 读取缓存值；若全局版本已变，先校验 relay 决定是否重算。
     pub fn get_cached(&self) -> T {
-        // 1. 全局版本自上次计算未变 → 缓存必然有效。
+        // 1. 若尚未初始化，或全局版本自上次计算已变，则需校验/重算。
+        //    首次读取（inited=false）时**不能**因版本号相同而短路，必须求值。
         let version = global_version();
-        if self.inner.version.get() != version {
+        if !self.inner.inited.get() || self.inner.version.get() != version {
             self.validate(version);
         }
 
@@ -128,14 +129,17 @@ impl<T: Clone + PartialEq + 'static> Memo<T> {
             .borrow()
             .clone()
             .expect("memo self_cell");
-        with_global(|g| {
-            g.current = Some(self_rc as Rc<dyn TrackDyn>);
+        // 标记"计算中"（禁止写入信号），以栈式保存/恢复 computing。
+        let prev_computing = with_global(|g| {
+            let prev = g.computing;
             g.computing = true;
-            let v = (self.inner.compute)();
-            g.current = None;
-            g.computing = false;
-            v
-        })
+            prev
+        });
+        let v = crate::context::with_current_track(self_rc as Rc<dyn TrackDyn>, || {
+            (self.inner.compute)()
+        });
+        with_global(|g| g.computing = prev_computing);
+        v
     }
 
     /// 依次重新读取依赖，比对快照，返回是否有任一变化。

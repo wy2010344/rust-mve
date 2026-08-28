@@ -69,10 +69,8 @@ impl TrackEffect {
             .borrow()
             .clone()
             .expect("effect self_cell");
-        with_global(|g| {
-            g.current = Some(this as Rc<dyn TrackDyn>);
+        crate::context::with_current(this as Rc<dyn TrackDyn>, || {
             (self.inner.effect)();
-            g.current = None;
         });
     }
 }
@@ -91,10 +89,8 @@ impl TrackDyn for TrackEffectInner {
             return;
         }
         let this = self.self_cell.borrow().clone().expect("effect self_cell");
-        with_global(|g| {
-            g.current = Some(this as Rc<dyn TrackDyn>);
+        crate::context::with_current(this as Rc<dyn TrackDyn>, || {
             (self.effect)();
-            g.current = None;
         });
     }
 }
@@ -168,24 +164,21 @@ impl<T: Clone + PartialEq + 'static> Track<T> {
             .borrow()
             .clone()
             .expect("track self_cell");
-        with_global(|g| {
-            g.current = Some(this as Rc<dyn TrackDyn>);
-            let v = (self.inner.compute)();
-            g.current = None;
+        let v =
+            crate::context::with_current_track(this as Rc<dyn TrackDyn>, || (self.inner.compute)());
 
-            let changed = if self.inner.inited.get() {
-                self.inner.last.borrow().as_ref() != Some(&v)
-            } else {
-                force_first
-            };
-            if changed {
-                if let Some(f) = self.inner.on_change.borrow_mut().as_mut() {
-                    f(&v);
-                }
-                *self.inner.last.borrow_mut() = Some(v);
-                self.inner.inited.set(true);
+        let changed = if self.inner.inited.get() {
+            self.inner.last.borrow().as_ref() != Some(&v)
+        } else {
+            force_first
+        };
+        if changed {
+            if let Some(f) = self.inner.on_change.borrow_mut().as_mut() {
+                f(&v);
             }
-        });
+            *self.inner.last.borrow_mut() = Some(v);
+            self.inner.inited.set(true);
+        }
     }
 }
 
@@ -208,24 +201,20 @@ impl<T: Clone + PartialEq + 'static> TrackDyn for TrackInner<T> {
             return;
         }
         let this = self.self_cell.borrow().clone().expect("track self_cell");
-        with_global(|g| {
-            g.current = Some(this as Rc<dyn TrackDyn>);
-            let v = (self.compute)();
-            g.current = None;
+        let v = crate::context::with_current_track(this as Rc<dyn TrackDyn>, || (self.compute)());
 
-            let changed = if self.inited.get() {
-                self.last.borrow().as_ref() != Some(&v)
-            } else {
-                true
-            };
-            if changed {
-                if let Some(f) = self.on_change.borrow_mut().as_mut() {
-                    f(&v);
-                }
-                *self.last.borrow_mut() = Some(v);
-                self.inited.set(true);
+        let changed = if self.inited.get() {
+            self.last.borrow().as_ref() != Some(&v)
+        } else {
+            true
+        };
+        if changed {
+            if let Some(f) = self.on_change.borrow_mut().as_mut() {
+                f(&v);
             }
-        });
+            *self.last.borrow_mut() = Some(v);
+            self.inited.set(true);
+        }
     }
 }
 
