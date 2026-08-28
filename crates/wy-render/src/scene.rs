@@ -149,7 +149,7 @@ mod tests {
     fn scene_rect_stores_geometry_and_color() {
         let mut s = Scene::new();
         s.fill_rect(Rect::new(1.0, 2.0, 3.0, 4.0), 0x11223344);
-        let first = s.iter().cloned().next().expect("one primitive");
+        let first = s.iter().next().cloned().expect("one primitive");
         match first {
             Primitive::Rect { rect, color } => {
                 assert_eq!(rect, Rect::new(1.0, 2.0, 3.0, 4.0));

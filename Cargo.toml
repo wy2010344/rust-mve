@@ -21,9 +21,6 @@ vello = "0.10"
 wgpu = "24"
 winit = "0.30"
 
-# 布局
-taffy = "0.7"
-
 # 文本
 parley = "0.11"
 swash = "0.2"

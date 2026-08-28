@@ -107,9 +107,11 @@ ref-count 重建更精细；relay map 快照比对优于 Floem 的简单信号�
 | **Floem** | Taffy | 通用 Flexbox/Grid |
 | **Taffy** | — | 独立库，Bevy/GPUI/Floem/Dioxus 共用 |
 
-**结论**：Taffy 是生态事实标准，wy-ui 直接复用，避免重复造轮子。
-早期版本可保留自研 flex 作为 fast-path（借鉴 Kotlin 版 FlexLayout），
-V2 再全面切换到 Taffy 的完整 CSS 能力。
+**结论**：Taffy 是生态的完整 CSS 布局标准（Flexbox/Grid），但它是**二维盒模型引擎**，
+与 Kotlin `wy-helper` 的**一维布局模型**（只回答"子节点在某一轴上的位置/尺寸"两个标量）
+不是同一生态位。由于本项目直接复刻 Kotlin `wy-helper`，`wy-layout` 最终**采用自研一维布局**
+（Flex/Stack/Absolute + grow/gap/justify），不依赖 Taffy——布局足够轻量、行为可预测，
+不必承受 CSS 模型的复杂度。若未来确有二维/Flexbox/Grid 需求，可在上层按需引入 Taffy。
 
 ### 3.4 文本层
 
@@ -164,7 +166,7 @@ V2 再全面切换到 Taffy 的完整 CSS 能力。
 | 层 | 方案 | 理由 |
 |---|---|---|
 | 渲染 | **Vello + wgpu** | 成熟 GPU 2D，纯 Rust，自动批处理 |
-| 布局 | **Taffy**（V2 全量，V1 可自研 fast-path） | 生态标准，Flexbox/Grid |
+| 布局 | **自研一维**（Flex/Stack/Absolute，复刻 Kotlin 模型） | 与 Kotlin 一致、轻量可预测 |
 | 文本 | **Parley + swash + fontique** | 同源 Linebender，集成顺畅 |
 | 窗口 | **winit** | 跨平台标准事件循环 |
 | 无障碍 | **AccessKit** | 屏幕阅读器/语音支持 |

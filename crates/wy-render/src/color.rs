@@ -136,7 +136,7 @@ mod tests {
         let v = 0x11223344;
         let c = Color::from_u32(v);
         assert_eq!(c.to_u32(), v);
-        assert_eq!(Color::from(c), c);
+        assert_eq!(c, Color::from_u32(v));
         assert_eq!(u32::from(c), v);
     }
 

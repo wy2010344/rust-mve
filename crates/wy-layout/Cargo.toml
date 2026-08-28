@@ -1,9 +1,8 @@
 [package]
 name = "wy-layout"
-description = "布局引擎：Flex/Stack/Absolute，基于 Taffy"
+description = "布局引擎：Flex/Stack/Absolute 一维布局（复刻 Kotlin wy-helper 布局模型）"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-taffy = { workspace = true }

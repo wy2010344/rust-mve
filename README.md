@@ -29,7 +29,7 @@
 ┌──────▼──────┐ ┌─────▼─────┐ ┌─────▼─────┐
 │  wy-signal  │ │ wy-layout │ │ wy-text   │
 │  Signal     │ │ Flex/Stack│ │ Parley    │
-│  Memo       │ │ Taffy     │ │ shaping   │
+│  Memo       │ │ 一维布局  │ │ shaping   │
 │  TrackSignal│ │           │ │ 缓存      │
 └─────────────┘ └───────────┘ └───────────┘
        │              │              │
@@ -49,7 +49,7 @@
 | 层 | 方案 | 说明 |
 |---|---|---|
 | 渲染 | **Vello** + wgpu | GPU compute shader 2D 渲染，纯 Rust |
-| 布局 | **Taffy** | Flexbox / Grid，GPUI/Iced/Dioxus 共用 |
+| 布局 | **自研一维** | Flex/Stack/Absolute（复刻 Kotlin wy-helper 模型），轻量可预测 |
 | 文本 | **Parley** + swash | 富文本排版 + 字体光栅化，linebender 生态 |
 | 窗口 | **winit** | 跨平台窗口抽象，事实标准 |
 | 无障碍 | **AccessKit** | 屏幕阅读器 / 语音控制支持 |
@@ -121,7 +121,7 @@ wy-ui/
 ├── Cargo.toml             # workspace 根配置
 ├── crates/
 │   ├── wy-signal/         # 信号系统
-│   ├── wy-layout/         # 布局引擎（Taffy 封装）
+│   ├── wy-layout/         # 布局引擎（自研一维布局）
 │   ├── wy-render/         # 渲染管线（Scene + Widget trait）
 │   ├── wy-text/           # 文本排版（Parley 封装）
 │   ├── wy-engine/         # 引擎整合（事件/焦点/无障碍）

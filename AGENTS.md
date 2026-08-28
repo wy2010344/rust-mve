@@ -176,7 +176,7 @@
 | Crate | 作用 |
 |---|---|
 | `wy-signal` | 信号系统：Signal、Memo、TrackSignal、批量更新 |
-| `wy-layout` | 布局引擎：Flex/Stack/Absolute，基于 Taffy |
+| `wy-layout` | 布局引擎：Flex/Stack/Absolute 一维布局（复刻 Kotlin wy-helper 模型，不依赖 Taffy） |
 | `wy-render` | 渲染管线：Scene 中间层、Widget trait、Vello 集成 |
 | `wy-text` | 文本排版：Parley/shaping、字体缓存、行布局缓存 |
 | `wy-engine` | 引擎整合：事件系统、焦点管理、无障碍（AccessKit） |
