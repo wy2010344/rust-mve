@@ -8,10 +8,12 @@
 
 mod color;
 mod draw_context;
+pub mod event;
 mod math;
 mod scene;
 pub mod vello_executor;
-mod widget;
+pub mod widget;
+pub mod widget_tree;
 
 pub use color::Color;
 pub use draw_context::DrawContext;

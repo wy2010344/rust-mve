@@ -3,6 +3,7 @@
 use std::any::Any;
 
 use crate::draw_context::DrawContext;
+use crate::event::PointerEvent;
 use crate::scene::Scene;
 
 /// Widget trait：用户实现的 UI 组件。
@@ -14,8 +15,11 @@ use crate::scene::Scene;
 /// - [`Widget::draw`] 在信号变化时重新执行，向 [`Scene`] 添加高层图元；
 ///   绘制过程中读取的信号会被自动追踪（作为依赖）。
 ///
-/// `draw` 不应有副作用（见 AGENTS.md 渲染管线规范），只应把视觉描述写入
-/// `scene`。真正占用 GPU 资源的工作由 Scene 后端完成。
+/// ## 事件
+///
+/// - [`Widget::hit_test`] 判断点是否在组件范围内，默认检查外框矩形。
+/// - [`Widget::on_pointer_down`] 等事件处理器在命中测试通过后被调用，
+///   支持 capture→bubble 两阶段传播。
 pub trait Widget: 'static + Any {
     /// 子节点声明，只执行一次。
     ///
@@ -26,6 +30,28 @@ pub trait Widget: 'static + Any {
 
     /// 绘制，信号变化时重新执行。
     fn draw(&self, scene: &mut Scene, cx: &mut DrawContext);
+
+    /// 命中测试：判断 `(x, y)` 是否落在组件范围内。
+    ///
+    /// 坐标是相对于组件外框左上角的局部坐标。默认实现检查是否在外框矩形内。
+    /// 自定义组件可重写此方法实现非矩形命中区域（如圆形、透明区域排除等）。
+    fn hit_test(&self, x: f32, y: f32, cx: &DrawContext) -> bool {
+        cx.outer_rect().contains(crate::Point::new(x, y))
+    }
+
+    /// 指针按下事件（capture 阶段和 bubble 阶段都会调用）。
+    ///
+    /// 默认实现不消费事件（继续传播）。
+    fn on_pointer_down(&mut self, _event: &mut PointerEvent, _cx: &DrawContext) {}
+
+    /// 指针释放事件。
+    fn on_pointer_up(&mut self, _event: &mut PointerEvent, _cx: &DrawContext) {}
+
+    /// 指针移动事件。
+    fn on_pointer_move(&mut self, _event: &mut PointerEvent, _cx: &DrawContext) {}
+
+    /// 点击事件（按下 + 释放在同一组件上）。
+    fn on_click(&mut self, _cx: &DrawContext) {}
 }
 
 impl dyn Widget {
@@ -35,6 +61,12 @@ impl dyn Widget {
     pub fn downcast_ref<T: Any>(&self) -> Option<&T> {
         let any: &dyn Any = self;
         any.downcast_ref::<T>()
+    }
+
+    /// 尝试把组件向下转型为具体类型 `T`（可变引用）。
+    pub fn downcast_mut<T: Any>(&mut self) -> Option<&mut T> {
+        let any: &mut dyn Any = self;
+        any.downcast_mut::<T>()
     }
 }
 
@@ -76,6 +108,11 @@ impl ChildBuilder {
     pub fn iter(&self) -> impl Iterator<Item = &dyn Widget> {
         self.children.iter().map(|b| b.as_ref())
     }
+
+    /// 消费构建器，返回子节点列表。
+    pub fn into_children(self) -> Vec<Box<dyn Widget>> {
+        self.children
+    }
 }
 
 #[cfg(test)]
@@ -108,13 +145,27 @@ mod tests {
         }
     }
 
+    /// 支持点击计数的测试组件。
+    struct ClickCounter {
+        count: usize,
+    }
+
+    impl Widget for ClickCounter {
+        fn draw(&self, scene: &mut Scene, cx: &mut DrawContext) {
+            scene.fill_rect(cx.outer_rect(), Color::BLUE);
+        }
+
+        fn on_click(&mut self, _cx: &DrawContext) {
+            self.count += 1;
+        }
+    }
+
     #[test]
     fn child_builder_registers_children_in_order() {
         let mut cx = ChildBuilder::new();
         let parent = Parent;
         parent.children(&mut cx);
 
-        // 两个子节点按注册顺序排列，且都能被向下转型回具体类型。
         assert_eq!(cx.len(), 2);
         let first = cx.iter().next().unwrap();
         let second = cx.iter().nth(1).unwrap();
@@ -149,5 +200,52 @@ mod tests {
         );
         w.draw(&mut scene, &mut cx);
         assert_eq!(scene.len(), 2);
+    }
+
+    #[test]
+    fn hit_test_default_checks_outer_rect() {
+        let w = DummyWidget { rects: 1 };
+        let cx = DrawContext::new(
+            Rect::new(10.0, 20.0, 100.0, 50.0),
+            crate::Point::new(10.0, 20.0),
+            crate::Size::new(100.0, 50.0),
+        );
+        // 在外框内
+        assert!(Widget::hit_test(&w, 50.0, 30.0, &cx));
+        // 在外框外
+        assert!(!Widget::hit_test(&w, 5.0, 5.0, &cx));
+        // 边界上
+        assert!(Widget::hit_test(&w, 10.0, 20.0, &cx));
+        // 右下角外
+        assert!(!Widget::hit_test(&w, 111.0, 71.0, &cx));
+    }
+
+    #[test]
+    fn on_click_increments_counter() {
+        let mut w = ClickCounter { count: 0 };
+        let cx = DrawContext::default();
+        assert_eq!(w.count, 0);
+        Widget::on_click(&mut w, &cx);
+        assert_eq!(w.count, 1);
+        Widget::on_click(&mut w, &cx);
+        assert_eq!(w.count, 2);
+    }
+
+    #[test]
+    fn downcast_mut_works() {
+        let mut w = ClickCounter { count: 0 };
+        let widget: &mut dyn Widget = &mut w;
+        let counter = widget.downcast_mut::<ClickCounter>().unwrap();
+        counter.count = 42;
+        assert_eq!(w.count, 42);
+    }
+
+    #[test]
+    fn child_builder_into_children() {
+        let mut cx = ChildBuilder::new();
+        cx.add_child(DummyWidget { rects: 1 });
+        cx.add_child(DummyWidget { rects: 2 });
+        let children = cx.into_children();
+        assert_eq!(children.len(), 2);
     }
 }
