@@ -51,6 +51,8 @@ pub struct WidgetTree {
     nodes: Vec<TreeNode>,
     /// 根节点索引。
     root: usize,
+    /// 当前获得焦点的节点索引。
+    focused: Option<usize>,
 }
 
 impl WidgetTree {
@@ -62,6 +64,7 @@ impl WidgetTree {
         let mut tree = WidgetTree {
             nodes: Vec::new(),
             root: 0,
+            focused: None,
         };
 
         // 创建根节点
@@ -195,12 +198,41 @@ impl WidgetTree {
         true
     }
 
+    /// 获取当前焦点节点索引。
+    pub fn focused(&self) -> Option<usize> {
+        self.focused
+    }
+
+    /// 设置焦点到指定节点（如果该节点可聚焦）。
+    pub fn set_focus(&mut self, idx: usize) -> bool {
+        if idx < self.nodes.len() && self.nodes[idx].widget.focusable() {
+            self.focused = Some(idx);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 清除焦点。
+    pub fn clear_focus(&mut self) {
+        self.focused = None;
+    }
+
     /// 分发指针按下事件（capture→bubble 两阶段）。
     ///
     /// 先从根到叶子（capture），再从叶子到根（bubble）。
+    /// 如果命中路径中有可聚焦组件，自动设置焦点。
     /// 返回是否有人消费了事件。
     pub fn dispatch_pointer_down(&mut self, x: f32, y: f32) -> bool {
         if let Some(path) = self.hit_test(x, y) {
+            // 点击聚焦：从叶子到根找到最深层的 focusable 组件
+            for &idx in path.iter().rev() {
+                if self.nodes[idx].widget.focusable() {
+                    self.focused = Some(idx);
+                    break;
+                }
+            }
+
             let mut event = PointerEvent::new(PointerType::Down, x, y);
 
             // Capture 阶段：root → leaf

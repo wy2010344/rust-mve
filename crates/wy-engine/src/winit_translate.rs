@@ -80,6 +80,22 @@ pub fn translate_modifiers(state: &winit::keyboard::ModifiersState) -> u32 {
     m
 }
 
+/// 从 winit `KeyEvent` + `ModifiersState` 翻译为统一 [`KeyEvent`]。
+pub fn translate_key_event(
+    key_event: &winit::event::KeyEvent,
+    modifiers: winit::keyboard::ModifiersState,
+) -> Option<crate::event::KeyEvent> {
+    let key = translate_key(&key_event.logical_key);
+    let pressed = matches!(key_event.state, winit::event::ElementState::Pressed);
+    let m = translate_modifiers(&modifiers);
+    Some(crate::event::KeyEvent::new(key, pressed).with_modifiers(
+        m & 0x2 != 0,
+        m & 0x1 != 0,
+        m & 0x4 != 0,
+        m & 0x8 != 0,
+    ))
+}
+
 /// 将 winit `Key` 翻译为统一 `Key` 枚举。
 fn translate_key(key: &winit::keyboard::Key) -> Key {
     use winit::keyboard::{Key as WKey, NamedKey};

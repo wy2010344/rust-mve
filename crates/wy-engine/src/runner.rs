@@ -82,6 +82,11 @@ pub trait WyApp {
     /// 窗口大小改变时调用（可选）。
     fn on_resize(&mut self, _width: f32, _height: f32) {}
 
+    /// 处理键盘事件（可选）。
+    ///
+    /// Tab/Shift+Tab 用于焦点遍历，其他按键可自定义处理。
+    fn handle_key_event(&mut self, _event: &crate::event::KeyEvent) {}
+
     /// 提供无障碍树更新（可选）。
     ///
     /// 每次渲染后调用。返回 `Some(TreeUpdate)` 会更新平台无障碍树。
@@ -89,6 +94,11 @@ pub trait WyApp {
     fn accessibility_update(&mut self) -> Option<accesskit::TreeUpdate> {
         None
     }
+
+    /// 处理无障碍动作请求（可选）。
+    ///
+    /// 当屏幕阅读器等辅助技术触发动作时调用（如点击按钮、聚焦输入框）。
+    fn handle_accessibility_action(&mut self, _request: accesskit::ActionRequest) {}
 }
 
 /// 启动应用事件循环。
@@ -279,6 +289,14 @@ impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
             WindowEvent::RedrawRequested => {
                 self.render();
             }
+            WindowEvent::KeyboardInput { event, .. } => {
+                // 将 winit 键盘事件翻译为统一 KeyEvent 并转发给应用
+                if let Some(key_event) =
+                    crate::winit_translate::translate_key_event(event, self.modifiers)
+                {
+                    self.app.handle_key_event(&key_event);
+                }
+            }
             _ => {}
         }
     }
@@ -287,12 +305,7 @@ impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
         match event {
             AppEvent::AccessKit(ak_event) => match ak_event.window_event {
                 accesskit_winit::WindowEvent::ActionRequested(request) => {
-                    // 将 AccessKit 动作请求转发给应用
-                    log::debug!(
-                        "AccessKit action: {:?} on node {:?}",
-                        request.action,
-                        request.target_node
-                    );
+                    self.app.handle_accessibility_action(request);
                 }
                 accesskit_winit::WindowEvent::InitialTreeRequested => {
                     // 平台请求初始无障碍树

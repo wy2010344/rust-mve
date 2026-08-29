@@ -52,6 +52,22 @@ pub trait Widget: 'static + Any {
 
     /// 点击事件（按下 + 释放在同一组件上）。
     fn on_click(&mut self, _cx: &DrawContext) {}
+
+    /// 是否可获得键盘焦点。
+    ///
+    /// 返回 `true` 的组件会参与 Tab 遍历和点击聚焦。默认 `false`。
+    fn focusable(&self) -> bool {
+        false
+    }
+
+    /// 无障碍节点描述（角色、名称等）。
+    ///
+    /// 返回 `Some((role, name))` 表示该组件应出现在无障碍树中。
+    /// `role` 和 `name` 是简化表示，完整映射由 `wy-engine` 的 `AccessibilityBridge` 完成。
+    /// 默认返回 `None`（不出现在无障碍树中）。
+    fn accessibility(&self) -> Option<(&str, Option<&str>)> {
+        None
+    }
 }
 
 impl dyn Widget {
