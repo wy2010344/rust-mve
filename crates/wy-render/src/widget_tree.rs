@@ -170,6 +170,46 @@ impl WidgetTree {
         }
     }
 
+    /// 自动布局：垂直堆叠子节点。
+    ///
+    /// 给定根节点的宽度和高度，递归地为所有节点计算布局。
+    /// 子节点按垂直方向堆叠，每个子节点的高度由 `child_height` 闭包决定。
+    ///
+    /// # 参数
+    /// - `width`：根节点宽度
+    /// - `height`：根节点高度
+    /// - `child_height`：给定节点索引，返回该节点的期望高度
+    pub fn compute_layout<F>(&mut self, width: f32, height: f32, child_height: F)
+    where
+        F: Fn(usize) -> f32,
+    {
+        self.compute_node_layout(self.root, 0.0, 0.0, width, height, &child_height);
+    }
+
+    fn compute_node_layout<F>(
+        &mut self,
+        idx: usize,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        child_height: &F,
+    ) where
+        F: Fn(usize) -> f32,
+    {
+        // 设置当前节点布局
+        self.nodes[idx].layout = Rect::new(x, y, width, height);
+
+        // 垂直堆叠子节点
+        let mut child_y = 0.0f32;
+        let children = self.nodes[idx].children.clone();
+        for &child_idx in &children {
+            let h = child_height(child_idx);
+            self.compute_node_layout(child_idx, 0.0, child_y, width, h, child_height);
+            child_y += h;
+        }
+    }
+
     /// 命中测试：给定屏幕坐标，返回从根到叶子的命中路径。
     ///
     /// 返回 `Some(path)` 其中 `path[0]` 是根节点索引，`path.last()` 是最深层命中节点。
@@ -526,5 +566,40 @@ mod tests {
         ]);
         assert_eq!(tree.layout(0), Rect::new(0.0, 0.0, 200.0, 200.0));
         assert_eq!(tree.layout(1), Rect::new(10.0, 10.0, 50.0, 50.0));
+    }
+
+    #[test]
+    fn compute_layout_vertical_stacking() {
+        let mut tree = WidgetTree::new(Panel);
+        // Panel 有 2 个子节点（Button × 2）
+        assert_eq!(tree.len(), 3);
+
+        // 每个按钮高 40px
+        tree.compute_layout(200.0, 300.0, |idx| {
+            if idx == 0 {
+                300.0 // 根节点高度
+            } else {
+                40.0 // 子节点高度
+            }
+        });
+
+        // 根节点
+        assert_eq!(tree.layout(0), Rect::new(0.0, 0.0, 200.0, 300.0));
+        // 第一个子节点：y=0
+        assert_eq!(tree.layout(1), Rect::new(0.0, 0.0, 200.0, 40.0));
+        // 第二个子节点：y=40
+        assert_eq!(tree.layout(2), Rect::new(0.0, 40.0, 200.0, 40.0));
+    }
+
+    #[test]
+    fn compute_layout_empty_tree() {
+        struct Leaf;
+        impl crate::Widget for Leaf {
+            fn draw(&self, _s: &mut crate::Scene, _cx: &mut crate::DrawContext) {}
+        }
+
+        let mut tree = WidgetTree::new(Leaf);
+        tree.compute_layout(100.0, 100.0, |_| 20.0);
+        assert_eq!(tree.layout(0), Rect::new(0.0, 0.0, 100.0, 100.0));
     }
 }
