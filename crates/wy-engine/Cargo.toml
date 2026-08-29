@@ -12,3 +12,7 @@ wy-render = { workspace = true }
 wy-text = { workspace = true }
 accesskit = { workspace = true }
 log = { workspace = true }
+winit = { workspace = true }
+wgpu = { workspace = true }
+vello = { workspace = true }
+pollster = { workspace = true }

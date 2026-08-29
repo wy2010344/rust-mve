@@ -10,6 +10,7 @@ mod color;
 mod draw_context;
 mod math;
 mod scene;
+pub mod vello_executor;
 mod widget;
 
 pub use color::Color;

@@ -18,7 +18,7 @@ wy-engine = { path = "crates/wy-engine" }
 
 # 渲染
 vello = "0.10"
-wgpu = "24"
+wgpu = "29"
 winit = "0.30"
 
 # 文本
@@ -32,6 +32,7 @@ accesskit = "0.24"
 # 工具
 log = "0.4"
 thiserror = "2"
+pollster = "0.4"
 
 [profile.release]
 lto = "fat"
