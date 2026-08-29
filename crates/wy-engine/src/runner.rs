@@ -73,6 +73,8 @@ pub fn run(app: impl WyApp + 'static) -> Result<(), Box<dyn std::error::Error>> 
         size: (800, 600),
         modifiers: ModifiersState::empty(),
         cursor_pos: (0.0, 0.0),
+        font_cx: parley::FontContext::new(),
+        layout_cx: parley::LayoutContext::new(),
     };
 
     event_loop.run_app(&mut state)?;
@@ -91,6 +93,8 @@ struct AppState<A: WyApp> {
     size: (u32, u32),
     modifiers: ModifiersState,
     cursor_pos: (f32, f32),
+    font_cx: parley::FontContext,
+    layout_cx: parley::LayoutContext,
 }
 
 impl<A: WyApp> ApplicationHandler for AppState<A> {
@@ -237,7 +241,12 @@ impl<A: WyApp> AppState<A> {
 
         // 2. 翻译到 Vello Scene
         let mut vello_scene = vello::Scene::new();
-        vello_executor::execute_scene(&scene, &mut vello_scene);
+        vello_executor::execute_scene(
+            &scene,
+            &mut vello_scene,
+            &mut self.font_cx,
+            &mut self.layout_cx,
+        );
 
         // 3. 获取 surface texture
         let surface_texture = match surface.get_current_texture() {

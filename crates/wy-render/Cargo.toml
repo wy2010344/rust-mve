@@ -10,4 +10,6 @@ wy-signal = { workspace = true }
 wy-layout = { workspace = true }
 vello = { workspace = true }
 wgpu = { workspace = true }
+parley = { workspace = true }
+fontique = { workspace = true }
 log = { workspace = true }

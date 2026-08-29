@@ -11,6 +11,7 @@ wy-layout = { workspace = true }
 wy-render = { workspace = true }
 wy-text = { workspace = true }
 accesskit = { workspace = true }
+parley = { workspace = true }
 log = { workspace = true }
 winit = { workspace = true }
 wgpu = { workspace = true }
