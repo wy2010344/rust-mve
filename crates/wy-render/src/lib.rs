@@ -14,6 +14,7 @@ mod scene;
 pub mod vello_executor;
 pub mod widget;
 pub mod widget_tree;
+pub mod widgets;
 
 pub use color::Color;
 pub use draw_context::DrawContext;
