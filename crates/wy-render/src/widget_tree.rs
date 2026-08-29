@@ -336,6 +336,27 @@ impl WidgetTree {
         self.focused = None;
     }
 
+    /// 获取焦点组件的可变引用（如果有）。
+    ///
+    /// 用于在应用层转发键盘事件到焦点组件（如 TextInput）。
+    /// ```ignore
+    /// if let Some(widget) = tree.focused_widget_mut() {
+    ///     if let Some(input) = widget.downcast_mut::<TextInputWidget>() {
+    ///         input.handle_key(&key_event);
+    ///     }
+    /// }
+    /// ```
+    pub fn focused_widget_mut(&mut self) -> Option<&mut dyn crate::widget::Widget> {
+        let idx = self.focused?;
+        Some(self.nodes[idx].widget.as_mut())
+    }
+
+    /// 获取焦点组件的不可变引用（如果有）。
+    pub fn focused_widget(&self) -> Option<&dyn crate::widget::Widget> {
+        let idx = self.focused?;
+        Some(self.nodes[idx].widget.as_ref())
+    }
+
     /// 分发指针按下事件（capture→bubble 两阶段）。
     ///
     /// 先从根到叶子（capture），再从叶子到根（bubble）。
@@ -507,6 +528,10 @@ mod tests {
 
         fn on_click(&mut self, _cx: &DrawContext) {
             self.clicked = true;
+        }
+
+        fn focusable(&self) -> bool {
+            true
         }
     }
 
@@ -715,5 +740,32 @@ mod tests {
         tree.set_layout(0, Rect::new(0.0, 0.0, 100.0, 100.0));
         let mut scene = crate::Scene::new();
         tree.draw_scene(&mut scene);
+    }
+
+    #[test]
+    fn focused_widget_returns_none_when_no_focus() {
+        let tree = WidgetTree::new(Panel);
+        assert!(tree.focused_widget().is_none());
+    }
+
+    #[test]
+    fn focused_widget_mut_returns_focus() {
+        let (mut tree, _, btn1) = build_test_tree();
+        tree.set_focus(btn1);
+        assert!(tree.focused_widget_mut().is_some());
+        assert!(tree.focused_widget().is_some());
+    }
+
+    #[test]
+    fn focused_widget_can_downcast() {
+        let (mut tree, _, btn1) = build_test_tree();
+        tree.set_focus(btn1);
+        let widget = tree.focused_widget_mut().unwrap();
+        let button = widget.downcast_mut::<Button>();
+        assert!(button.is_some());
+        button.unwrap().clicked = true;
+        // 验证修改生效
+        let widget = tree.focused_widget().unwrap();
+        assert!(widget.downcast_ref::<Button>().unwrap().clicked);
     }
 }
