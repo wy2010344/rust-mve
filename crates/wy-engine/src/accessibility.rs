@@ -3,6 +3,11 @@
 //! 对应 Kotlin `AccessibilityBridge`。AccessKit 是跨平台无障碍 API，
 //! 本模块负责维护 widget 节点到 AccessKit 节点的映射，并生成 `TreeUpdate`。
 
+use accesskit::{
+    Action as AccessKitAction, Node as AccessKitNode, NodeId, Role as AccessKitRole,
+    Toggled as AccessKitToggled, Tree, TreeId, TreeUpdate,
+};
+
 /// 无障碍节点的角色。
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum AccessRole {
@@ -187,6 +192,73 @@ impl AccessibilityBridge {
 impl Default for AccessibilityBridge {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl AccessibilityBridge {
+    /// 将内部无障碍树转换为 AccessKit `TreeUpdate`。
+    ///
+    /// `focused_id` 是当前获得键盘焦点的节点 ID（无焦点时传根节点）。
+    pub fn to_tree_update(&self, focused_id: usize) -> TreeUpdate {
+        let root_id = self.root_id.unwrap_or(0);
+        let tree_focus = NodeId(focused_id as u64);
+
+        let mut nodes = Vec::new();
+        for node in &self.nodes {
+            let ak_node = self.convert_node(node);
+            nodes.push((NodeId(node.id as u64), ak_node));
+        }
+
+        TreeUpdate {
+            nodes,
+            tree: Some(Tree::new(NodeId(root_id as u64))),
+            tree_id: TreeId::ROOT,
+            focus: tree_focus,
+        }
+    }
+
+    fn convert_node(&self, node: &AccessNode) -> AccessKitNode {
+        let role = match node.role {
+            AccessRole::Unknown => AccessKitRole::Unknown,
+            AccessRole::Button => AccessKitRole::Button,
+            AccessRole::Label => AccessKitRole::Label,
+            AccessRole::TextInput => AccessKitRole::TextInput,
+            AccessRole::Group => AccessKitRole::GenericContainer,
+            AccessRole::ScrollArea => AccessKitRole::ScrollView,
+            AccessRole::Checkbox => AccessKitRole::CheckBox,
+            AccessRole::RadioButton => AccessKitRole::RadioButton,
+            AccessRole::ComboBox => AccessKitRole::ComboBox,
+            AccessRole::Link => AccessKitRole::Link,
+            AccessRole::Image => AccessKitRole::Image,
+            AccessRole::Heading => AccessKitRole::Heading,
+            AccessRole::Paragraph => AccessKitRole::Paragraph,
+            AccessRole::List => AccessKitRole::List,
+            AccessRole::ListItem => AccessKitRole::ListItem,
+        };
+
+        let mut ak_node = AccessKitNode::new(role);
+
+        if let Some(name) = &node.name {
+            ak_node.set_label(name.clone());
+        }
+        if let Some(desc) = &node.description {
+            ak_node.set_description(desc.clone());
+        }
+        if node.focusable {
+            ak_node.add_action(AccessKitAction::Focus);
+        }
+        if let Some(selected) = node.selected {
+            ak_node.set_toggled(if selected {
+                AccessKitToggled::True
+            } else {
+                AccessKitToggled::False
+            });
+        }
+
+        let children: Vec<NodeId> = node.children.iter().map(|&id| NodeId(id as u64)).collect();
+        ak_node.set_children(children);
+
+        ak_node
     }
 }
 

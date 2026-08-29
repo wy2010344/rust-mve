@@ -28,6 +28,7 @@ fontique = "0.11"
 
 # 无障碍
 accesskit = "0.24"
+accesskit_winit = "0.33"
 
 # 工具
 log = "0.4"

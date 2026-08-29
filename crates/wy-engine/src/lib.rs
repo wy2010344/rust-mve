@@ -8,6 +8,8 @@
 //! - [`AccessibilityBridge`] — Widget 树到 AccessKit 的映射
 //! - [`runner`] — winit + wgpu + Vello 应用运行器
 
+pub use accesskit;
+
 mod accessibility;
 mod event;
 mod focus;

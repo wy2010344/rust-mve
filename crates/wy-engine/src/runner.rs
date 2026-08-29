@@ -35,6 +35,18 @@ use winit::window::{Window, WindowId};
 
 use wy_render::{vello_executor, Scene};
 
+/// 应用事件类型（通过 EventLoopProxy 分发）。
+pub enum AppEvent {
+    /// AccessKit 无障碍事件。
+    AccessKit(accesskit_winit::Event),
+}
+
+impl From<accesskit_winit::Event> for AppEvent {
+    fn from(event: accesskit_winit::Event) -> Self {
+        AppEvent::AccessKit(event)
+    }
+}
+
 /// 用户实现的应用接口。
 ///
 /// 实现此 trait 即可获得完整的 winit + wgpu + Vello 渲染管线。
@@ -69,6 +81,14 @@ pub trait WyApp {
 
     /// 窗口大小改变时调用（可选）。
     fn on_resize(&mut self, _width: f32, _height: f32) {}
+
+    /// 提供无障碍树更新（可选）。
+    ///
+    /// 每次渲染后调用。返回 `Some(TreeUpdate)` 会更新平台无障碍树。
+    /// 使用 `AccessibilityBridge::to_tree_update()` 生成更新。
+    fn accessibility_update(&mut self) -> Option<accesskit::TreeUpdate> {
+        None
+    }
 }
 
 /// 启动应用事件循环。
@@ -76,8 +96,10 @@ pub trait WyApp {
 /// 创建窗口、初始化 wgpu/Vello，然后运行渲染循环。
 /// 此函数阻塞直到窗口关闭。
 pub fn run(app: impl WyApp + 'static) -> Result<(), Box<dyn std::error::Error>> {
-    let event_loop = EventLoop::new()?;
+    let event_loop = EventLoop::<AppEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
+
+    let proxy = event_loop.create_proxy();
 
     let mut state = AppState {
         app,
@@ -93,6 +115,8 @@ pub fn run(app: impl WyApp + 'static) -> Result<(), Box<dyn std::error::Error>> 
         font_cx: parley::FontContext::new(),
         layout_cx: parley::LayoutContext::new(),
         needs_redraw: Rc::new(Cell::new(true)),
+        access_adapter: None,
+        proxy,
     };
 
     event_loop.run_app(&mut state)?;
@@ -114,21 +138,35 @@ struct AppState<A: WyApp> {
     font_cx: parley::FontContext,
     layout_cx: parley::LayoutContext,
     needs_redraw: Rc<Cell<bool>>,
+    access_adapter: Option<accesskit_winit::Adapter>,
+    proxy: winit::event_loop::EventLoopProxy<AppEvent>,
 }
 
-impl<A: WyApp> ApplicationHandler for AppState<A> {
+impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
         }
 
-        // 创建窗口
+        // 创建窗口（先隐藏，以便 AccessKit adapter 在显示前创建）
         let attrs = Window::default_attributes()
             .with_title("wy-ui")
-            .with_inner_size(winit::dpi::LogicalSize::new(800.0, 600.0));
+            .with_inner_size(winit::dpi::LogicalSize::new(800.0, 600.0))
+            .with_visible(false);
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
         let size = window.inner_size();
         self.size = (size.width, size.height);
+
+        // 创建 AccessKit adapter（必须在窗口显示前）
+        let adapter = accesskit_winit::Adapter::with_event_loop_proxy(
+            event_loop,
+            &window,
+            self.proxy.clone(),
+        );
+        self.access_adapter = Some(adapter);
+
+        // 显示窗口
+        window.set_visible(true);
 
         // 初始化 wgpu
         let mut instance_desc = wgpu::InstanceDescriptor::new_without_display_handle();
@@ -204,6 +242,11 @@ impl<A: WyApp> ApplicationHandler for AppState<A> {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        // 转发事件到 AccessKit adapter（必须在应用处理前）
+        if let (Some(window), Some(adapter)) = (&self.window, &mut self.access_adapter) {
+            adapter.process_event(window, &event);
+        }
+
         // 让应用有机会处理事件
         if self.app.handle_event(&event) {
             return;
@@ -237,6 +280,38 @@ impl<A: WyApp> ApplicationHandler for AppState<A> {
                 self.render();
             }
             _ => {}
+        }
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: AppEvent) {
+        match event {
+            AppEvent::AccessKit(ak_event) => match ak_event.window_event {
+                accesskit_winit::WindowEvent::ActionRequested(request) => {
+                    // 将 AccessKit 动作请求转发给应用
+                    log::debug!(
+                        "AccessKit action: {:?} on node {:?}",
+                        request.action,
+                        request.target_node
+                    );
+                }
+                accesskit_winit::WindowEvent::InitialTreeRequested => {
+                    // 平台请求初始无障碍树
+                    if let Some(adapter) = &mut self.access_adapter {
+                        adapter.update_if_active(|| {
+                            // 返回空树，应用可通过 AccessibilityBridge 提供完整树
+                            accesskit::TreeUpdate {
+                                nodes: vec![],
+                                tree: Some(accesskit::Tree::new(accesskit::NodeId(0))),
+                                tree_id: accesskit::TreeId::ROOT,
+                                focus: accesskit::NodeId(0),
+                            }
+                        });
+                    }
+                }
+                accesskit_winit::WindowEvent::AccessibilityDeactivated => {
+                    log::debug!("AccessKit accessibility deactivated");
+                }
+            },
         }
     }
 
@@ -310,6 +385,13 @@ impl<A: WyApp> AppState<A> {
             }
             Err(e) => {
                 log::error!("Vello render error: {e}");
+            }
+        }
+
+        // 5. 更新无障碍树（如果有变化）
+        if let Some(tree_update) = self.app.accessibility_update() {
+            if let Some(adapter) = &mut self.access_adapter {
+                adapter.update_if_active(|| tree_update);
             }
         }
 
