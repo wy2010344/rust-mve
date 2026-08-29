@@ -1,161 +1,126 @@
-//! 计数器示例：最简单的信号驱动 UI。
+//! 计数器示例：信号驱动的 GUI 应用。
 //!
 //! 运行：`cargo run -p wy-app --example counter`
 //!
-//! ```text
-//! ┌──────────────────┐
-//! │    Count: 0      │
-//! │  [−]  [+]        │
-//! └──────────────────┘
-//! ```
+//! 演示 WyApp trait + Signal + TrackEffect + 按需重绘。
 
-use wy_render::{Color, Point, Scene};
-use wy_signal::{GetValue, SetValue, Signal};
+use std::rc::Rc;
+use wy_engine::runner::{run, WyApp};
+use wy_render::{Color, Rect, Scene};
+use wy_signal::{create_effect, GetValue, SetValue, Signal};
 
-/// 计数器 Widget：用信号驱动，每帧读取 count 并绘制。
-struct Counter {
+/// 计数器应用。
+struct CounterApp {
     count: Signal<i32>,
 }
 
-impl Counter {
-    /// 创建计数器，返回 counter 和 increment/decrement 闭包。
-    fn new() -> (Self, impl Fn(), impl Fn()) {
-        let count = Signal::new(0);
-        let inc = count.clone();
-        let dec = count.clone();
-        (
-            Self { count },
-            move || inc.set(inc.get() + 1),
-            move || dec.set(dec.get() - 1),
-        )
+impl CounterApp {
+    fn new() -> Self {
+        Self {
+            count: Signal::new(0),
+        }
+    }
+}
+
+impl WyApp for CounterApp {
+    fn setup(&mut self, request_redraw: Rc<dyn Fn()>) {
+        // 当 count 变化时，触发重绘
+        let count = self.count.clone();
+        create_effect(move || {
+            let _ = count.get(); // 注册依赖
+            request_redraw();
+        });
     }
 
-    /// 绘制计数器到 Scene。
-    fn draw(&self, scene: &mut Scene) {
+    fn draw(&mut self, scene: &mut Scene, width: f32, height: f32) {
+        let _ = (width, height);
+
         let w = 200.0f32;
         let h = 100.0f32;
+        let x = (width - w) / 2.0;
+        let y = (height - h) / 2.0;
 
         // 背景
-        scene.fill_rect(
-            wy_render::Rect::new(0.0, 0.0, w, h),
-            Color::from_u32(0xFF_F0F0F0),
-        );
+        scene.fill_rect(Rect::new(x, y, w, h), Color::from_u32(0xFF_F0F0F0));
 
-        // 标题文字
+        // 标题
         let title = format!("Count: {}", self.count.get());
         scene.draw_text(
-            Point::new(16.0, 16.0),
+            wy_render::Point::new(x + 16.0, y + 16.0),
             &title,
             24.0,
             Color::from_u32(0xFF_000000),
         );
 
-        // 按钮背景（简化：两个矩形）
+        // [−] 按钮
         scene.fill_round_rect(
-            wy_render::Rect::new(16.0, 56.0, 60.0, 32.0),
+            Rect::new(x + 16.0, y + 56.0, 60.0, 32.0),
             4.0,
             Color::from_u32(0xFF_D0D0D0),
         );
         scene.draw_text(
-            Point::new(36.0, 62.0),
+            wy_render::Point::new(x + 36.0, y + 62.0),
             "−",
             20.0,
             Color::from_u32(0xFF_333333),
         );
 
+        // [+] 按钮
         scene.fill_round_rect(
-            wy_render::Rect::new(90.0, 56.0, 60.0, 32.0),
+            Rect::new(x + 90.0, y + 56.0, 60.0, 32.0),
             4.0,
             Color::from_u32(0xFF_D0D0D0),
         );
         scene.draw_text(
-            Point::new(110.0, 62.0),
+            wy_render::Point::new(x + 110.0, y + 62.0),
             "+",
             20.0,
             Color::from_u32(0xFF_333333),
         );
     }
-}
 
-fn main() {
-    println!("=== wy-ui counter example ===\n");
+    fn handle_event(&mut self, event: &winit::event::WindowEvent) -> bool {
+        use winit::event::{ElementState, MouseButton, WindowEvent};
+        use winit::keyboard::Key;
 
-    let (counter, increment, decrement) = Counter::new();
-
-    // 初始状态
-    let mut scene = Scene::new();
-    counter.draw(&mut scene);
-    println!("Initial state:");
-    print_scene(&scene);
-
-    // 点击 + 按钮
-    increment();
-    scene.clear();
-    counter.draw(&mut scene);
-    println!("\nAfter click +:");
-    print_scene(&scene);
-
-    // 再次点击 +
-    increment();
-    scene.clear();
-    counter.draw(&mut scene);
-    println!("\nAfter click + again:");
-    print_scene(&scene);
-
-    // 点击 - 按钮
-    decrement();
-    scene.clear();
-    counter.draw(&mut scene);
-    println!("\nAfter click -:");
-    print_scene(&scene);
-}
-
-fn print_scene(scene: &Scene) {
-    for (i, prim) in scene.iter().enumerate() {
-        match prim {
-            wy_render::Primitive::Rect { rect, color } => {
-                println!(
-                    "  [{i}] Rect({:.0},{:.0},{:.0},{:.0}) color={:#X}",
-                    rect.x,
-                    rect.y,
-                    rect.width,
-                    rect.height,
-                    color.to_u32()
-                );
-            }
-            wy_render::Primitive::RoundRect {
-                rect,
-                radius,
-                color,
+        match event {
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
             } => {
-                println!(
-                    "  [{i}] RoundRect({:.0},{:.0},{:.0},{:.0} r={:.0}) color={:#X}",
-                    rect.x,
-                    rect.y,
-                    rect.width,
-                    rect.height,
-                    radius,
-                    color.to_u32()
-                );
+                // 简化：整个窗口区域点击都 toggle
+                // 完整实现需要 hit test 确定点击了哪个按钮
+                let val = self.count.get();
+                self.count.set(val + 1);
+                true
             }
-            wy_render::Primitive::Text {
-                point,
-                text,
-                font_size,
-                color,
-            } => {
-                println!(
-                    "  [{i}] Text(\"{}\") at ({:.0},{:.0}) size={:.0} color={:#X}",
-                    text,
-                    point.x,
-                    point.y,
-                    font_size,
-                    color.to_u32()
-                );
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                match &event.logical_key {
+                    Key::Character(s) if s.as_str() == "+" => {
+                        self.count.set(self.count.get() + 1);
+                        true
+                    }
+                    Key::Character(s) if s.as_str() == "-" => {
+                        self.count.set(self.count.get() - 1);
+                        true
+                    }
+                    Key::Named(winit::keyboard::NamedKey::ArrowUp) => {
+                        self.count.set(self.count.get() + 1);
+                        true
+                    }
+                    Key::Named(winit::keyboard::NamedKey::ArrowDown) => {
+                        self.count.set(self.count.get() - 1);
+                        true
+                    }
+                    _ => false,
+                }
             }
-            _ => {
-                println!("  [{i}] {prim:?}");
-            }
+            _ => false,
         }
     }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    run(CounterApp::new())
 }

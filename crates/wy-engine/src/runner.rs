@@ -124,6 +124,7 @@ pub fn run(app: impl WyApp + 'static) -> Result<(), Box<dyn std::error::Error>> 
         cursor_pos: (0.0, 0.0),
         font_cx: parley::FontContext::new(),
         layout_cx: parley::LayoutContext::new(),
+        text_cache: wy_render::vello_executor::TextLayoutCache::new(),
         needs_redraw: Rc::new(Cell::new(true)),
         access_adapter: None,
         proxy,
@@ -147,6 +148,7 @@ struct AppState<A: WyApp> {
     cursor_pos: (f32, f32),
     font_cx: parley::FontContext,
     layout_cx: parley::LayoutContext,
+    text_cache: wy_render::vello_executor::TextLayoutCache,
     needs_redraw: Rc<Cell<bool>>,
     access_adapter: Option<accesskit_winit::Adapter>,
     proxy: winit::event_loop::EventLoopProxy<AppEvent>,
@@ -362,6 +364,7 @@ impl<A: WyApp> AppState<A> {
             &mut vello_scene,
             &mut self.font_cx,
             &mut self.layout_cx,
+            &mut self.text_cache,
         );
 
         // 3. 获取 surface texture
