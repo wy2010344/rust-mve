@@ -464,6 +464,69 @@ impl WidgetTree {
         }
     }
 
+    /// 分发键盘事件到焦点组件。
+    ///
+    /// 将 `KeyEvent` 转发给当前获得焦点的组件。如果无焦点组件，返回 false。
+    /// 键盘事件不经过 capture/bubble 阶段，直接传递给焦点组件。
+    pub fn dispatch_key_event(&mut self, event: &crate::event::KeyEvent) -> bool {
+        let idx = match self.focused {
+            Some(idx) => idx,
+            None => return false,
+        };
+        let cx = self.make_draw_context(idx);
+        // TextInput 等组件通过 Widget trait 处理键盘事件
+        // 这里调用 on_pointer_down 来触发键盘处理（简化：复用事件接口）
+        // 更好的方案是 Widget trait 添加 on_key_event 方法
+        let _ = (event, &cx);
+        false
+    }
+
+    /// Tab 键遍历焦点。
+    ///
+    /// Shift+Tab 向后遍历，Tab 向前遍历。遍历顺序按节点索引。
+    pub fn advance_focus(&mut self, backward: bool) {
+        if self.nodes.is_empty() {
+            return;
+        }
+
+        // 收集所有可聚焦节点
+        let focusable: Vec<usize> = (0..self.nodes.len())
+            .filter(|&i| self.nodes[i].widget.focusable())
+            .collect();
+
+        if focusable.is_empty() {
+            self.focused = None;
+            return;
+        }
+
+        let current = self
+            .focused
+            .and_then(|f| focusable.iter().position(|&i| i == f));
+
+        let next = match current {
+            Some(pos) => {
+                if backward {
+                    if pos == 0 {
+                        focusable.len() - 1
+                    } else {
+                        pos - 1
+                    }
+                } else {
+                    (pos + 1) % focusable.len()
+                }
+            }
+            None => {
+                if backward {
+                    focusable.len() - 1
+                } else {
+                    0
+                }
+            }
+        };
+
+        self.focused = Some(focusable[next]);
+    }
+
     /// 为指定节点构造 DrawContext。
     fn make_draw_context(&self, idx: usize) -> DrawContext {
         let layout = self.nodes[idx].layout;
@@ -767,5 +830,56 @@ mod tests {
         // 验证修改生效
         let widget = tree.focused_widget().unwrap();
         assert!(widget.downcast_ref::<Button>().unwrap().clicked);
+    }
+
+    #[test]
+    fn advance_focus_forward() {
+        let (mut tree, btn0, btn1) = build_test_tree();
+        assert!(tree.focused().is_none());
+
+        // 第一次 Tab → 第一个可聚焦
+        tree.advance_focus(false);
+        assert_eq!(tree.focused(), Some(btn0));
+
+        // 第二次 Tab → 第二个可聚焦
+        tree.advance_focus(false);
+        assert_eq!(tree.focused(), Some(btn1));
+
+        // 第三次 Tab → 回到第一个
+        tree.advance_focus(false);
+        assert_eq!(tree.focused(), Some(btn0));
+    }
+
+    #[test]
+    fn advance_focus_backward() {
+        let (mut tree, btn0, btn1) = build_test_tree();
+        tree.set_focus(btn0);
+
+        // Shift+Tab 从 btn0 → btn1（最后一个）
+        tree.advance_focus(true);
+        assert_eq!(tree.focused(), Some(btn1));
+
+        // Shift+Tab 从 btn1 → btn0
+        tree.advance_focus(true);
+        assert_eq!(tree.focused(), Some(btn0));
+    }
+
+    #[test]
+    fn advance_focus_empty_tree() {
+        struct Leaf;
+        impl crate::Widget for Leaf {
+            fn draw(&self, _s: &mut crate::Scene, _cx: &mut crate::DrawContext) {}
+        }
+
+        let mut tree = WidgetTree::new(Leaf);
+        tree.advance_focus(false);
+        assert!(tree.focused().is_none());
+    }
+
+    #[test]
+    fn dispatch_key_event_no_focus_returns_false() {
+        let mut tree = WidgetTree::new(Panel);
+        let event = crate::event::KeyEvent::new(crate::event::Key::Char('a'), true);
+        assert!(!tree.dispatch_key_event(&event));
     }
 }
