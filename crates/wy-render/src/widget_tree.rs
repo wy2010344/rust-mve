@@ -31,6 +31,7 @@
 
 use crate::draw_context::DrawContext;
 use crate::event::{PointerEvent, PointerType};
+use crate::theme::Theme;
 use crate::widget::ChildBuilder;
 use crate::{Point, Rect, Size};
 
@@ -53,6 +54,8 @@ pub struct WidgetTree {
     root: usize,
     /// 当前获得焦点的节点索引。
     focused: Option<usize>,
+    /// 主题配置（传递给 DrawContext）。
+    theme: Theme,
 }
 
 impl WidgetTree {
@@ -65,6 +68,7 @@ impl WidgetTree {
             nodes: Vec::new(),
             root: 0,
             focused: None,
+            theme: Theme::light(),
         };
 
         // 创建根节点
@@ -74,6 +78,18 @@ impl WidgetTree {
         tree.build_children(root_idx);
 
         tree
+    }
+
+    /// 设置主题配置。
+    ///
+    /// 主题会在 `draw_scene()` 时传递给每个组件的 DrawContext。
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+    }
+
+    /// 获取当前主题引用。
+    pub fn theme(&self) -> &Theme {
+        &self.theme
     }
 
     /// 递归构建子节点。
@@ -158,10 +174,11 @@ impl WidgetTree {
     fn draw_node(&self, idx: usize, scene: &mut crate::Scene) {
         let node = &self.nodes[idx];
         let layout = node.layout;
-        let mut cx = crate::DrawContext::new(
+        let mut cx = crate::DrawContext::with_theme(
             layout,
             Point::new(layout.x, layout.y),
             Size::new(layout.width, layout.height),
+            self.theme,
         );
         node.widget.draw(scene, &mut cx);
 
@@ -601,5 +618,42 @@ mod tests {
         let mut tree = WidgetTree::new(Leaf);
         tree.compute_layout(100.0, 100.0, |_| 20.0);
         assert_eq!(tree.layout(0), Rect::new(0.0, 0.0, 100.0, 100.0));
+    }
+
+    #[test]
+    fn widget_tree_theme_defaults_to_light() {
+        let tree = WidgetTree::new(Panel);
+        assert_eq!(tree.theme().colors.background, crate::Color::WHITE);
+    }
+
+    #[test]
+    fn widget_tree_set_theme() {
+        let mut tree = WidgetTree::new(Panel);
+        tree.set_theme(crate::theme::Theme::dark());
+        assert_eq!(
+            tree.theme().colors.background,
+            crate::Color::rgba(30, 30, 30, 255)
+        );
+    }
+
+    #[test]
+    fn draw_scene_passes_theme_to_context() {
+        struct ThemeChecker;
+        impl crate::Widget for ThemeChecker {
+            fn draw(&self, _scene: &mut crate::Scene, cx: &mut crate::DrawContext) {
+                // 验证 theme 被传递
+                assert!(cx.theme().is_some());
+                assert_eq!(
+                    cx.theme().unwrap().colors.background,
+                    crate::Color::rgba(30, 30, 30, 255)
+                );
+            }
+        }
+
+        let mut tree = WidgetTree::new(ThemeChecker);
+        tree.set_theme(crate::theme::Theme::dark());
+        tree.set_layout(0, Rect::new(0.0, 0.0, 100.0, 100.0));
+        let mut scene = crate::Scene::new();
+        tree.draw_scene(&mut scene);
     }
 }

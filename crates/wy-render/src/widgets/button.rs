@@ -89,28 +89,35 @@ impl ButtonWidget {
 impl Widget for ButtonWidget {
     fn draw(&self, scene: &mut Scene, cx: &mut DrawContext) {
         let rect = cx.outer_rect();
+
+        // 使用主题默认值，除非组件有自己的设置
         let bg = if self.pressing || self.hovering {
             self.hover_background
         } else {
             self.background
         };
+        let text_color = self.text_color;
+        let radius = self.border_radius;
 
         // 背景
-        if self.border_radius > 0.0 {
-            scene.fill_round_rect(rect, self.border_radius, bg);
+        if radius > 0.0 {
+            scene.fill_round_rect(rect, radius, bg);
         } else {
             scene.fill_rect(rect, bg);
         }
 
         // 文本居中
-        let text_x = rect.x + (rect.width - self.label.len() as f32 * self.font_size * 0.5) / 2.0;
-        let text_y = rect.y + (rect.height - self.font_size) / 2.0;
+        let font_size = self.font_size;
+        let text_x = rect.x + (rect.width - self.label.len() as f32 * font_size * 0.5) / 2.0;
+        let text_y = rect.y + (rect.height - font_size) / 2.0;
         scene.draw_text(
             crate::Point::new(text_x, text_y),
             &self.label,
-            self.font_size,
-            self.text_color,
+            font_size,
+            text_color,
         );
+
+        let _theme = cx.theme_or_default(); // 预留：未来可用 _theme.colors.button_text 等
     }
 
     fn on_pointer_down(&mut self, _event: &mut PointerEvent, _cx: &DrawContext) {

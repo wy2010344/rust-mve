@@ -10,6 +10,7 @@ use crate::Color;
 /// let theme = Theme::light();
 /// assert_eq!(theme.colors.background, Color::WHITE);
 /// ```
+#[derive(Copy, Clone, Debug)]
 pub struct Theme {
     /// 颜色配置。
     pub colors: Colors,
@@ -18,6 +19,7 @@ pub struct Theme {
 }
 
 /// 主题颜色。
+#[derive(Copy, Clone, Debug)]
 pub struct Colors {
     /// 窗口/应用背景色。
     pub background: Color,
@@ -42,6 +44,7 @@ pub struct Colors {
 }
 
 /// 主题尺寸。
+#[derive(Copy, Clone, Debug)]
 pub struct Sizes {
     /// 默认字体大小。
     pub font_size: f32,
