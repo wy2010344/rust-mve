@@ -24,6 +24,8 @@
 //! }
 //! ```
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -42,6 +44,21 @@ pub trait WyApp {
     /// 在此方法中使用 `scene` 记录绘制命令（矩形、文本等）。
     /// `width`/`height` 是窗口客户区的像素尺寸。
     fn draw(&mut self, scene: &mut Scene, width: f32, height: f32);
+
+    /// 初始化应用（可选）。
+    ///
+    /// 窗口创建后调用。`request_redraw` 可用于触发按需重绘，
+    /// 通常与信号系统的 `TrackEffect` 配合使用：
+    /// ```ignore
+    /// fn setup(&mut self, request_redraw: Rc<dyn Fn()>) {
+    ///     let counter = self.counter.clone();
+    ///     create_effect(move || {
+    ///         let _ = counter.get(); // 注册依赖
+    ///         request_redraw();     // 信号变更时触发重绘
+    ///     });
+    /// }
+    /// ```
+    fn setup(&mut self, _request_redraw: Rc<dyn Fn()>) {}
 
     /// 处理窗口事件（可选）。
     ///
@@ -75,6 +92,7 @@ pub fn run(app: impl WyApp + 'static) -> Result<(), Box<dyn std::error::Error>> 
         cursor_pos: (0.0, 0.0),
         font_cx: parley::FontContext::new(),
         layout_cx: parley::LayoutContext::new(),
+        needs_redraw: Rc::new(Cell::new(true)),
     };
 
     event_loop.run_app(&mut state)?;
@@ -95,6 +113,7 @@ struct AppState<A: WyApp> {
     cursor_pos: (f32, f32),
     font_cx: parley::FontContext,
     layout_cx: parley::LayoutContext,
+    needs_redraw: Rc<Cell<bool>>,
 }
 
 impl<A: WyApp> ApplicationHandler for AppState<A> {
@@ -165,6 +184,15 @@ impl<A: WyApp> ApplicationHandler for AppState<A> {
 
         // 通知应用 resize
         self.app.on_resize(size.width as f32, size.height as f32);
+
+        // 创建按需重绘回调，供应用的信号系统使用
+        let window_ref = self.window.as_ref().unwrap().clone();
+        let needs_redraw = self.needs_redraw.clone();
+        let request_redraw: Rc<dyn Fn()> = Rc::new(move || {
+            needs_redraw.set(true);
+            window_ref.request_redraw();
+        });
+        self.app.setup(request_redraw);
 
         // 请求首帧绘制
         self.window.as_ref().unwrap().request_redraw();
@@ -285,7 +313,10 @@ impl<A: WyApp> AppState<A> {
             }
         }
 
-        // 请求下一帧（连续渲染模式）
-        window.request_redraw();
+        // 按需重绘：如果还有待处理的重绘请求，继续下一帧
+        if self.needs_redraw.get() {
+            self.needs_redraw.set(false);
+            window.request_redraw();
+        }
     }
 }
