@@ -148,6 +148,28 @@ impl WidgetTree {
         }
     }
 
+    /// 遍历所有节点，调用 widget.draw() 生成 Scene 图元。
+    ///
+    /// 递归遍历树，为每个节点构造 DrawContext 并调用 draw()。
+    pub fn draw_scene(&self, scene: &mut crate::Scene) {
+        self.draw_node(self.root, scene);
+    }
+
+    fn draw_node(&self, idx: usize, scene: &mut crate::Scene) {
+        let node = &self.nodes[idx];
+        let layout = node.layout;
+        let mut cx = crate::DrawContext::new(
+            layout,
+            Point::new(layout.x, layout.y),
+            Size::new(layout.width, layout.height),
+        );
+        node.widget.draw(scene, &mut cx);
+
+        for &child_idx in &node.children {
+            self.draw_node(child_idx, scene);
+        }
+    }
+
     /// 命中测试：给定屏幕坐标，返回从根到叶子的命中路径。
     ///
     /// 返回 `Some(path)` 其中 `path[0]` 是根节点索引，`path.last()` 是最深层命中节点。

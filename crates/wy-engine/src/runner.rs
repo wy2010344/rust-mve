@@ -72,6 +72,17 @@ pub trait WyApp {
     /// ```
     fn setup(&mut self, _request_redraw: Rc<dyn Fn()>) {}
 
+    /// 提供 WidgetTree 用于自动命中测试和事件分发（可选）。
+    ///
+    /// 返回 `Some(&mut WidgetTree)` 时，runner 会自动将鼠标事件
+    /// 分发到 WidgetTree（dispatch_pointer_down/up/move），
+    /// 并在渲染时调用 `draw_scene()` 生成 Scene。
+    ///
+    /// 返回 `None`（默认）时，runner 使用 `draw()` 直接绘制。
+    fn widget_tree(&mut self) -> Option<&mut wy_render::widget_tree::WidgetTree> {
+        None
+    }
+
     /// 处理窗口事件（可选）。
     ///
     /// 返回 `true` 表示事件已消费，不再传播。
@@ -287,6 +298,32 @@ impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = (position.x as f32, position.y as f32);
+                // 分发鼠标移动到 WidgetTree
+                if let Some(tree) = self.app.widget_tree() {
+                    tree.dispatch_pointer_move(self.cursor_pos.0, self.cursor_pos.1);
+                }
+            }
+            WindowEvent::MouseInput {
+                state,
+                button: winit::event::MouseButton::Left,
+                ..
+            } => {
+                // 分发鼠标点击到 WidgetTree
+                if let Some(tree) = self.app.widget_tree() {
+                    match state {
+                        winit::event::ElementState::Pressed => {
+                            tree.dispatch_pointer_down(self.cursor_pos.0, self.cursor_pos.1);
+                        }
+                        winit::event::ElementState::Released => {
+                            tree.dispatch_pointer_up(self.cursor_pos.0, self.cursor_pos.1);
+                        }
+                    }
+                }
+                // 请求重绘（点击可能改变状态）
+                if let Some(window) = &self.window {
+                    self.needs_redraw.set(true);
+                    window.request_redraw();
+                }
             }
             WindowEvent::RedrawRequested => {
                 self.render();
@@ -355,7 +392,13 @@ impl<A: WyApp> AppState<A> {
 
         // 1. 调用应用绘制，生成高层 Scene
         let mut scene = Scene::new();
-        self.app.draw(&mut scene, width as f32, height as f32);
+        if let Some(tree) = self.app.widget_tree() {
+            // 使用 WidgetTree 绘制
+            tree.draw_scene(&mut scene);
+        } else {
+            // 直接绘制
+            self.app.draw(&mut scene, width as f32, height as f32);
+        }
 
         // 2. 翻译到 Vello Scene
         let mut vello_scene = vello::Scene::new();
