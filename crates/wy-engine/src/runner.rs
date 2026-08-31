@@ -211,11 +211,16 @@ impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
         }))
         .unwrap();
 
-        // 配置 surface
+        // 配置 surface — 优先选 Rgba8Unorm（Vello render_to_texture 要求）
         let caps = surface.get_capabilities(&adapter);
-        let format = caps.formats[0];
+        let format = caps
+            .formats
+            .iter()
+            .find(|f| **f == wgpu::TextureFormat::Rgba8Unorm)
+            .copied()
+            .unwrap_or(caps.formats[0]);
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::STORAGE_BINDING,
             format,
             width: size.width.max(1),
             height: size.height.max(1),
@@ -347,12 +352,11 @@ impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
                     self.app.handle_accessibility_action(request);
                 }
                 accesskit_winit::WindowEvent::InitialTreeRequested => {
-                    // 平台请求初始无障碍树
                     if let Some(adapter) = &mut self.access_adapter {
                         adapter.update_if_active(|| {
-                            // 返回空树，应用可通过 AccessibilityBridge 提供完整树
+                            let root = accesskit::Node::new(accesskit::Role::Window);
                             accesskit::TreeUpdate {
-                                nodes: vec![],
+                                nodes: vec![(accesskit::NodeId(0), root)],
                                 tree: Some(accesskit::Tree::new(accesskit::NodeId(0))),
                                 tree_id: accesskit::TreeId::ROOT,
                                 focus: accesskit::NodeId(0),
@@ -447,11 +451,18 @@ impl<A: WyApp> AppState<A> {
             }
         }
 
-        // 5. 更新无障碍树（如果有变化）
-        if let Some(tree_update) = self.app.accessibility_update() {
-            if let Some(adapter) = &mut self.access_adapter {
-                adapter.update_if_active(|| tree_update);
+        // 5. 更新无障碍树
+        let tree_update = self.app.accessibility_update().unwrap_or_else(|| {
+            let root = accesskit::Node::new(accesskit::Role::Window);
+            accesskit::TreeUpdate {
+                nodes: vec![(accesskit::NodeId(0), root)],
+                tree: Some(accesskit::Tree::new(accesskit::NodeId(0))),
+                tree_id: accesskit::TreeId::ROOT,
+                focus: accesskit::NodeId(0),
             }
+        });
+        if let Some(adapter) = &mut self.access_adapter {
+            adapter.update_if_active(|| tree_update);
         }
 
         // 按需重绘：如果还有待处理的重绘请求，继续下一帧
