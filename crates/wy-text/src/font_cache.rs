@@ -24,6 +24,32 @@ impl FontContext {
             layout_cx: LayoutContext::new(),
         }
     }
+
+    /// 测量文本尺寸，返回 `(width, height)` 像素值。
+    ///
+    /// 封装了 Parley 的 font_cx + layout_cx 分别借用，
+    /// 避免 RefCell split borrow 问题。
+    pub fn measure_text(&mut self, text: &str, font_size: f32) -> (f32, f32) {
+        if text.is_empty() {
+            return (0.0, font_size * 1.2);
+        }
+        let brush = [0u8, 0, 0, 255];
+        let display_scale = 1.0;
+        let mut builder =
+            self.layout_cx
+                .ranged_builder(&mut self.font_cx, text, display_scale, false);
+        builder.push_default(parley::StyleProperty::FontSize(font_size));
+        builder.push_default(parley::StyleProperty::Brush(brush));
+        let mut layout: parley::Layout<[u8; 4]> = builder.build(text);
+        layout.break_all_lines(None);
+        layout.align(
+            parley::Alignment::Start,
+            parley::AlignmentOptions::default(),
+        );
+        let width = layout.width();
+        let height = layout.height().max(font_size * 1.2);
+        (width, height)
+    }
 }
 
 impl Default for FontContext {

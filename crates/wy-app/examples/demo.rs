@@ -1,292 +1,184 @@
-//! Kotlin 风格嵌套组合 Demo。
-//!
-//! 复刻 C:\github\wy-helper\desktopApp\src\main\kotlin\org\wy\engine\DemoList.kt
-//! 使用 `FnWidget` + `ChildBuilderExt` 实现函数嵌套组合。
-//!
-//! 运行：`cargo run -p wy-app --example demo`
-
-use std::rc::Rc;
-use std::time::{SystemTime, UNIX_EPOCH};
-use wy_engine::runner::{run, WyApp};
+use wy_engine::composition::run_composition;
 use wy_render::composition::FnWidget;
-use wy_render::theme::Theme;
-use wy_render::widget_tree::WidgetTree;
-use wy_render::{Color, Rect, Scene};
-use wy_signal::{create_effect, GetValue, SetValue, Signal};
+use wy_render::{Color, Point, Rect};
+use wy_signal::{create_memo, create_signal, GetValue, SetValue};
+use wy_text::FontContext;
 
-/// 列表项数据（类似 Kotlin 的 `class RowModal(val key: Long)`）。
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Debug)]
 struct RowItem {
     key: u64,
-    hide: Signal<bool>,
-}
-
-impl PartialEq for RowItem {
-    fn eq(&self, other: &Self) -> bool {
-        self.key == other.key
-    }
+    show: bool,
 }
 
 impl RowItem {
     fn new(key: u64) -> Self {
-        Self {
-            key,
-            hide: Signal::new(false),
-        }
+        Self { key, show: true }
     }
 }
 
-/// Demo 应用状态。
-struct DemoApp {
-    tree: Option<WidgetTree>,
-    list: Signal<Vec<RowItem>>,
-    mouse_x: f64,
-    mouse_y: f64,
+fn measure_text(label: &str, fc: &std::cell::RefCell<FontContext>) -> (f32, f32) {
+    fc.borrow_mut().measure_text(label, 14.0)
 }
 
-impl DemoApp {
-    fn new() -> Self {
-        Self {
-            tree: None,
-            list: Signal::new(Vec::new()),
-            mouse_x: 0.0,
-            mouse_y: 0.0,
-        }
-    }
+fn draw_button(scene: &mut wy_render::Scene, label: &str, fc: &std::cell::RefCell<FontContext>) {
+    let (w, h) = measure_text(label, fc);
+    scene.fill_round_rect(
+        Rect::new(0.0, 0.0, w + 16.0, h + 14.0),
+        8.0,
+        Color::rgb(232, 232, 232),
+    );
+    scene.stroke_round_rect(
+        Rect::new(0.0, 0.0, w + 16.0, h + 14.0),
+        8.0,
+        Color::rgb(200, 200, 200),
+        2.0,
+    );
+    scene.draw_text(Point::new(8.0, 7.0), label, 14.0, Color::BLACK);
+}
 
-    /// 构建 UI 树 — Kotlin 风格的 `argChildren()`。
-    fn build_ui(&mut self) {
-        let list = self.list.clone();
-        let tree =
-            WidgetTree::new(FnWidget::new(
-                |scene, cx| {
-                    scene.fill_rect(cx.outer_rect(), Theme::light().colors.background);
+fn main() {
+    let state_list = create_signal(vec![
+        RowItem::new(0),
+        RowItem::new(1),
+        RowItem::new(2),
+        RowItem::new(3),
+        RowItem::new(4),
+    ]);
+
+    let toggle_id = create_signal(1u64);
+    let next_id = create_signal(5u64);
+
+    let n_memo = create_memo({
+        let list = state_list.clone();
+        move || {
+            let len = list.get().len();
+            format!("共有{len}条数据")
+        }
+    });
+
+    let font_cx = std::rc::Rc::new(std::cell::RefCell::new(FontContext::new()));
+
+    run_composition(move |cx| {
+        // WrappedTextNode —— "共有N条数据" 按钮
+        let fc = font_cx.clone();
+        let counter_text = n_memo.clone();
+        let counter_list = state_list.clone();
+        let counter_next = next_id.clone();
+        cx.add_child(
+            FnWidget::new(
+                move |scene, _cx| {
+                    let label = counter_text.get();
+                    draw_button(scene, &label, &fc);
                 },
-                move |cx| {
-                    // ── "共有N条数据" 按钮 ──
-                    let list_c = list.clone();
-                    let list_c2 = list.clone();
-                    cx.add_child(
-                        FnWidget::new(
-                            move |scene, cx| {
-                                let rect = cx.outer_rect();
-                                let t = Theme::light();
-                                let count = list_c.get().len();
-                                scene.fill_rect(rect, t.colors.button_background);
-                                scene.draw_text(
-                                    wy_render::Point::new(rect.x + 4.0, rect.y + 6.0),
-                                    &format!("共有{count}条数据 (点击添加)"),
-                                    t.sizes.font_size,
-                                    t.colors.text,
-                                );
-                            },
-                            |_| {},
-                        )
-                        .on_click(move |_cx| {
-                            let key = SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap()
-                                .as_millis() as u64;
-                            let mut items = list_c2.get();
-                            items.push(RowItem::new(key));
-                            list_c2.set(items);
-                        }),
-                    );
+                |_| {},
+            )
+            .on_click(move |_| {
+                let id = counter_next.get();
+                counter_next.set(id + 1);
+                let mut v = counter_list.get();
+                v.push(RowItem::new(id));
+                counter_list.set(v);
+            }),
+        );
 
-                    // ── 列表容器 ──
-                    let list_for_items = list.clone();
+        // SimpleScrollNode —— 列表容器
+        let list_for_scroll = state_list.clone();
+        let fc_for_scroll = font_cx.clone();
+        let toggle_for_scroll = toggle_id.clone();
+        let state_for_scroll = state_list.clone();
+        cx.add_child(FnWidget::new(
+            |scene, _| {
+                scene.fill_rect(Rect::new(0.0, 0.0, 300.0, 600.0), Color::WHITE);
+            },
+            move |cx| {
+                let snapshot = list_for_scroll.get();
+                for item in snapshot {
+                    let item = item.clone();
+                    let show = item.show;
+                    let key = item.key;
+
+                    let fc = fc_for_scroll.clone();
+                    let toggle_id = toggle_for_scroll.clone();
+                    let state_list = state_for_scroll.clone();
+
+                    // 每行容器
                     cx.add_child(FnWidget::new(
-                        |scene, cx| {
-                            scene.fill_rect(cx.outer_rect(), Theme::light().colors.background);
+                        move |scene, cx| {
+                            if !show {
+                                return;
+                            }
+                            let rect = cx.outer_rect();
+                            scene.fill_round_rect(rect, 8.0, Color::rgb(240, 240, 240));
                         },
                         move |cx| {
-                            let items = list_for_items.get();
-                            for (i, item) in items.iter().enumerate() {
-                                let item = item.clone();
-                                let _item_index = i;
-                                let list = list_for_items.clone();
+                            if !show {
+                                return;
+                            }
 
-                                // ── 列表项 ──
-                                let item_c = item.clone();
-                                cx.add_child(FnWidget::new(
-                                    move |scene, cx| {
-                                        if item_c.hide.get() {
-                                            return;
-                                        }
-                                        let rect = cx.outer_rect();
-                                        let t = Theme::light();
-                                        scene.fill_round_rect(
-                                            rect,
-                                            t.sizes.border_radius,
-                                            t.colors.button_background,
-                                        );
-                                        scene.draw_text(
-                                            wy_render::Point::new(rect.x + 4.0, rect.y + 8.0),
-                                            &format!("key-{}", item_c.key),
-                                            t.sizes.font_size,
-                                            t.colors.text,
-                                        );
-                                    },
-                                    {
-                                        let item = item.clone();
-                                        let list = list.clone();
-                                        move |cx| {
-                                            // "隐藏" 按钮
-                                            let item_h = item.clone();
-                                            cx.add_child(
-                                                FnWidget::new(
-                                                    move |scene, cx| {
-                                                        if item_h.hide.get() {
-                                                            return;
-                                                        }
-                                                        let rect = cx.outer_rect();
-                                                        let t = Theme::light();
-                                                        scene.fill_round_rect(
-                                                            Rect::new(
-                                                                rect.x + rect.width - 60.0,
-                                                                rect.y + 4.0,
-                                                                52.0,
-                                                                22.0,
-                                                            ),
-                                                            4.0,
-                                                            t.colors.primary,
-                                                        );
-                                                        scene.draw_text(
-                                                            wy_render::Point::new(
-                                                                rect.x + rect.width - 52.0,
-                                                                rect.y + 8.0,
-                                                            ),
-                                                            "隐藏",
-                                                            12.0,
-                                                            Color::WHITE,
-                                                        );
-                                                    },
-                                                    |_| {},
-                                                )
-                                                .on_click({
-                                                    let item_h = item.clone();
-                                                    move |_cx| {
-                                                        item_h.hide.set(true);
-                                                    }
-                                                }),
-                                            );
+                            // show 按钮
+                            {
+                                let toggle_id = toggle_id.clone();
+                                let show_label = create_memo(move || format!("show {key}"));
+                                let fc = fc.clone();
+                                cx.add_child(
+                                    FnWidget::new(
+                                        move |scene, _| {
+                                            let label = show_label.get();
+                                            draw_button(scene, &label, &fc);
+                                        },
+                                        |_| {},
+                                    )
+                                    .on_click(move |_| {
+                                        toggle_id.set(key);
+                                    }),
+                                );
+                            }
 
-                                            // "删除" 按钮
-                                            let item_d = item.clone();
-                                            let list_d = list.clone();
-                                            cx.add_child(
-                                                FnWidget::new(
-                                                    move |scene, cx| {
-                                                        if item_d.hide.get() {
-                                                            return;
-                                                        }
-                                                        let rect = cx.outer_rect();
-                                                        scene.fill_round_rect(
-                                                            Rect::new(
-                                                                rect.x + rect.width - 116.0,
-                                                                rect.y + 4.0,
-                                                                52.0,
-                                                                22.0,
-                                                            ),
-                                                            4.0,
-                                                            Color::RED,
-                                                        );
-                                                        scene.draw_text(
-                                                            wy_render::Point::new(
-                                                                rect.x + rect.width - 108.0,
-                                                                rect.y + 8.0,
-                                                            ),
-                                                            "删除",
-                                                            12.0,
-                                                            Color::WHITE,
-                                                        );
-                                                    },
-                                                    |_| {},
-                                                )
-                                                .on_click(move |_cx| {
-                                                    let key = item_d.key;
-                                                    let items: Vec<RowItem> = list_d
-                                                        .get()
-                                                        .into_iter()
-                                                        .filter(|it| it.key != key)
-                                                        .collect();
-                                                    list_d.set(items);
-                                                }),
-                                            );
-                                        }
-                                    },
-                                ));
+                            // hide 按钮
+                            {
+                                let toggle_id = toggle_id.clone();
+                                let hide_label = create_memo(move || format!("hide {key}"));
+                                let fc = fc.clone();
+                                cx.add_child(
+                                    FnWidget::new(
+                                        move |scene, _| {
+                                            let label = hide_label.get();
+                                            draw_button(scene, &label, &fc);
+                                        },
+                                        |_| {},
+                                    )
+                                    .on_click(move |_| {
+                                        toggle_id.set(key);
+                                    }),
+                                );
+                            }
+
+                            // delete 按钮
+                            {
+                                let state_list = state_list.clone();
+                                let del_label = create_memo(move || format!("delete {key}"));
+                                let fc = fc.clone();
+                                cx.add_child(
+                                    FnWidget::new(
+                                        move |scene, _| {
+                                            let label = del_label.get();
+                                            draw_button(scene, &label, &fc);
+                                        },
+                                        |_| {},
+                                    )
+                                    .on_click(move |_| {
+                                        let k = key;
+                                        let current = state_list.get();
+                                        state_list.set(
+                                            current.into_iter().filter(|x| x.key != k).collect(),
+                                        );
+                                    }),
+                                );
                             }
                         },
                     ));
-                },
-            ));
-
-        self.tree = Some(tree);
-    }
-}
-
-impl WyApp for DemoApp {
-    fn setup(&mut self, request_redraw: Rc<dyn Fn()>) {
-        let list = self.list.clone();
-        create_effect(move || {
-            let _ = list.get();
-            request_redraw();
-        });
-        self.build_ui();
-    }
-
-    fn draw(&mut self, scene: &mut Scene, width: f32, height: f32) {
-        if let Some(tree) = &mut self.tree {
-            tree.set_layout(0, Rect::new(0.0, 0.0, width, height));
-            tree.draw_scene(scene);
-        }
-    }
-
-    fn handle_event(&mut self, event: &winit::event::WindowEvent) -> bool {
-        use winit::event::{ElementState, MouseButton, WindowEvent};
-        use winit::keyboard::Key;
-
-        match event {
-            WindowEvent::CursorMoved { position, .. } => {
-                self.mouse_x = position.x;
-                self.mouse_y = position.y;
-                false
-            }
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                button: MouseButton::Left,
-                ..
-            } => {
-                if let Some(tree) = &mut self.tree {
-                    let x = self.mouse_x as f32;
-                    let y = self.mouse_y as f32;
-                    tree.dispatch_pointer_down(x, y);
-                    tree.dispatch_pointer_up(x, y)
-                } else {
-                    false
                 }
-            }
-            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                match &event.logical_key {
-                    Key::Character(s) if s.as_str() == "\r" => {
-                        let key = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis() as u64;
-                        let mut items = self.list.get();
-                        items.push(RowItem::new(key));
-                        self.list.set(items);
-                        true
-                    }
-                    _ => false,
-                }
-            }
-            _ => false,
-        }
-    }
-}
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    run(DemoApp::new())
+            },
+        ));
+    });
 }

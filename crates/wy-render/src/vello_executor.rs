@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 
-use vello::kurbo::{Affine, RoundedRect};
+use vello::kurbo::{Affine, RoundedRect, Stroke};
 use vello::peniko::{self, Fill};
 
 use crate::{Color, Primitive, Scene};
@@ -112,6 +112,18 @@ pub fn execute_scene(
                 let rr = RoundedRect::from_rect(k_rect, *radius as f64);
                 let c = to_peniko_color(*color);
                 dst.fill(Fill::NonZero, Affine::IDENTITY, c, None, &rr);
+            }
+            Primitive::StrokeRoundRect {
+                rect,
+                radius,
+                color,
+                stroke_width,
+            } => {
+                let k_rect = kurbo_rect(rect.x, rect.y, rect.width, rect.height);
+                let rr = RoundedRect::from_rect(k_rect, *radius as f64);
+                let c = to_peniko_color(*color);
+                let stroke = Stroke::new(*stroke_width as f64);
+                dst.stroke(&stroke, Affine::IDENTITY, c, None, &rr);
             }
             Primitive::Text {
                 point,

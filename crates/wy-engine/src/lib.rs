@@ -11,6 +11,7 @@
 pub use accesskit;
 
 mod accessibility;
+pub mod composition;
 mod event;
 mod focus;
 pub mod runner;

@@ -17,6 +17,13 @@ pub enum Primitive {
         radius: f32,
         color: Color,
     },
+    /// 圆角描边矩形（边框）。
+    StrokeRoundRect {
+        rect: Rect,
+        radius: f32,
+        color: Color,
+        stroke_width: f32,
+    },
     /// 文本。
     Text {
         /// 文本锚点（左上角基线位置）。
@@ -79,6 +86,22 @@ impl Scene {
             rect: rect.into(),
             radius,
             color: color.into(),
+        });
+    }
+
+    /// 记录一个圆角描边矩形（边框）。
+    pub fn stroke_round_rect(
+        &mut self,
+        rect: impl Into<Rect>,
+        radius: f32,
+        color: impl Into<Color>,
+        stroke_width: f32,
+    ) {
+        self.primitives.push(Primitive::StrokeRoundRect {
+            rect: rect.into(),
+            radius,
+            color: color.into(),
+            stroke_width,
         });
     }
 
