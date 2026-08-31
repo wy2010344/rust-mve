@@ -7,6 +7,7 @@
 //! - [`Color`] / [`Rect`] — 绘制所需的类型安全颜色与几何基础
 
 mod color;
+pub mod composition;
 mod draw_context;
 pub mod event;
 mod math;

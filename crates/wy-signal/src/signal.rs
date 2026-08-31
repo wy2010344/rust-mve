@@ -4,6 +4,7 @@
 //! - `set()`：比对旧值，仅有实际变化才把依赖它的观察者推入批次并递增全局版本号。
 
 use std::cell::RefCell;
+use std::fmt;
 use std::rc::Rc;
 
 use crate::context::{bump_global_version, register_dep, with_global};
@@ -33,6 +34,14 @@ impl<T> Clone for Signal<T> {
         Self {
             inner: Rc::clone(&self.inner),
         }
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for Signal<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Signal")
+            .field("value", &self.inner.value.borrow())
+            .finish()
     }
 }
 
