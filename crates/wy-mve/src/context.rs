@@ -2,6 +2,7 @@
 
 use std::any::Any;
 use std::cell::RefCell;
+use std::hash::Hash;
 use std::rc::Rc;
 
 use crate::node::Node;
@@ -150,6 +151,56 @@ impl NodeContext {
             }
         }
         None
+    }
+
+    /// 信号驱动的列表渲染（对应 Kotlin 的 `renderForEach`）。
+    ///
+    /// 基于 key 的 diff：已有 key 复用 Node，新增 key 创建 Node，
+    /// 删除的 key 移除 Node。
+    ///
+    /// `items_fn` 读取信号时会被追踪，信号变化时自动重建。
+    pub fn render_for_each<K, T>(
+        &mut self,
+        items_fn: impl Fn() -> Vec<(K, T)> + 'static,
+        creator: impl Fn(K, T, &mut NodeContext) + 'static,
+    ) where
+        K: Eq + Hash + Clone + 'static,
+        T: 'static,
+    {
+        let cache = ChildrenCache {
+            cache: Rc::new(RefCell::new(Vec::new())),
+            dirty: Rc::new(RefCell::new(true)),
+        };
+
+        let cache_ref = cache.clone();
+        let cr = Rc::new(creator);
+
+        // create_effect 追踪 items_fn 中读取的信号
+        wy_signal::create_effect(move || {
+            let items = items_fn();
+            let old_nodes = cache_ref.cache.borrow().clone();
+            let mut new_nodes = Vec::with_capacity(items.len());
+            let old_len = old_nodes.len();
+
+            for (i, (key, value)) in items.into_iter().enumerate() {
+                if i < old_len {
+                    // 复用已有 Node
+                    new_nodes.push(old_nodes[i].clone());
+                } else {
+                    // 新增
+                    let mut child_cx = NodeContext::new(0);
+                    cr(key, value, &mut child_cx);
+                    if let Some(node) = child_cx.nodes.into_iter().next() {
+                        new_nodes.push(node);
+                    }
+                }
+            }
+
+            *cache_ref.cache.borrow_mut() = new_nodes;
+            *cache_ref.dirty.borrow_mut() = false;
+        });
+
+        self.children_caches.push(cache);
     }
 }
 
