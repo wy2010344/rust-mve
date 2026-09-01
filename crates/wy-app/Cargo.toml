@@ -11,4 +11,5 @@ wy-layout = { workspace = true }
 wy-render = { workspace = true }
 wy-text = { workspace = true }
 wy-engine = { workspace = true }
+wy-mve = { workspace = true }
 winit = { workspace = true }

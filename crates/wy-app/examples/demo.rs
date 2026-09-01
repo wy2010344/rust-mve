@@ -1,27 +1,30 @@
-use wy_engine::composition::run_composition;
-use wy_render::composition::FnWidget;
-use wy_render::{Color, Point, Rect};
-use wy_signal::{create_memo, create_signal, GetValue, SetValue};
+//! Demo：MVE 模式的列表应用。
+//!
+//! 对应 Kotlin 的 DemoList.kt，使用 `wy-mve` 的 Node + 信号系统。
+
+use wy_mve::{render_root, Node, NodeContext};
+use wy_render::{Color, Point, Rect, Scene};
+use wy_signal::{create_signal, GetValue, SetValue};
 use wy_text::FontContext;
 
-#[derive(Clone, PartialEq, Debug)]
+// --- 数据模型 ---
+
+#[derive(Clone, Debug, PartialEq)]
 struct RowItem {
     key: u64,
-    show: bool,
+    hide: bool,
 }
 
 impl RowItem {
     fn new(key: u64) -> Self {
-        Self { key, show: true }
+        Self { key, hide: false }
     }
 }
 
-fn measure_text(label: &str, fc: &std::cell::RefCell<FontContext>) -> (f32, f32) {
-    fc.borrow_mut().measure_text(label, 14.0)
-}
+// --- 辅助：绘制按钮 ---
 
-fn draw_button(scene: &mut wy_render::Scene, label: &str, fc: &std::cell::RefCell<FontContext>) {
-    let (w, h) = measure_text(label, fc);
+fn draw_button(scene: &mut Scene, fc: &std::cell::RefCell<FontContext>, label: &str) {
+    let (w, h) = fc.borrow_mut().measure_text(label, 14.0);
     scene.fill_round_rect(
         Rect::new(0.0, 0.0, w + 16.0, h + 14.0),
         8.0,
@@ -36,6 +39,101 @@ fn draw_button(scene: &mut wy_render::Scene, label: &str, fc: &std::cell::RefCel
     scene.draw_text(Point::new(8.0, 7.0), label, 14.0, Color::BLACK);
 }
 
+// --- MVE 节点构建 ---
+
+fn build_list_item(
+    cx: &mut NodeContext,
+    item: RowItem,
+    fc: std::rc::Rc<std::cell::RefCell<FontContext>>,
+    toggle_signal: wy_signal::Signal<u64>,
+    delete_signal: wy_signal::Signal<Vec<RowItem>>,
+    all_items: std::rc::Rc<std::cell::RefCell<Vec<RowItem>>>,
+) {
+    let key = item.key;
+    let hide = item.hide;
+
+    if hide {
+        return;
+    }
+
+    // 行容器
+    let fc_ref = fc.clone();
+    let toggle_ref = toggle_signal.clone();
+    let delete_ref = delete_signal.clone();
+    let all_ref = all_items.clone();
+    let text_key = key;
+
+    cx.add_node(
+        Node::new()
+            .draw(move |scene| {
+                let scene = scene.downcast_mut::<Scene>().unwrap();
+                scene.fill_round_rect(
+                    Rect::new(0.0, 0.0, 300.0, 40.0),
+                    8.0,
+                    Color::rgb(240, 240, 240),
+                );
+            })
+            .arg_children(move |child_cx| {
+                // show 按钮
+                {
+                    let fc = fc_ref.clone();
+                    let toggle = toggle_ref.clone();
+                    let k = text_key;
+                    child_cx.add_node(
+                        Node::new()
+                            .draw(move |scene| {
+                                let scene = scene.downcast_mut::<Scene>().unwrap();
+                                draw_button(scene, &fc, &format!("show {k}"));
+                            })
+                            .on_click(move |_| {
+                                toggle.set(k);
+                            }),
+                    );
+                }
+
+                // hide 按钮
+                {
+                    let fc = fc_ref.clone();
+                    let toggle = toggle_ref.clone();
+                    let k = text_key;
+                    child_cx.add_node(
+                        Node::new()
+                            .draw(move |scene| {
+                                let scene = scene.downcast_mut::<Scene>().unwrap();
+                                draw_button(scene, &fc, &format!("hide {k}"));
+                            })
+                            .on_click(move |_| {
+                                toggle.set(k);
+                            }),
+                    );
+                }
+
+                // delete 按钮
+                {
+                    let fc = fc_ref.clone();
+                    let delete = delete_ref.clone();
+                    let all = all_ref.clone();
+                    let k = text_key;
+                    child_cx.add_node(
+                        Node::new()
+                            .draw(move |scene| {
+                                let scene = scene.downcast_mut::<Scene>().unwrap();
+                                draw_button(scene, &fc, &format!("delete {k}"));
+                            })
+                            .on_click(move |_| {
+                                let current = all.borrow().clone();
+                                let filtered: Vec<RowItem> =
+                                    current.into_iter().filter(|x| x.key != k).collect();
+                                delete.set(filtered);
+                            }),
+                    );
+                }
+            }),
+    );
+}
+
+// --- 入口 ---
+
 fn main() {
     let state_list = create_signal(vec![
         RowItem::new(0),
@@ -45,140 +143,55 @@ fn main() {
         RowItem::new(4),
     ]);
 
-    let toggle_id = create_signal(1u64);
+    let toggle_id = create_signal(0u64);
     let next_id = create_signal(5u64);
-
-    let n_memo = create_memo({
-        let list = state_list.clone();
-        move || {
-            let len = list.get().len();
-            format!("共有{len}条数据")
-        }
-    });
 
     let font_cx = std::rc::Rc::new(std::cell::RefCell::new(FontContext::new()));
 
-    run_composition(move |cx| {
-        // WrappedTextNode —— "共有N条数据" 按钮
+    // MVE 树构建
+    let cache = render_root({
+        let list = state_list.clone();
         let fc = font_cx.clone();
-        let counter_text = n_memo.clone();
-        let counter_list = state_list.clone();
-        let counter_next = next_id.clone();
-        cx.add_child(
-            FnWidget::new(
-                move |scene, _cx| {
-                    let label = counter_text.get();
-                    draw_button(scene, &label, &fc);
-                },
-                |_| {},
-            )
-            .on_click(move |_| {
-                let id = counter_next.get();
-                counter_next.set(id + 1);
-                let mut v = counter_list.get();
-                v.push(RowItem::new(id));
-                counter_list.set(v);
-            }),
-        );
+        let toggle = toggle_id.clone();
+        let next = next_id.clone();
 
-        // SimpleScrollNode —— 列表容器
-        let list_for_scroll = state_list.clone();
-        let fc_for_scroll = font_cx.clone();
-        let toggle_for_scroll = toggle_id.clone();
-        let state_for_scroll = state_list.clone();
-        cx.add_child(FnWidget::new(
-            |scene, _| {
-                scene.fill_rect(Rect::new(0.0, 0.0, 300.0, 600.0), Color::WHITE);
-            },
-            move |cx| {
-                let snapshot = list_for_scroll.get();
-                for item in snapshot {
-                    let item = item.clone();
-                    let show = item.show;
-                    let key = item.key;
+        move |cx| {
+            // 计数按钮
+            let list_ref = list.clone();
+            let next_ref = next.clone();
+            let fc_ref = fc.clone();
+            let count = list.get().len();
+            cx.add_node(
+                Node::new()
+                    .draw(move |scene| {
+                        let scene = scene.downcast_mut::<Scene>().unwrap();
+                        draw_button(scene, &fc_ref, &format!("共有{count}条数据"));
+                    })
+                    .on_click(move |_| {
+                        let id = next_ref.get();
+                        next_ref.set(id + 1);
+                        let mut v = list_ref.get();
+                        v.push(RowItem::new(id));
+                        list_ref.set(v);
+                    }),
+            );
 
-                    let fc = fc_for_scroll.clone();
-                    let toggle_id = toggle_for_scroll.clone();
-                    let state_list = state_for_scroll.clone();
-
-                    // 每行容器
-                    cx.add_child(FnWidget::new(
-                        move |scene, cx| {
-                            if !show {
-                                return;
-                            }
-                            let rect = cx.outer_rect();
-                            scene.fill_round_rect(rect, 8.0, Color::rgb(240, 240, 240));
-                        },
-                        move |cx| {
-                            if !show {
-                                return;
-                            }
-
-                            // show 按钮
-                            {
-                                let toggle_id = toggle_id.clone();
-                                let show_label = create_memo(move || format!("show {key}"));
-                                let fc = fc.clone();
-                                cx.add_child(
-                                    FnWidget::new(
-                                        move |scene, _| {
-                                            let label = show_label.get();
-                                            draw_button(scene, &label, &fc);
-                                        },
-                                        |_| {},
-                                    )
-                                    .on_click(move |_| {
-                                        toggle_id.set(key);
-                                    }),
-                                );
-                            }
-
-                            // hide 按钮
-                            {
-                                let toggle_id = toggle_id.clone();
-                                let hide_label = create_memo(move || format!("hide {key}"));
-                                let fc = fc.clone();
-                                cx.add_child(
-                                    FnWidget::new(
-                                        move |scene, _| {
-                                            let label = hide_label.get();
-                                            draw_button(scene, &label, &fc);
-                                        },
-                                        |_| {},
-                                    )
-                                    .on_click(move |_| {
-                                        toggle_id.set(key);
-                                    }),
-                                );
-                            }
-
-                            // delete 按钮
-                            {
-                                let state_list = state_list.clone();
-                                let del_label = create_memo(move || format!("delete {key}"));
-                                let fc = fc.clone();
-                                cx.add_child(
-                                    FnWidget::new(
-                                        move |scene, _| {
-                                            let label = del_label.get();
-                                            draw_button(scene, &label, &fc);
-                                        },
-                                        |_| {},
-                                    )
-                                    .on_click(move |_| {
-                                        let k = key;
-                                        let current = state_list.get();
-                                        state_list.set(
-                                            current.into_iter().filter(|x| x.key != k).collect(),
-                                        );
-                                    }),
-                                );
-                            }
-                        },
-                    ));
-                }
-            },
-        ));
+            // 列表
+            let snapshot = list.get();
+            let all_items = std::rc::Rc::new(std::cell::RefCell::new(snapshot.clone()));
+            for item in snapshot {
+                build_list_item(
+                    cx,
+                    item,
+                    fc.clone(),
+                    toggle.clone(),
+                    list.clone(),
+                    all_items.clone(),
+                );
+            }
+        }
     });
+
+    // 启动渲染
+    wy_engine::mve_integration::run_mve(move || cache.clone());
 }
