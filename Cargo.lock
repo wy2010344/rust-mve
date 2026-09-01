@@ -3513,6 +3513,14 @@ name = "wy-layout"
 version = "0.1.0"
 
 [[package]]
+name = "wy-mve"
+version = "0.1.0"
+dependencies = [
+ "wy-layout",
+ "wy-signal",
+]
+
+[[package]]
 name = "wy-render"
 version = "0.1.0"
 dependencies = [

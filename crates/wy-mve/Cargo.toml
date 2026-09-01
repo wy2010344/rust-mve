@@ -1,0 +1,9 @@
+[package]
+name = "wy-mve"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wy-signal = { workspace = true }
+wy-layout = { workspace = true }
