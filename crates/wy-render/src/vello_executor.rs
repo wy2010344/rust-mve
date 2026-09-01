@@ -396,4 +396,39 @@ mod tests {
         );
         assert_eq!(text_cache.cache.len(), 1);
     }
+
+    #[test]
+    fn chinese_text_layout_produces_glyphs() {
+        let (mut font_cx, mut layout_cx, _text_cache) = make_contexts();
+        let text = "共有5条数据";
+        let font_size = 14.0;
+        let color = Color::BLACK;
+        let brush = [color.red(), color.green(), color.blue(), color.alpha()];
+        let display_scale = 1.0;
+        let mut builder = layout_cx.ranged_builder(&mut font_cx, text, display_scale, false);
+        builder.push_default(parley::StyleProperty::FontSize(font_size));
+        builder.push_default(parley::StyleProperty::Brush(brush));
+        let mut layout: parley::Layout<[u8; 4]> = builder.build(text);
+        layout.break_all_lines(None);
+        layout.align(
+            parley::Alignment::Start,
+            parley::AlignmentOptions::default(),
+        );
+
+        // 检查 layout 是否产生了行和 glyph run
+        let line_count = layout.lines().count();
+        eprintln!(
+            "Chinese text layout: lines={line_count}, width={}",
+            layout.width()
+        );
+        for line in layout.lines() {
+            for item in line.items() {
+                eprintln!("  line item: {:?}", std::mem::discriminant(&item));
+            }
+        }
+        assert!(
+            line_count > 0,
+            "Chinese text should produce at least one line"
+        );
+    }
 }
