@@ -16,3 +16,6 @@ pub use app::{run_mve_app, MouseButton, MveApp, WindowEvent};
 pub use context::{render_root, ChildrenCache, Context, NodeContext};
 pub use node::{Key, KeyEvent, Node, PointerEvent};
 pub use state_holder::StateHolder;
+
+#[cfg(test)]
+mod tests;
