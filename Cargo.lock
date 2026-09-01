@@ -3503,6 +3503,7 @@ dependencies = [
  "wgpu",
  "winit",
  "wy-layout",
+ "wy-mve",
  "wy-render",
  "wy-signal",
  "wy-text",

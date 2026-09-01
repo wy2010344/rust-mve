@@ -10,6 +10,7 @@ wy-signal = { workspace = true }
 wy-layout = { workspace = true }
 wy-render = { workspace = true }
 wy-text = { workspace = true }
+wy-mve = { workspace = true }
 accesskit = { workspace = true }
 accesskit_winit = { workspace = true }
 parley = { workspace = true }

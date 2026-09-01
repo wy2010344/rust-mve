@@ -14,6 +14,7 @@ mod accessibility;
 pub mod composition;
 mod event;
 mod focus;
+pub mod mve_integration;
 pub mod runner;
 pub mod winit_translate;
 
