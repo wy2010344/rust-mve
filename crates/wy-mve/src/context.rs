@@ -138,6 +138,11 @@ impl NodeContext {
         &mut self.nodes
     }
 
+    /// 消费上下文并返回所有子节点。
+    pub fn into_nodes(self) -> Vec<Node> {
+        self.nodes
+    }
+
     /// 提供上下文值。
     pub fn provide<T: 'static>(&mut self, context_id: u64, value: T) {
         self.contexts.push((context_id, Box::new(value)));

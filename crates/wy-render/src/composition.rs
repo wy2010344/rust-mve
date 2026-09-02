@@ -63,6 +63,10 @@ impl Widget for FnWidget {
         (self.children_fn)(cx);
     }
 
+    fn hit_test(&self, _x: f32, _y: f32, _cx: &DrawContext) -> bool {
+        true
+    }
+
     fn on_click(&mut self, cx: &DrawContext) {
         if let Some(f) = &self.on_click_fn {
             f(cx);

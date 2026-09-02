@@ -235,7 +235,7 @@ impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
         let vello_renderer = vello::Renderer::new(
             &device,
             vello::RendererOptions {
-                use_cpu: false,
+                use_cpu: true,
                 ..Default::default()
             },
         )

@@ -36,6 +36,10 @@ pub enum Primitive {
     ClipPush { rect: Rect },
     /// 裁剪出栈。
     ClipPop,
+    /// 坐标变换入栈：后续图元的坐标将加上偏移量。
+    TransformPush { offset: crate::math::Point },
+    /// 坐标变换出栈。
+    TransformPop,
 }
 
 /// Scene：平台无关的绘制命令记录器。
@@ -131,6 +135,16 @@ impl Scene {
     pub fn pop_clip(&mut self) {
         self.primitives.push(Primitive::ClipPop);
     }
+
+    /// 坐标变换入栈：后续图元的坐标将加上偏移量。
+    pub fn push_transform(&mut self, offset: crate::math::Point) {
+        self.primitives.push(Primitive::TransformPush { offset });
+    }
+
+    /// 坐标变换出栈：恢复变换前的状态。
+    pub fn pop_transform(&mut self) {
+        self.primitives.push(Primitive::TransformPop);
+    }
 }
 
 #[cfg(test)]
@@ -148,8 +162,10 @@ mod tests {
         s.draw_text(Point::new(0.0, 1.0), "hi", 14.0, Color::BLACK);
         s.push_clip(Rect::new(0.0, 0.0, 10.0, 10.0));
         s.pop_clip();
+        s.push_transform(Point::new(5.0, 10.0));
+        s.pop_transform();
 
-        assert_eq!(s.len(), 5);
+        assert_eq!(s.len(), 7);
         assert!(!s.is_empty());
         let items: Vec<_> = s.iter().collect();
         assert!(matches!(items[0], Primitive::Rect { .. }));
@@ -157,6 +173,8 @@ mod tests {
         assert!(matches!(items[2], Primitive::Text { .. }));
         assert!(matches!(items[3], Primitive::ClipPush { .. }));
         assert!(matches!(items[4], Primitive::ClipPop));
+        assert!(matches!(items[5], Primitive::TransformPush { .. }));
+        assert!(matches!(items[6], Primitive::TransformPop));
     }
 
     #[test]

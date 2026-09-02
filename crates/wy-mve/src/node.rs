@@ -63,7 +63,7 @@ impl Node {
         Self {
             arg_children_fn: Rc::new(|_| {}),
             draw_fn: Rc::new(|_| {}),
-            hit_test_fn: Rc::new(|_, _| false),
+            hit_test_fn: Rc::new(|_, _| true),
             on_click_fn: None,
             on_down_fn: None,
             on_up_fn: None,

@@ -1,8 +1,9 @@
 //! Demo：MVE 模式的列表应用。
 //!
 //! 对应 Kotlin 的 DemoList.kt，使用 `wy-mve` 的 Node + 信号系统。
+//! 每帧实时读取信号构建 Node 树，无缓存。
 
-use wy_mve::{render_root, Node, NodeContext};
+use wy_mve::{Node, NodeContext};
 use wy_render::{Color, Point, Rect, Scene};
 use wy_signal::{create_signal, GetValue, SetValue};
 use wy_text::FontContext;
@@ -46,8 +47,7 @@ fn build_list_item(
     item: RowItem,
     fc: std::rc::Rc<std::cell::RefCell<FontContext>>,
     toggle_signal: wy_signal::Signal<u64>,
-    delete_signal: wy_signal::Signal<Vec<RowItem>>,
-    all_items: std::rc::Rc<std::cell::RefCell<Vec<RowItem>>>,
+    list_signal: wy_signal::Signal<Vec<RowItem>>,
 ) {
     let key = item.key;
     let hide = item.hide;
@@ -59,9 +59,7 @@ fn build_list_item(
     // 行容器
     let fc_ref = fc.clone();
     let toggle_ref = toggle_signal.clone();
-    let delete_ref = delete_signal.clone();
-    let all_ref = all_items.clone();
-    let text_key = key;
+    let list_ref = list_signal.clone();
 
     cx.add_node(
         Node::new()
@@ -78,7 +76,7 @@ fn build_list_item(
                 {
                     let fc = fc_ref.clone();
                     let toggle = toggle_ref.clone();
-                    let k = text_key;
+                    let k = key;
                     child_cx.add_node(
                         Node::new()
                             .draw(move |scene| {
@@ -95,7 +93,7 @@ fn build_list_item(
                 {
                     let fc = fc_ref.clone();
                     let toggle = toggle_ref.clone();
-                    let k = text_key;
+                    let k = key;
                     child_cx.add_node(
                         Node::new()
                             .draw(move |scene| {
@@ -111,9 +109,8 @@ fn build_list_item(
                 // delete 按钮
                 {
                     let fc = fc_ref.clone();
-                    let delete = delete_ref.clone();
-                    let all = all_ref.clone();
-                    let k = text_key;
+                    let list = list_ref.clone();
+                    let k = key;
                     child_cx.add_node(
                         Node::new()
                             .draw(move |scene| {
@@ -121,10 +118,11 @@ fn build_list_item(
                                 draw_button(scene, &fc, &format!("delete {k}"));
                             })
                             .on_click(move |_| {
-                                let current = all.borrow().clone();
+                                // 实时读取当前列表（不使用缓存）
+                                let current = list.get();
                                 let filtered: Vec<RowItem> =
                                     current.into_iter().filter(|x| x.key != k).collect();
-                                delete.set(filtered);
+                                list.set(filtered);
                             }),
                     );
                 }
@@ -135,6 +133,8 @@ fn build_list_item(
 // --- 入口 ---
 
 fn main() {
+    // 初始化日志：过滤 Parley/ICU4X 的 CJK 分段警告
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     let state_list = create_signal(vec![
         RowItem::new(0),
         RowItem::new(1),
@@ -148,15 +148,15 @@ fn main() {
 
     let font_cx = std::rc::Rc::new(std::cell::RefCell::new(FontContext::new()));
 
-    // MVE 树构建
-    let cache = render_root({
+    // MVE 应用：每帧实时读取信号构建 Node 树
+    let app = wy_engine::mve_integration::MveApp::new({
         let list = state_list.clone();
         let fc = font_cx.clone();
         let toggle = toggle_id.clone();
         let next = next_id.clone();
 
         move |cx| {
-            // 计数按钮
+            // 计数按钮（实时读取 list 长度）
             let list_ref = list.clone();
             let next_ref = next.clone();
             let fc_ref = fc.clone();
@@ -176,22 +176,14 @@ fn main() {
                     }),
             );
 
-            // 列表
+            // 列表（实时读取 list 信号）
             let snapshot = list.get();
-            let all_items = std::rc::Rc::new(std::cell::RefCell::new(snapshot.clone()));
             for item in snapshot {
-                build_list_item(
-                    cx,
-                    item,
-                    fc.clone(),
-                    toggle.clone(),
-                    list.clone(),
-                    all_items.clone(),
-                );
+                build_list_item(cx, item, fc.clone(), toggle.clone(), list.clone());
             }
         }
     });
 
     // 启动渲染
-    wy_engine::mve_integration::run_mve(move || cache.clone());
+    let _ = wy_engine::runner::run(app);
 }

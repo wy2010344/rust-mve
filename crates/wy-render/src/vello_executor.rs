@@ -96,10 +96,16 @@ pub fn execute_scene(
     layout_cx: &mut parley::LayoutContext,
     text_cache: &mut TextLayoutCache,
 ) {
+    // 累积坐标偏移栈（用于 TransformPush/TransformPop）
+    let mut offset_stack: Vec<(f32, f32)> = Vec::new();
+    let mut cumulative = (0.0f32, 0.0f32);
+
     for prim in src.iter() {
         match prim {
             Primitive::Rect { rect, color } => {
-                let k_rect = kurbo_rect(rect.x, rect.y, rect.width, rect.height);
+                let x = rect.x + cumulative.0;
+                let y = rect.y + cumulative.1;
+                let k_rect = kurbo_rect(x, y, rect.width, rect.height);
                 let c = to_peniko_color(*color);
                 dst.fill(Fill::NonZero, Affine::IDENTITY, c, None, &k_rect);
             }
@@ -108,7 +114,9 @@ pub fn execute_scene(
                 radius,
                 color,
             } => {
-                let k_rect = kurbo_rect(rect.x, rect.y, rect.width, rect.height);
+                let x = rect.x + cumulative.0;
+                let y = rect.y + cumulative.1;
+                let k_rect = kurbo_rect(x, y, rect.width, rect.height);
                 let rr = RoundedRect::from_rect(k_rect, *radius as f64);
                 let c = to_peniko_color(*color);
                 dst.fill(Fill::NonZero, Affine::IDENTITY, c, None, &rr);
@@ -119,7 +127,9 @@ pub fn execute_scene(
                 color,
                 stroke_width,
             } => {
-                let k_rect = kurbo_rect(rect.x, rect.y, rect.width, rect.height);
+                let x = rect.x + cumulative.0;
+                let y = rect.y + cumulative.1;
+                let k_rect = kurbo_rect(x, y, rect.width, rect.height);
                 let rr = RoundedRect::from_rect(k_rect, *radius as f64);
                 let c = to_peniko_color(*color);
                 let stroke = Stroke::new(*stroke_width as f64);
@@ -136,18 +146,29 @@ pub fn execute_scene(
                     font_cx,
                     layout_cx,
                     text_cache,
-                    point: *point,
+                    point: crate::math::Point::new(point.x + cumulative.0, point.y + cumulative.1),
                     text,
                     font_size: *font_size,
                     color: *color,
                 });
             }
             Primitive::ClipPush { rect } => {
-                let k_rect = kurbo_rect(rect.x, rect.y, rect.width, rect.height);
+                let x = rect.x + cumulative.0;
+                let y = rect.y + cumulative.1;
+                let k_rect = kurbo_rect(x, y, rect.width, rect.height);
                 dst.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &k_rect);
             }
             Primitive::ClipPop => {
                 dst.pop_layer();
+            }
+            Primitive::TransformPush { offset } => {
+                offset_stack.push(cumulative);
+                cumulative = (cumulative.0 + offset.x, cumulative.1 + offset.y);
+            }
+            Primitive::TransformPop => {
+                if let Some(prev) = offset_stack.pop() {
+                    cumulative = prev;
+                }
             }
         }
     }
@@ -417,15 +438,6 @@ mod tests {
 
         // 检查 layout 是否产生了行和 glyph run
         let line_count = layout.lines().count();
-        eprintln!(
-            "Chinese text layout: lines={line_count}, width={}",
-            layout.width()
-        );
-        for line in layout.lines() {
-            for item in line.items() {
-                eprintln!("  line item: {:?}", std::mem::discriminant(&item));
-            }
-        }
         assert!(
             line_count > 0,
             "Chinese text should produce at least one line"

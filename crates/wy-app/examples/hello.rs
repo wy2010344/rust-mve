@@ -12,6 +12,17 @@ impl WyApp for HelloApp {
         // 白色背景
         scene.fill_rect(Rect::new(0.0, 0.0, width, height), Color::WHITE);
 
+        // 黑色大文字（测试文字渲染）
+        scene.draw_text(Point::new(50.0, 100.0), "Hello, wy-ui!", 48.0, Color::BLACK);
+
+        // 红色小文字（0xRRGGBBAA 格式：R=FF, G=00, B=00, A=FF）
+        scene.draw_text(
+            Point::new(50.0, 200.0),
+            "文字渲染测试 ABC 123",
+            24.0,
+            Color::from_u32(0xFF_00_00_FF),
+        );
+
         // 居中的蓝色矩形
         let rect_w = 200.0;
         let rect_h = 100.0;
@@ -20,16 +31,8 @@ impl WyApp for HelloApp {
         scene.fill_round_rect(
             Rect::new(x, y, rect_w, rect_h),
             8.0,
-            Color::from_u32(0xFF_3366CC),
+            Color::from_u32(0x33_66_CC_FF),
         );
-
-        // 标题文字（占位矩形）
-        let text = "Hello, wy-ui!";
-        let text_w = text.len() as f32 * 12.0;
-        let text_h = 24.0;
-        let tx = (width - text_w) / 2.0;
-        let ty = y + (rect_h - text_h) / 2.0;
-        scene.draw_text(Point::new(tx, ty), text, 24.0, Color::WHITE);
     }
 
     fn on_resize(&mut self, width: f32, height: f32) {

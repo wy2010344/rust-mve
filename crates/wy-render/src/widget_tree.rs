@@ -556,6 +556,14 @@ impl WidgetTree {
     pub fn root(&self) -> usize {
         self.root
     }
+
+    /// 获取指定节点的子节点索引列表。
+    pub fn children_of(&self, idx: usize) -> Vec<usize> {
+        self.nodes
+            .get(idx)
+            .map(|n| n.children.clone())
+            .unwrap_or_default()
+    }
 }
 
 #[cfg(test)]
