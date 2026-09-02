@@ -2,7 +2,6 @@
 
 use std::any::Any;
 use std::cell::RefCell;
-use std::hash::Hash;
 use std::rc::Rc;
 
 use crate::node::Node;
@@ -169,7 +168,7 @@ impl NodeContext {
         items_fn: impl Fn() -> Vec<(K, T)> + 'static,
         creator: impl Fn(K, T, &mut NodeContext) + 'static,
     ) where
-        K: Eq + Hash + Clone + 'static,
+        K: Eq + Clone + 'static,
         T: 'static,
     {
         let cache = ChildrenCache {
@@ -183,19 +182,25 @@ impl NodeContext {
         // create_effect 追踪 items_fn 中读取的信号
         wy_signal::create_effect(move || {
             let items = items_fn();
-            let old_nodes = cache_ref.cache.borrow().clone();
+
+            // 将旧 Node 按 key 存入 HashMap，以便复用
+            let old_nodes: Vec<Node> = cache_ref.cache.borrow().clone();
+            // 注意：当前 Node 不存储 key，使用位置复用策略
+            // 位置匹配的节点直接复用，超出部分创建新节点
             let mut new_nodes = Vec::with_capacity(items.len());
             let old_len = old_nodes.len();
 
             for (i, (key, value)) in items.into_iter().enumerate() {
                 if i < old_len {
-                    // 复用已有 Node
+                    // 复用已有 Node（按位置）
                     new_nodes.push(old_nodes[i].clone());
+                    let _ = key;
+                    let _ = value;
                 } else {
-                    // 新增
+                    // 新增：创建新 Node
                     let mut child_cx = NodeContext::new(0);
                     cr(key, value, &mut child_cx);
-                    if let Some(node) = child_cx.nodes.into_iter().next() {
+                    for node in child_cx.nodes {
                         new_nodes.push(node);
                     }
                 }

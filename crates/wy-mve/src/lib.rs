@@ -3,7 +3,7 @@
 //! 复刻 Kotlin wy-helper 的 MVE 模式。
 //!
 //! 核心类型：
-//! - [`Node`] — UI 元素的具象类型（用闭包代替继承）
+//! - [`Node`] — UI 元素的具象类型（声明式构造，用闭包代替继承）
 //! - [`NodeContext`] — `arg_children()` 的执行上下文
 //! - [`StateHolder`] — 持有构建后的节点树
 

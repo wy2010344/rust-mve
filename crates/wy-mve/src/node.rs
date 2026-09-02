@@ -1,6 +1,7 @@
 //! Node：UI 元素的具象类型。
 //!
 //! 对应 Kotlin 的 `Node` 类。用闭包代替继承。
+//! 声明式构造：像 JS 对象或 Kotlin 匿名类一样一次性构建，不可修改。
 
 use std::rc::Rc;
 
@@ -14,18 +15,44 @@ type KeyFn = Rc<dyn Fn(&mut KeyEvent) -> bool>;
 
 /// Node：UI 元素的具象类型。
 ///
-/// 通过闭包配置行为，不需要定义子类。
-/// 所有闭包用 `Rc` 存储，支持廉价 Clone。
+/// 声明式构造，一次性构建完成，之后不可修改。
+///
+/// ```ignore
+/// // JS/Kotlin 风格的声明式构造
+/// let node = Node {
+///     draw_fn: Rc::new(|scene| { ... }),
+///     on_click_fn: Some(Rc::new(|_| { ... })),
+///     arg_children_fn: Rc::new(|cx| { ... }),
+///     ..Node::default()
+/// };
+/// ```
 pub struct Node {
-    pub(crate) arg_children_fn: ArgChildrenFn,
-    pub(crate) draw_fn: DrawFn,
-    pub(crate) hit_test_fn: HitTestFn,
-    pub(crate) on_click_fn: Option<ClickFn>,
-    pub(crate) on_down_fn: Option<ClickFn>,
-    pub(crate) on_up_fn: Option<ClickFn>,
-    pub(crate) key_fn: Option<KeyFn>,
-    pub(crate) focusable: bool,
-    pub(crate) hidden: bool,
+    /// 绘制逻辑。
+    pub draw_fn: DrawFn,
+    /// 子节点构建逻辑。
+    pub arg_children_fn: ArgChildrenFn,
+    /// 命中测试逻辑。
+    pub hit_test_fn: HitTestFn,
+    /// 点击事件。
+    pub on_click_fn: Option<ClickFn>,
+    /// 按下事件。
+    pub on_down_fn: Option<ClickFn>,
+    /// 释放事件。
+    pub on_up_fn: Option<ClickFn>,
+    /// 按键事件。
+    pub key_fn: Option<KeyFn>,
+    /// 是否可聚焦。
+    pub focusable: bool,
+    /// 是否隐藏（不参与布局和命中测试）。
+    pub hidden: bool,
+    /// 跳过自身绘制（但子节点仍绘制）。
+    pub skip_draw: bool,
+    /// 焦点顺序（显式 Tab 顺序，None = 按文档顺序）。
+    pub focus_order: Option<i32>,
+    /// 是否为焦点陷阱（模态窗口内焦点不外泄）。
+    pub focus_trap: bool,
+    /// 是否启用选择。
+    pub selection_enabled: bool,
 }
 
 impl Clone for Node {
@@ -40,26 +67,22 @@ impl Clone for Node {
             key_fn: self.key_fn.as_ref().map(Rc::clone),
             focusable: self.focusable,
             hidden: self.hidden,
+            skip_draw: self.skip_draw,
+            focus_order: self.focus_order,
+            focus_trap: self.focus_trap,
+            selection_enabled: self.selection_enabled,
         }
     }
 }
 
 impl PartialEq for Node {
     fn eq(&self, _other: &Self) -> bool {
-        // 闭包不支持比较，Node 的相等性由调用方（Memo）保证
         false
     }
 }
 
 impl Default for Node {
     fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Node {
-    /// 创建空节点。
-    pub fn new() -> Self {
         Self {
             arg_children_fn: Rc::new(|_| {}),
             draw_fn: Rc::new(|_| {}),
@@ -70,82 +93,17 @@ impl Node {
             key_fn: None,
             focusable: false,
             hidden: false,
+            skip_draw: false,
+            focus_order: None,
+            focus_trap: false,
+            selection_enabled: true,
         }
     }
+}
 
-    /// 创建文本节点。
-    pub fn text(_content: &str) -> Self {
-        Self {
-            draw_fn: Rc::new(move |_scene| {
-                // 文本绘制由渲染层处理
-            }),
-            ..Self::new()
-        }
-    }
+// --- 执行方法（供内部调用） ---
 
-    /// 创建矩形节点。
-    pub fn rect() -> Self {
-        Self::new()
-    }
-
-    /// 设置子节点构建逻辑。
-    ///
-    /// 对应 Kotlin 的 `override fun argChildren()`。
-    pub fn arg_children(mut self, f: impl Fn(&mut NodeContext) + 'static) -> Self {
-        self.arg_children_fn = Rc::new(f);
-        self
-    }
-
-    /// 设置绘制逻辑。
-    pub fn draw(mut self, f: impl Fn(&mut dyn std::any::Any) + 'static) -> Self {
-        self.draw_fn = Rc::new(f);
-        self
-    }
-
-    /// 设置命中测试。
-    pub fn hit_test(mut self, f: impl Fn(f32, f32) -> bool + 'static) -> Self {
-        self.hit_test_fn = Rc::new(f);
-        self
-    }
-
-    /// 设置点击事件。
-    pub fn on_click(mut self, f: impl Fn(&mut PointerEvent) + 'static) -> Self {
-        self.on_click_fn = Some(Rc::new(f));
-        self
-    }
-
-    /// 设置按下事件。
-    pub fn on_pointer_down(mut self, f: impl Fn(&mut PointerEvent) + 'static) -> Self {
-        self.on_down_fn = Some(Rc::new(f));
-        self
-    }
-
-    /// 设置释放事件。
-    pub fn on_pointer_up(mut self, f: impl Fn(&mut PointerEvent) + 'static) -> Self {
-        self.on_up_fn = Some(Rc::new(f));
-        self
-    }
-
-    /// 设置按键事件。
-    pub fn on_key(mut self, f: impl Fn(&mut KeyEvent) -> bool + 'static) -> Self {
-        self.key_fn = Some(Rc::new(f));
-        self
-    }
-
-    /// 设为可聚焦。
-    pub fn focusable(mut self) -> Self {
-        self.focusable = true;
-        self
-    }
-
-    /// 设为隐藏。
-    pub fn hide(mut self) -> Self {
-        self.hidden = true;
-        self
-    }
-
-    // --- 执行 ---
-
+impl Node {
     pub fn run_arg_children(&self, cx: &mut NodeContext) {
         (self.arg_children_fn)(cx);
     }

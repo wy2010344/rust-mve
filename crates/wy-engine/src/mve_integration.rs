@@ -1,23 +1,28 @@
 //! MVE 集成：将 `wy-mve` 的 Node 树连接到渲染管线。
 //!
-//! 流程：callback → NodeContext → MveWidget → WidgetTree → Scene → Vello
+//! 流程：render_root → effect 监听信号 → MveWidget → WidgetTree → Scene → Vello
 //!
-//! 每帧直接调用 callback 构建 Node 树（实时读取信号），不使用缓存。
+//! 核心模式（复刻 Kotlin MVE）：
+//! - `MveApp::new(callback)` 创建 effect 监听 callback 中读取的信号
+//! - 信号变化时 effect 自动重建 MVE Node 树，标记 WidgetTree 为脏
+//! - `widget_tree()` 返回缓存的 WidgetTree，runner 用于渲染和事件分发
+//! - 每帧不重建 Widget 树，只在信号变化时重建
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use wy_mve::{Node, NodeContext, PointerEvent as MvePointerEvent};
-use wy_render::composition::FnWidget;
+use wy_mve::{ChildrenCache, Node, NodeContext, PointerEvent as MvePointerEvent};
 use wy_render::widget::ChildBuilder;
 use wy_render::widget_tree::WidgetTree;
 use wy_render::{DrawContext, Rect, Scene, Widget};
 
 /// 将 MVE Node 树转为 Widget 树的适配器。
 ///
-/// 每个 MveWidget 包装一个 MVE Node，并将其 `arg_children` 暴露为 Widget 子节点。
+/// 每个 MveWidget 包装一组 MVE Node（从 ChildrenCache 获取）。
+/// `children()` 在 `WidgetTree::new()` 时调用一次（不是每帧），
+/// 递归展开所有 arg_children 形成完整的 Widget 树。
 struct MveWidget {
-    node: Node,
+    nodes: Vec<Node>,
 }
 
 impl Widget for MveWidget {
@@ -26,17 +31,26 @@ impl Widget for MveWidget {
         if pos.x != 0.0 || pos.y != 0.0 {
             scene.push_transform(pos);
         }
-        self.node.run_draw(scene);
+        for node in &self.nodes {
+            if !node.skip_draw {
+                node.run_draw(scene);
+            }
+        }
         if pos.x != 0.0 || pos.y != 0.0 {
             scene.pop_transform();
         }
     }
 
     fn children(&self, cx: &mut ChildBuilder) {
-        let mut child_cx = NodeContext::new(0);
-        self.node.run_arg_children(&mut child_cx);
-        for child in child_cx.into_nodes() {
-            cx.add_child(MveWidget { node: child });
+        // 在 WidgetTree::new() 时调用一次（不是每帧）
+        // 递归展开所有 arg_children 形成 Widget 树
+        for node in &self.nodes {
+            let mut child_cx = NodeContext::new(0);
+            node.run_arg_children(&mut child_cx);
+            let child_nodes = child_cx.into_nodes();
+            if !child_nodes.is_empty() {
+                cx.add_child(MveWidget { nodes: child_nodes });
+            }
         }
     }
 
@@ -45,61 +59,143 @@ impl Widget for MveWidget {
         x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
     }
 
+    fn on_pointer_down(&mut self, event: &mut wy_render::event::PointerEvent, _cx: &DrawContext) {
+        let mut mve_event = MvePointerEvent::new(event.x, event.y);
+        for node in &self.nodes {
+            node.run_on_down(&mut mve_event);
+            if mve_event.stopped {
+                event.stop_propagation();
+                return;
+            }
+        }
+    }
+
+    fn on_pointer_up(&mut self, event: &mut wy_render::event::PointerEvent, _cx: &DrawContext) {
+        let mut mve_event = MvePointerEvent::new(event.x, event.y);
+        for node in &self.nodes {
+            node.run_on_up(&mut mve_event);
+            if mve_event.stopped {
+                event.stop_propagation();
+                return;
+            }
+        }
+    }
+
     fn on_click(&mut self, _cx: &DrawContext) {
         let mut event = MvePointerEvent::new(0.0, 0.0);
-        self.node.run_on_click(&mut event);
+        for node in &self.nodes {
+            node.run_on_click(&mut event);
+            if event.stopped {
+                return;
+            }
+        }
     }
 
     fn focusable(&self) -> bool {
-        self.node.is_focusable()
+        self.nodes.iter().any(|n| n.is_focusable())
+    }
+}
+
+/// Memo 化的布局计算缓存。
+struct LayoutMemo {
+    last_width: f32,
+    last_height: f32,
+    last_tree_shape: u64,
+}
+
+impl LayoutMemo {
+    fn new() -> Self {
+        Self {
+            last_width: 0.0,
+            last_height: 0.0,
+            last_tree_shape: 0,
+        }
+    }
+
+    fn needs_recompute(&self, width: f32, height: f32, tree_shape: u64) -> bool {
+        (self.last_width - width).abs() > f32::EPSILON
+            || (self.last_height - height).abs() > f32::EPSILON
+            || self.last_tree_shape != tree_shape
+    }
+
+    fn record(&mut self, width: f32, height: f32, tree_shape: u64) {
+        self.last_width = width;
+        self.last_height = height;
+        self.last_tree_shape = tree_shape;
     }
 }
 
 /// MVE 应用：连接 MVE Node 树与渲染引擎。
 ///
-/// 每帧调用 callback 构建 Node 树（实时读取信号），然后通过 WidgetTree 渲染和事件分发。
+/// 核心模式（复刻 Kotlin MVE）：
+/// - `new(callback)` 创建 effect 监听 callback 中读取的信号
+/// - 信号变化时 effect 自动重建 MVE Node 树，标记 WidgetTree 为脏
+/// - `widget_tree()` 返回缓存的 WidgetTree，runner 用于渲染和事件分发
+/// - 每帧不重建 Widget 树，只在信号变化时重建
 pub struct MveApp {
-    callback: Rc<dyn Fn(&mut NodeContext)>,
-    current_tree: RefCell<Option<WidgetTree>>,
-    request_redraw: RefCell<Option<Rc<dyn Fn()>>>,
-    mouse_x: f64,
-    mouse_y: f64,
+    root_builder: Rc<dyn Fn(&mut NodeContext)>,
+    cached_nodes: Rc<RefCell<Vec<Node>>>,
+    cached_tree: Option<WidgetTree>,
+    tree_dirty: Rc<Cell<bool>>,
+    layout_memo: LayoutMemo,
+    request_redraw: Rc<dyn Fn()>,
 }
 
 impl MveApp {
-    /// 创建 MVE 应用。
-    ///
-    /// `callback` 在每帧 draw 时被调用，读取信号并构建 Node 树。
-    /// 这是真正的 MVE 模式：信号在每次绘制时实时读取，无缓存。
-    pub fn new(callback: impl Fn(&mut NodeContext) + 'static) -> Self {
+    /// 从 ChildrenCache 创建（推荐方式）。
+    pub fn from_cache(cache: ChildrenCache) -> Self {
+        let cache_ref = cache.clone();
         Self {
-            callback: Rc::new(callback),
-            current_tree: RefCell::new(None),
-            request_redraw: RefCell::new(None),
-            mouse_x: 0.0,
-            mouse_y: 0.0,
+            root_builder: Rc::new(move |cx| {
+                for node in cache_ref.get() {
+                    cx.add_node(node);
+                }
+            }),
+            cached_nodes: Rc::new(RefCell::new(Vec::new())),
+            cached_tree: None,
+            tree_dirty: Rc::new(Cell::new(true)),
+            layout_memo: LayoutMemo::new(),
+            request_redraw: Rc::new(|| {}),
         }
     }
 
-    fn redraw(&self) {
-        if let Some(cb) = self.request_redraw.borrow().as_ref() {
-            cb();
+    /// 创建 MVE 应用（effect 模式）。
+    ///
+    /// `callback` 中读取的信号会被 effect 自动追踪。
+    /// 信号变化时 effect 重建 MVE Node 树，标记 WidgetTree 为脏。
+    /// 每帧 `widget_tree()` 只读取缓存的 WidgetTree，不重建。
+    pub fn new(callback: impl Fn(&mut NodeContext) + 'static) -> Self {
+        let cache = wy_mve::render_root(callback);
+        Self::from_cache(cache)
+    }
+
+    /// 计算树结构的哈希值（用于布局缓存判断）。
+    fn tree_shape_hash(nodes: &[Node]) -> u64 {
+        let mut hash = 0u64;
+        for node in nodes {
+            hash = hash
+                .wrapping_mul(31)
+                .wrapping_add(if node.hidden { 1 } else { 0 });
+            hash = hash
+                .wrapping_mul(31)
+                .wrapping_add(if node.skip_draw { 2 } else { 0 });
+            hash = hash
+                .wrapping_mul(31)
+                .wrapping_add(if node.focusable { 4 } else { 0 });
         }
+        hash
     }
 
     /// 自定义布局：root 垂直排列子节点，list item 内水平排列按钮。
     fn layout_tree(tree: &mut WidgetTree, width: f32, height: f32) {
-        // root 获得全窗口
         tree.set_layout(0, Rect::new(0.0, 0.0, width, height));
 
         let root_children = tree.children_of(0);
         let mut y_offset = 0.0f32;
         for &child_idx in &root_children {
-            // 每个顶层子节点高度50px
             let child_rect = Rect::new(0.0, y_offset, width, 50.0);
             tree.set_layout(child_idx, child_rect);
 
-            // 子节点的子节点（按钮）水平排列
             let button_children = tree.children_of(child_idx);
             let mut x_offset = 0.0f32;
             for &btn_idx in &button_children {
@@ -111,88 +207,92 @@ impl MveApp {
             y_offset += 50.0;
         }
     }
+
+    /// 从缓存的 MVE Node 重建 WidgetTree。
+    fn rebuild_tree(&mut self) {
+        let nodes = self.cached_nodes.borrow().clone();
+        let root = MveWidget { nodes };
+        self.cached_tree = Some(WidgetTree::new(root));
+    }
 }
 
 impl crate::runner::WyApp for MveApp {
     fn setup(&mut self, request_redraw: Rc<dyn Fn()>) {
-        *self.request_redraw.borrow_mut() = Some(request_redraw);
+        // 保存 request_redraw
+        self.request_redraw = request_redraw.clone();
+
+        // 创建 effect 监听 root_builder 中读取的信号
+        // 信号变化时自动重建 MVE Node 树，标记 WidgetTree 为脏
+        let root_builder = self.root_builder.clone();
+        let cached_nodes = self.cached_nodes.clone();
+        let tree_dirty = self.tree_dirty.clone();
+        let request_redraw_ref = request_redraw.clone();
+
+        wy_signal::create_effect(move || {
+            let mut cx = NodeContext::new(0);
+            root_builder(&mut cx);
+            let new_nodes = cx.into_nodes();
+            *cached_nodes.borrow_mut() = new_nodes;
+            // 标记 WidgetTree 为脏（需要重建）
+            tree_dirty.set(true);
+            // 触发重绘
+            request_redraw_ref();
+        });
     }
 
-    fn draw(&mut self, scene: &mut Scene, width: f32, height: f32) {
-        // 实时调用 callback 构建 Node 树（读取信号）
-        let mut cx = NodeContext::new(0);
-        (self.callback)(&mut cx);
-        let nodes = std::rc::Rc::new(std::cell::RefCell::new(cx.into_nodes()));
-
-        // 构建 WidgetTree
-        let nodes_ref = nodes.clone();
-        let root = FnWidget::new(
-            |_, _| {},
-            move |builder| {
-                for node in nodes_ref.borrow().iter() {
-                    builder.add_child(MveWidget { node: node.clone() });
-                }
-            },
-        );
-        let mut tree = WidgetTree::new(root);
-
-        // 自定义布局
-        Self::layout_tree(&mut tree, width, height);
-
-        tree.draw_scene(scene);
-        *self.current_tree.borrow_mut() = Some(tree);
+    fn draw(&mut self, _scene: &mut Scene, _width: f32, _height: f32) {
+        // 使用 widget_tree() 而不是 draw()
+        // 此方法不应被调用（runner 优先使用 widget_tree()）
     }
 
-    fn handle_event(&mut self, event: &winit::event::WindowEvent) -> bool {
-        use winit::event::{ElementState, MouseButton, WindowEvent};
-
-        match event {
-            WindowEvent::CursorMoved { position, .. } => {
-                self.mouse_x = position.x;
-                self.mouse_y = position.y;
-                false
-            }
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                button: MouseButton::Left,
-                ..
-            } => {
-                let handled = if let Some(tree) = self.current_tree.borrow_mut().as_mut() {
-                    let x = self.mouse_x as f32;
-                    let y = self.mouse_y as f32;
-                    tree.dispatch_pointer_down(x, y);
-                    tree.dispatch_pointer_up(x, y)
-                } else {
-                    false
-                };
-                self.redraw();
-                handled
-            }
-            WindowEvent::MouseInput {
-                state: ElementState::Released,
-                button: MouseButton::Left,
-                ..
-            } => {
-                // Released 也触发 redraw（确保状态同步）
-                self.redraw();
-                false
-            }
-            _ => false,
+    fn widget_tree(&mut self) -> Option<&mut WidgetTree> {
+        // 如果 WidgetTree 为脏（信号变化导致），重建
+        if self.tree_dirty.get() {
+            self.rebuild_tree();
+            self.tree_dirty.set(false);
         }
+
+        // 计算布局（只在窗口尺寸或树结构变化时重新计算）
+        let tree = self.cached_tree.as_mut()?;
+        let tree_shape = Self::tree_shape_hash(&self.cached_nodes.borrow());
+        let width = self.layout_memo.last_width;
+        let height = self.layout_memo.last_height;
+
+        if width > 0.0
+            && height > 0.0
+            && self.layout_memo.needs_recompute(width, height, tree_shape)
+        {
+            Self::layout_tree(tree, width, height);
+            self.layout_memo.record(width, height, tree_shape);
+        }
+
+        Some(tree)
+    }
+
+    fn on_resize(&mut self, width: f32, height: f32) {
+        // 窗口尺寸变化时，强制重新计算布局
+        self.layout_memo.last_width = 0.0;
+        self.layout_memo.last_height = 0.0;
+
+        // 如果已有缓存的 tree，立即计算布局
+        if let Some(tree) = self.cached_tree.as_mut() {
+            let tree_shape = Self::tree_shape_hash(&self.cached_nodes.borrow());
+            if self.layout_memo.needs_recompute(width, height, tree_shape) {
+                Self::layout_tree(tree, width, height);
+                self.layout_memo.record(width, height, tree_shape);
+            }
+        }
+    }
+
+    fn handle_event(&mut self, _event: &winit::event::WindowEvent) -> bool {
+        // 事件由 runner 通过 widget_tree() 自动分发
+        false
     }
 }
 
-/// 启动 MVE 应用（兼容旧 API）。
-///
-/// `builder` 返回的 `ChildrenCache` 会在每帧被读取。
-/// 推荐直接使用 `MveApp::new(callback)` + `runner::run(app)`。
-pub fn run_mve(builder: impl Fn() -> wy_mve::ChildrenCache + 'static) {
+/// 启动 MVE 应用。
+pub fn run_mve(builder: impl Fn() -> ChildrenCache + 'static) {
     let cache = builder();
-    let cache_ref = cache.clone();
-    let app = MveApp::new(move |cx| {
-        for node in cache_ref.get() {
-            cx.add_node(node);
-        }
-    });
+    let app = MveApp::from_cache(cache);
     let _ = crate::runner::run(app);
 }

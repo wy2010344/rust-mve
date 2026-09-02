@@ -564,6 +564,11 @@ impl WidgetTree {
             .map(|n| n.children.clone())
             .unwrap_or_default()
     }
+
+    /// 获取树中所有节点的子节点总数（用于布局缓存判断）。
+    pub fn children_count(&self) -> usize {
+        self.nodes.iter().map(|n| n.children.len()).sum()
+    }
 }
 
 #[cfg(test)]

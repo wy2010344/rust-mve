@@ -6,23 +6,29 @@ use wy_signal::{create_signal, GetValue, SetValue};
 
 #[test]
 fn node_new_defaults() {
-    let node = Node::new();
+    let node = Node::default();
     assert!(!node.is_focusable());
     assert!(!node.is_hidden());
 }
 
 #[test]
 fn node_focusable_and_hide() {
-    let node = Node::new().focusable().hide();
+    let node = Node {
+        focusable: true,
+        hidden: true,
+        ..Node::default()
+    };
     assert!(node.is_focusable());
     assert!(node.is_hidden());
 }
 
 #[test]
 fn node_clone_shares_rc() {
-    let node = Node::new().draw(|_| {});
+    let node = Node {
+        draw_fn: Rc::new(|_| {}),
+        ..Node::default()
+    };
     let cloned = node.clone();
-    // 两者共享同一闭包
     assert!(std::ptr::eq(
         &*node.draw_fn as *const _,
         &*cloned.draw_fn as *const _,
@@ -32,22 +38,24 @@ fn node_clone_shares_rc() {
 #[test]
 fn node_add_node_to_context() {
     let mut cx = NodeContext::new(0);
-    cx.add_node(Node::new());
-    cx.add_node(Node::new());
+    cx.add_node(Node::default());
+    cx.add_node(Node::default());
     assert_eq!(cx.nodes().len(), 2);
 }
 
 #[test]
 fn node_arg_children_builds_subtree() {
     let mut cx = NodeContext::new(0);
-    cx.add_node(Node::new().arg_children(|child_cx| {
-        child_cx.add_node(Node::new());
-        child_cx.add_node(Node::new());
-        child_cx.add_node(Node::new());
-    }));
+    cx.add_node(Node {
+        arg_children_fn: Rc::new(|child_cx| {
+            child_cx.add_node(Node::default());
+            child_cx.add_node(Node::default());
+            child_cx.add_node(Node::default());
+        }),
+        ..Node::default()
+    });
     assert_eq!(cx.nodes().len(), 1);
 
-    // 执行 arg_children
     let node = &cx.nodes()[0];
     let mut child_cx = NodeContext::new(0);
     node.run_arg_children(&mut child_cx);
@@ -57,8 +65,8 @@ fn node_arg_children_builds_subtree() {
 #[test]
 fn render_root_creates_children_cache() {
     let cache = render_root(|cx| {
-        cx.add_node(Node::new());
-        cx.add_node(Node::new());
+        cx.add_node(Node::default());
+        cx.add_node(Node::default());
     });
     let nodes = cache.get();
     assert_eq!(nodes.len(), 2);
@@ -73,15 +81,13 @@ fn render_root_tracks_signals() {
         move |cx| {
             let c = counter.get();
             for _ in 0..c {
-                cx.add_node(Node::new());
+                cx.add_node(Node::default());
             }
         }
     });
 
-    // 初始值为 0，没有子节点
     assert_eq!(cache.get().len(), 0);
 
-    // 修改信号，子节点数量变化
     counter.set(3);
     assert_eq!(cache.get().len(), 3);
 
@@ -102,9 +108,12 @@ fn node_event_types() {
     let clicked = Rc::new(RefCell::new(false));
     let clicked_ref = clicked.clone();
 
-    let node = Node::new().on_click(move |_| {
-        *clicked_ref.borrow_mut() = true;
-    });
+    let node = Node {
+        on_click_fn: Some(Rc::new(move |_| {
+            *clicked_ref.borrow_mut() = true;
+        })),
+        ..Node::default()
+    };
 
     let mut event = crate::PointerEvent::new(0.0, 0.0);
     node.run_on_click(&mut event);
@@ -113,7 +122,10 @@ fn node_event_types() {
 
 #[test]
 fn node_key_event() {
-    let node = Node::new().on_key(|event| event.key == crate::Key::Enter);
+    let node = Node {
+        key_fn: Some(Rc::new(|event| event.key == crate::Key::Enter)),
+        ..Node::default()
+    };
 
     let mut event = crate::KeyEvent {
         key: crate::Key::Enter,
@@ -137,7 +149,7 @@ fn node_key_event() {
 #[test]
 fn children_cache_clone_is_independent() {
     let cache = render_root(|cx| {
-        cx.add_node(Node::new());
+        cx.add_node(Node::default());
     });
     let cache2 = cache.clone();
     assert_eq!(cache.get().len(), cache2.get().len());
@@ -146,13 +158,13 @@ fn children_cache_clone_is_independent() {
 #[test]
 fn state_holder_basic() {
     let mut holder = crate::StateHolder::new(|cx| {
-        cx.add_node(Node::new());
+        cx.add_node(Node::default());
     });
     assert_eq!(holder.children().len(), 1);
 
     holder.rebuild(|cx| {
-        cx.add_node(Node::new());
-        cx.add_node(Node::new());
+        cx.add_node(Node::default());
+        cx.add_node(Node::default());
     });
     assert_eq!(holder.children().len(), 2);
 }
@@ -160,25 +172,27 @@ fn state_holder_basic() {
 #[test]
 fn nested_node_tree() {
     let cache = render_root(|cx| {
-        // 根节点
-        cx.add_node(Node::new().arg_children(|child_cx| {
-            // 子节点
-            child_cx.add_node(Node::new());
-            child_cx.add_node(Node::new().arg_children(|grandchild_cx| {
-                grandchild_cx.add_node(Node::new());
-            }));
-        }));
+        cx.add_node(Node {
+            arg_children_fn: Rc::new(|child_cx| {
+                child_cx.add_node(Node::default());
+                child_cx.add_node(Node {
+                    arg_children_fn: Rc::new(|grandchild_cx| {
+                        grandchild_cx.add_node(Node::default());
+                    }),
+                    ..Node::default()
+                });
+            }),
+            ..Node::default()
+        });
     });
 
     let nodes = cache.get();
     assert_eq!(nodes.len(), 1);
 
-    // 展开子节点
     let mut child_cx = NodeContext::new(0);
     nodes[0].run_arg_children(&mut child_cx);
     assert_eq!(child_cx.nodes().len(), 2);
 
-    // 展开孙节点
     let mut grandchild_cx = NodeContext::new(0);
     child_cx.nodes()[1].run_arg_children(&mut grandchild_cx);
     assert_eq!(grandchild_cx.nodes().len(), 1);

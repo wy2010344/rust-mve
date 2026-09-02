@@ -109,16 +109,22 @@ impl<T> Signal<T> {
             bump_global_version();
 
             // 把依赖本信号的观察者推入批次队列。
+            // flush 期间推入 next_batch，避免修改正在迭代的 batch。
             let listeners = self.inner.listeners.borrow();
+            let target = if g.flushing {
+                &mut g.next_batch
+            } else {
+                &mut g.batch
+            };
             for &id in listeners.iter() {
-                if !g.batch.contains(&id) {
-                    g.batch.push(id);
+                if !target.contains(&id) {
+                    target.push(id);
                 }
             }
             drop(listeners);
 
             // 批次深度为 0（未在显式 batch 内）时，本批完成后立即 flush。
-            if g.batch_depth == 0 && !g.batch.is_empty() {
+            if g.batch_depth == 0 && !g.batch.is_empty() && !g.flushing {
                 should_flush = true;
             }
         });

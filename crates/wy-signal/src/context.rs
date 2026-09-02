@@ -30,10 +30,14 @@ pub(crate) fn bump_global_version() {
 pub(crate) struct Global {
     /// 当前正在执行 `add_fun`/memo 计算的观察者。
     pub current: Option<Rc<dyn TrackDyn>>,
-    /// 批次队列（写阶段累积的待评估观察者）。
+    /// 当前批次队列（flush 时逐个取出执行）。
     pub batch: Vec<NodeId>,
+    /// 下一批次队列（flush 期间新触发的观察者推入此处，避免无限循环）。
+    pub next_batch: Vec<NodeId>,
     /// 是否处于 memo 计算中（禁止写入信号）。
     pub computing: bool,
+    /// 是否正在 flush 中（新触发的观察者推入 next_batch）。
+    pub flushing: bool,
     /// 观察者注册表：`NodeId -> Rc<dyn TrackDyn>`。
     pub registry: HashMap<NodeId, Rc<dyn TrackDyn>>,
     /// 下一个可用观察者节点 ID。
@@ -47,7 +51,9 @@ impl Global {
         Self {
             current: None,
             batch: Vec::new(),
+            next_batch: Vec::new(),
             computing: false,
+            flushing: false,
             registry: HashMap::new(),
             next_id: 0,
             batch_depth: 0,
