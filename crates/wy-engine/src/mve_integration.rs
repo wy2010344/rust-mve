@@ -11,6 +11,9 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use wy_layout::{
+    DirectionJustify, FlexChildConvert, FlexObject, Layout, LayoutInsideObject,
+};
 use wy_mve::{ChildrenCache, Node, NodeContext, PointerEvent as MvePointerEvent};
 use wy_render::widget::ChildBuilder;
 use wy_render::widget_tree::WidgetTree;
@@ -125,6 +128,67 @@ impl LayoutMemo {
     }
 }
 
+/// 列表行高度（demo 固定值）。
+const ROW_HEIGHT: f32 = 50.0;
+/// 按钮宽度（demo 固定值）。
+const BUTTON_WIDTH: f32 = 80.0;
+
+/// 参与 `FlexLayout` 布局的一个子节点：索引 + 主轴外部尺寸 + grow 权重。
+struct FlexChild {
+    idx: usize,
+    size: f32,
+    grow: f32,
+}
+
+impl FlexChild {
+    fn new(idx: usize, size: f32) -> Self {
+        Self {
+            idx,
+            size,
+            grow: 0.0,
+        }
+    }
+}
+
+impl FlexChildConvert<FlexChild> for FlexRow {
+    fn index(&self, c: &FlexChild) -> usize {
+        c.idx
+    }
+    fn grow(&self, c: &FlexChild) -> f32 {
+        c.grow
+    }
+    fn outer_size(&self, c: &FlexChild) -> f32 {
+        c.size
+    }
+    fn ignore(&self, _c: &FlexChild) -> bool {
+        false
+    }
+}
+
+impl FlexObject<FlexChild> for FlexRow {
+    fn gap(&self) -> f32 {
+        self.gap
+    }
+    fn direction_justify(&self) -> DirectionJustify {
+        self.direction
+    }
+}
+
+/// 一维 Flex 布局容器配置：主轴方向（start/center/end/...）+ 间距 + 可用空间。
+struct FlexRow {
+    direction: DirectionJustify,
+    gap: f32,
+    inner_size: f32,
+}
+
+impl FlexRow {
+    /// 用 `wy-layout` 的 `FlexLayout` 计算子节点位置与尺寸。
+    fn build(&self, children: &[FlexChild]) -> wy_layout::FlexLayout {
+        let inside = LayoutInsideObject::new(children, self.inner_size);
+        self.to_layout(&inside)
+    }
+}
+
 /// MVE 应用：连接 MVE Node 树与渲染引擎。
 ///
 /// 核心模式（复刻 Kotlin MVE）：
@@ -186,25 +250,56 @@ impl MveApp {
         hash
     }
 
-    /// 自定义布局：root 垂直排列子节点，list item 内水平排列按钮。
+    /// 自定义布局：使用 `wy-layout` 的 `FlexLayout` 进行布局。
+    ///
+    /// - root 子节点（列表行）沿垂直主轴用 `FlexLayout` 排列；
+    /// - 每个 list item 内的按钮沿水平主轴用 `FlexLayout` 排列。
+    ///
+    /// 布局是一维的：`FlexLayout` 只给出主轴上的位置与尺寸标量，
+    /// 交叉轴尺寸在这里取父节点全宽（工具栏/行内按钮交叉轴为行高）。
     fn layout_tree(tree: &mut WidgetTree, width: f32, height: f32) {
         tree.set_layout(0, Rect::new(0.0, 0.0, width, height));
 
+        // root：垂直排列子节点，gap=10
         let root_children = tree.children_of(0);
-        let mut y_offset = 0.0f32;
-        for &child_idx in &root_children {
-            let child_rect = Rect::new(0.0, y_offset, width, 50.0);
-            tree.set_layout(child_idx, child_rect);
+        let rows: Vec<FlexChild> = root_children
+            .iter()
+            .enumerate()
+            .map(|(i, _)| FlexChild::new(i, ROW_HEIGHT))
+            .collect();
+        let flex_arg = FlexRow {
+            direction: DirectionJustify::Grow,
+            gap: 10.0,
+            inner_size: height,
+        };
+        let vlayout = flex_arg.build(&rows);
 
+        for (i, &child_idx) in root_children.iter().enumerate() {
+            // 行在垂直主轴上的位置 y 由 vlayout 给出，行高取主轴尺寸（=ROW_HEIGHT），
+            // 交叉轴（水平）填满父节点全宽。
+            let y = vlayout.child_position(i).unwrap_or(0.0);
+            let h = vlayout.child_size(i).unwrap_or(0.0);
+            tree.set_layout(child_idx, Rect::new(0.0, y, width, h));
+
+            // list item 内：水平排列按钮，gap=5
             let button_children = tree.children_of(child_idx);
-            let mut x_offset = 0.0f32;
-            for &btn_idx in &button_children {
-                let btn_rect = Rect::new(x_offset, 0.0, 80.0, 40.0);
-                tree.set_layout(btn_idx, btn_rect);
-                x_offset += 85.0;
-            }
+            let buttons: Vec<FlexChild> = button_children
+                .iter()
+                .enumerate()
+                .map(|(i, _)| FlexChild::new(i, BUTTON_WIDTH))
+                .collect();
+            let btn_arg = FlexRow {
+                direction: DirectionJustify::Grow,
+                gap: 5.0,
+                inner_size: width,
+            };
+            let hlayout = btn_arg.build(&buttons);
 
-            y_offset += 50.0;
+            for (bi, &btn_idx) in button_children.iter().enumerate() {
+                let x = hlayout.child_position(bi).unwrap_or(0.0);
+                let w = hlayout.child_size(bi).unwrap_or(0.0);
+                tree.set_layout(btn_idx, Rect::new(x, 0.0, w, h));
+            }
         }
     }
 
@@ -295,4 +390,50 @@ pub fn run_mve(builder: impl Fn() -> ChildrenCache + 'static) {
     let cache = builder();
     let app = MveApp::from_cache(cache);
     let _ = crate::runner::run(app);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `FlexRow::build` 以 `Grow` 模式沿主轴排列子节点（含 gap，去除末尾多余 gap）。
+    #[test]
+    fn flex_row_grow_stacks_with_gap() {
+        let rows = vec![
+            FlexChild::new(0, ROW_HEIGHT),
+            FlexChild::new(1, ROW_HEIGHT),
+        ];
+        let arg = FlexRow {
+            direction: DirectionJustify::Grow,
+            gap: 10.0,
+            inner_size: 200.0,
+        };
+        let layout = arg.build(&rows);
+
+        assert_eq!(layout.child_position(0).unwrap(), 0.0);
+        assert_eq!(layout.child_size(0).unwrap(), ROW_HEIGHT);
+        // 第二个子节点偏移 = 50 + 10
+        assert_eq!(layout.child_position(1).unwrap(), 60.0);
+        assert_eq!(layout.child_size(1).unwrap(), ROW_HEIGHT);
+        // 总长 = 50*2 + 10 = 110（去掉末尾 gap）
+        assert_eq!(layout.size_from_children().unwrap(), 110.0);
+    }
+
+    /// `DirectionJustify::Center` 模式：子节点在可用空间内居中。
+    #[test]
+    fn flex_row_center_justifies() {
+        let buttons = vec![
+            FlexChild::new(0, BUTTON_WIDTH),
+            FlexChild::new(1, BUTTON_WIDTH),
+        ];
+        let arg = FlexRow {
+            direction: DirectionJustify::Center,
+            gap: 0.0,
+            inner_size: 200.0,
+        };
+        let layout = arg.build(&buttons);
+        // all_remaining = 200 - 160 = 40，起始 = 20
+        assert_eq!(layout.child_position(0).unwrap(), 20.0);
+        assert_eq!(layout.child_position(1).unwrap(), 100.0);
+    }
 }
