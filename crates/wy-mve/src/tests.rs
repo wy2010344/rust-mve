@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::{render_root, Node, NodeContext};
@@ -196,4 +196,94 @@ fn nested_node_tree() {
     let mut grandchild_cx = NodeContext::new(0);
     child_cx.nodes()[1].run_arg_children(&mut grandchild_cx);
     assert_eq!(grandchild_cx.nodes().len(), 1);
+}
+
+// ===== 对齐 Kotlin NodeLazyBuildTest：argChildren 惰性构建 =====
+
+/// arg_children_fn 在 Node 构造时不执行，仅在显式调用 run_arg_children 时执行。
+/// 对齐 Kotlin NodeLazyBuildTest.argChildrenNotCalledDuringNodeConstruction。
+#[test]
+fn arg_children_not_called_during_construction() {
+    let call_count = Rc::new(Cell::new(0));
+    let node = Node {
+        arg_children_fn: Rc::new({
+            let call_count = call_count.clone();
+            move |_| {
+                call_count.set(call_count.get() + 1);
+            }
+        }),
+        ..Node::default()
+    };
+    assert_eq!(call_count.get(), 0, "构造期间不应调用 arg_children");
+
+    let mut cx = NodeContext::new(0);
+    node.run_arg_children(&mut cx);
+    assert_eq!(call_count.get(), 1, "显式调用后执行一次");
+}
+
+/// render_root 中的 arg_children_fn 仅在 effect 执行时调用。
+#[test]
+fn render_root_defers_arg_children_to_effect() {
+    let call_count = Rc::new(Cell::new(0));
+    let cache = render_root({
+        let call_count = call_count.clone();
+        move |cx| {
+            call_count.set(call_count.get() + 1);
+            cx.add_node(Node::default());
+        }
+    });
+    assert_eq!(call_count.get(), 1, "render_root effect 立即执行一次");
+    assert_eq!(cache.get().len(), 1);
+}
+
+/// 信号变化触发 render_root 重建子节点树。
+#[test]
+fn signal_change_triggers_render_root_rebuild() {
+    let count = create_signal(2u32);
+    let build_count = Rc::new(Cell::new(0));
+
+    let cache = render_root({
+        let count = count.clone();
+        let build_count = build_count.clone();
+        move |cx| {
+            build_count.set(build_count.get() + 1);
+            let n = count.get();
+            for _ in 0..n {
+                cx.add_node(Node::default());
+            }
+        }
+    });
+
+    assert_eq!(cache.get().len(), 2);
+    assert_eq!(build_count.get(), 1);
+
+    count.set(4);
+    assert_eq!(cache.get().len(), 4);
+    assert_eq!(build_count.get(), 2, "信号变化应触发重建");
+}
+
+/// StateHolder 支持 rebuild：重建后子节点更新。
+#[test]
+fn state_holder_rebuild_with_signal() {
+    let items = create_signal(vec![1, 2]);
+    let mut holder = crate::StateHolder::new({
+        let items = items.clone();
+        move |cx| {
+            for _ in items.get().iter() {
+                cx.add_node(Node::default());
+            }
+        }
+    });
+    assert_eq!(holder.children().len(), 2);
+
+    items.set(vec![10, 20, 30]);
+    holder.rebuild({
+        let items = items.clone();
+        move |cx| {
+            for _ in items.get().iter() {
+                cx.add_node(Node::default());
+            }
+        }
+    });
+    assert_eq!(holder.children().len(), 3);
 }

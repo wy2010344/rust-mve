@@ -1,19 +1,17 @@
 //! MVE 集成：将 `wy-mve` 的 Node 树连接到渲染管线。
 //!
-//! 流程：render_root → effect 监听信号 → MveWidget → WidgetTree → Scene → Vello
+//! 流程：RedrawTracker.collect → root_builder 读信号 → MveWidget → WidgetTree → Scene → Vello
 //!
-//! 核心模式（复刻 Kotlin MVE）：
-//! - `MveApp::new(callback)` 创建 effect 监听 callback 中读取的信号
-//! - 信号变化时 effect 自动重建 MVE Node 树，标记 WidgetTree 为脏
-//! - `widget_tree()` 返回缓存的 WidgetTree，runner 用于渲染和事件分发
-//! - 每帧不重建 Widget 树，只在信号变化时重建
+//! 核心模式（复刻 Kotlin Renderer.signal.collect { draw() }）：
+//! - `MveApp::draw()` 中调用 `root_builder`，`RedrawTracker` 自动追踪信号
+//! - 信号变化时 `RedrawTracker` 自动触发重绘
+//! - `draw()` 重新调用 `root_builder` → Node 树重建 → WidgetTree 重建
+//! - 零 `create_effect`，框架层全自动
 
-use std::cell::{Cell, RefCell};
+use std::cell::UnsafeCell;
 use std::rc::Rc;
 
-use wy_layout::{
-    DirectionJustify, FlexChildConvert, FlexObject, Layout, LayoutInsideObject,
-};
+use wy_layout::{DirectionJustify, FlexChildConvert, FlexObject, Layout, LayoutInsideObject};
 use wy_mve::{ChildrenCache, Node, NodeContext, PointerEvent as MvePointerEvent};
 use wy_render::widget::ChildBuilder;
 use wy_render::widget_tree::WidgetTree;
@@ -191,18 +189,15 @@ impl FlexRow {
 
 /// MVE 应用：连接 MVE Node 树与渲染引擎。
 ///
-/// 核心模式（复刻 Kotlin MVE）：
-/// - `new(callback)` 创建 effect 监听 callback 中读取的信号
-/// - 信号变化时 effect 自动重建 MVE Node 树，标记 WidgetTree 为脏
-/// - `widget_tree()` 返回缓存的 WidgetTree，runner 用于渲染和事件分发
-/// - 每帧不重建 Widget 树，只在信号变化时重建
+/// 核心模式（复刻 Kotlin Renderer.signal.collect { draw() }）：
+/// - `draw()` 中调用 `root_builder` 构建 Node 树 → `RedrawTracker` 自动追踪信号
+/// - 信号变化时 `RedrawTracker` 自动触发重绘
+/// - `draw()` 重新调用 `root_builder` → Node 树重建 → WidgetTree 重建
+/// - 零 `create_effect`，框架层全自动
 pub struct MveApp {
     root_builder: Rc<dyn Fn(&mut NodeContext)>,
-    cached_nodes: Rc<RefCell<Vec<Node>>>,
-    cached_tree: Option<WidgetTree>,
-    tree_dirty: Rc<Cell<bool>>,
-    layout_memo: LayoutMemo,
-    request_redraw: Rc<dyn Fn()>,
+    cached_tree: UnsafeCell<Option<WidgetTree>>,
+    layout_memo: UnsafeCell<LayoutMemo>,
 }
 
 impl MveApp {
@@ -215,22 +210,21 @@ impl MveApp {
                     cx.add_node(node);
                 }
             }),
-            cached_nodes: Rc::new(RefCell::new(Vec::new())),
-            cached_tree: None,
-            tree_dirty: Rc::new(Cell::new(true)),
-            layout_memo: LayoutMemo::new(),
-            request_redraw: Rc::new(|| {}),
+            cached_tree: UnsafeCell::new(None),
+            layout_memo: UnsafeCell::new(LayoutMemo::new()),
         }
     }
 
-    /// 创建 MVE 应用（effect 模式）。
+    /// 创建 MVE 应用。
     ///
-    /// `callback` 中读取的信号会被 effect 自动追踪。
-    /// 信号变化时 effect 重建 MVE Node 树，标记 WidgetTree 为脏。
-    /// 每帧 `widget_tree()` 只读取缓存的 WidgetTree，不重建。
+    /// `callback` 中读取的信号会被 `RedrawTracker` 自动追踪。
+    /// 信号变化时自动触发重绘，`draw()` 重新调用 `callback` 重建 Node 树。
     pub fn new(callback: impl Fn(&mut NodeContext) + 'static) -> Self {
-        let cache = wy_mve::render_root(callback);
-        Self::from_cache(cache)
+        Self {
+            root_builder: Rc::new(callback),
+            cached_tree: UnsafeCell::new(None),
+            layout_memo: UnsafeCell::new(LayoutMemo::new()),
+        }
     }
 
     /// 计算树结构的哈希值（用于布局缓存判断）。
@@ -303,78 +297,56 @@ impl MveApp {
         }
     }
 
-    /// 从缓存的 MVE Node 重建 WidgetTree。
-    fn rebuild_tree(&mut self) {
-        let nodes = self.cached_nodes.borrow().clone();
-        let root = MveWidget { nodes };
-        self.cached_tree = Some(WidgetTree::new(root));
+    /// 从 MVE Node 构建 WidgetTree。
+    fn build_tree(nodes: &[Node]) -> WidgetTree {
+        let root = MveWidget {
+            nodes: nodes.to_vec(),
+        };
+        WidgetTree::new(root)
     }
 }
 
 impl crate::runner::WyApp for MveApp {
-    fn setup(&mut self, request_redraw: Rc<dyn Fn()>) {
-        // 保存 request_redraw
-        self.request_redraw = request_redraw.clone();
+    fn draw(&self, _scene: &mut Scene, width: f32, height: f32) {
+        // 等价于 Kotlin: signal.collect { draw() }
+        // root_builder 中读取的信号被 RedrawTracker 自动追踪
+        //
+        // SAFETY: draw() 仅在 runner 的 render() 中通过 tracker.draw() 调用，
+        // runner 拥有 self.app 的独占访问权，且 &self 是 tracker 创建的临时引用，
+        // 不与其他代码并发访问 cached_tree/layout_memo。
+        let cached_tree = unsafe { &mut *self.cached_tree.get() };
+        let layout_memo = unsafe { &mut *self.layout_memo.get() };
 
-        // 创建 effect 监听 root_builder 中读取的信号
-        // 信号变化时自动重建 MVE Node 树，标记 WidgetTree 为脏
-        let root_builder = self.root_builder.clone();
-        let cached_nodes = self.cached_nodes.clone();
-        let tree_dirty = self.tree_dirty.clone();
-        let request_redraw_ref = request_redraw.clone();
+        let mut cx = NodeContext::new(0);
+        (self.root_builder)(&mut cx);
+        let nodes = cx.into_nodes();
 
-        wy_signal::create_effect(move || {
-            let mut cx = NodeContext::new(0);
-            root_builder(&mut cx);
-            let new_nodes = cx.into_nodes();
-            *cached_nodes.borrow_mut() = new_nodes;
-            // 标记 WidgetTree 为脏（需要重建）
-            tree_dirty.set(true);
-            // 触发重绘
-            request_redraw_ref();
-        });
-    }
+        // 从 Node 构建 WidgetTree
+        *cached_tree = Some(Self::build_tree(&nodes));
 
-    fn draw(&mut self, _scene: &mut Scene, _width: f32, _height: f32) {
-        // 使用 widget_tree() 而不是 draw()
-        // 此方法不应被调用（runner 优先使用 widget_tree()）
+        // 计算布局
+        let tree = cached_tree.as_mut().unwrap();
+        let tree_shape = Self::tree_shape_hash(&nodes);
+        if width > 0.0 && height > 0.0 {
+            Self::layout_tree(tree, width, height);
+            layout_memo.record(width, height, tree_shape);
+        }
     }
 
     fn widget_tree(&mut self) -> Option<&mut WidgetTree> {
-        // 如果 WidgetTree 为脏（信号变化导致），重建
-        if self.tree_dirty.get() {
-            self.rebuild_tree();
-            self.tree_dirty.set(false);
-        }
-
-        // 计算布局（只在窗口尺寸或树结构变化时重新计算）
-        let tree = self.cached_tree.as_mut()?;
-        let tree_shape = Self::tree_shape_hash(&self.cached_nodes.borrow());
-        let width = self.layout_memo.last_width;
-        let height = self.layout_memo.last_height;
-
-        if width > 0.0
-            && height > 0.0
-            && self.layout_memo.needs_recompute(width, height, tree_shape)
-        {
-            Self::layout_tree(tree, width, height);
-            self.layout_memo.record(width, height, tree_shape);
-        }
-
-        Some(tree)
+        self.cached_tree.get_mut().as_mut()
     }
 
     fn on_resize(&mut self, width: f32, height: f32) {
         // 窗口尺寸变化时，强制重新计算布局
-        self.layout_memo.last_width = 0.0;
-        self.layout_memo.last_height = 0.0;
+        let layout_memo = self.layout_memo.get_mut();
+        layout_memo.last_width = 0.0;
+        layout_memo.last_height = 0.0;
 
-        // 如果已有缓存的 tree，立即计算布局
-        if let Some(tree) = self.cached_tree.as_mut() {
-            let tree_shape = Self::tree_shape_hash(&self.cached_nodes.borrow());
-            if self.layout_memo.needs_recompute(width, height, tree_shape) {
+        if let Some(tree) = self.cached_tree.get_mut().as_mut() {
+            if layout_memo.needs_recompute(width, height, 0) {
                 Self::layout_tree(tree, width, height);
-                self.layout_memo.record(width, height, tree_shape);
+                layout_memo.record(width, height, 0);
             }
         }
     }
@@ -399,10 +371,7 @@ mod tests {
     /// `FlexRow::build` 以 `Grow` 模式沿主轴排列子节点（含 gap，去除末尾多余 gap）。
     #[test]
     fn flex_row_grow_stacks_with_gap() {
-        let rows = vec![
-            FlexChild::new(0, ROW_HEIGHT),
-            FlexChild::new(1, ROW_HEIGHT),
-        ];
+        let rows = vec![FlexChild::new(0, ROW_HEIGHT), FlexChild::new(1, ROW_HEIGHT)];
         let arg = FlexRow {
             direction: DirectionJustify::Grow,
             gap: 10.0,

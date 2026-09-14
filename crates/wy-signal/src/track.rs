@@ -28,6 +28,14 @@ pub struct TrackEffect {
     inner: Rc<TrackEffectInner>,
 }
 
+impl Clone for TrackEffect {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Rc::clone(&self.inner),
+        }
+    }
+}
+
 impl TrackEffect {
     /// 创建副作用观察者。
     ///
@@ -72,6 +80,23 @@ impl TrackEffect {
         crate::context::with_current(this as Rc<dyn TrackDyn>, || {
             (self.inner.effect)();
         });
+    }
+
+    /// 在闭包执行期间将自身设为当前观察者，收集依赖但不执行 effect body。
+    ///
+    /// 用于框架层自动追踪：`collect(|| draw())` 使 draw 中的信号读取
+    /// 自动注册到此 effect，信号变化时触发 add_fun 重跑 effect。
+    pub fn collect<R>(&self, f: impl FnOnce() -> R) -> R {
+        if self.inner.disposed.get() {
+            return f();
+        }
+        let this = self
+            .inner
+            .self_cell
+            .borrow()
+            .clone()
+            .expect("effect self_cell");
+        crate::context::with_current(this as Rc<dyn TrackDyn>, f)
     }
 }
 

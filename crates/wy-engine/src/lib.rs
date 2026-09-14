@@ -15,6 +15,7 @@ pub mod composition;
 mod event;
 mod focus;
 pub mod mve_integration;
+pub mod redraw_tracker;
 pub mod runner;
 pub mod winit_translate;
 

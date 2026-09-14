@@ -8,7 +8,7 @@ use wy_render::{Color, Point, Rect, Scene};
 struct HelloApp;
 
 impl WyApp for HelloApp {
-    fn draw(&mut self, scene: &mut Scene, width: f32, height: f32) {
+    fn draw(&self, scene: &mut Scene, width: f32, height: f32) {
         // 白色背景
         scene.fill_rect(Rect::new(0.0, 0.0, width, height), Color::WHITE);
 

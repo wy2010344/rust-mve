@@ -36,7 +36,7 @@ impl Composition {
 impl crate::runner::WyApp for Composition {
     fn setup(&mut self, _request_redraw: Rc<dyn Fn()>) {}
 
-    fn draw(&mut self, scene: &mut Scene, width: f32, height: f32) {
+    fn draw(&self, scene: &mut Scene, width: f32, height: f32) {
         // 重建 UI 树——闭包内读取的信号值是最新的
         let builder = self.tree_builder.clone();
         let root = FnWidget::new(|_, _| {}, move |cx| builder(cx));

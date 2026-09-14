@@ -11,7 +11,7 @@
 //! struct MyApp;
 //!
 //! impl WyApp for MyApp {
-//!     fn draw(&mut self, scene: &mut Scene, width: f32, height: f32) {
+//!     fn draw(&self, scene: &mut Scene, width: f32, height: f32) {
 //!         scene.fill_rect(
 //!             wy_render::Rect::new(0.0, 0.0, width, height),
 //!             wy_render::Color::WHITE,
@@ -51,11 +51,15 @@ impl From<accesskit_winit::Event> for AppEvent {
 ///
 /// 实现此 trait 即可获得完整的 winit + wgpu + Vello 渲染管线。
 pub trait WyApp {
-    /// 绘制一帧。
+    /// 绘制一帧（只读）。
     ///
     /// 在此方法中使用 `scene` 记录绘制命令（矩形、文本等）。
     /// `width`/`height` 是窗口客户区的像素尺寸。
-    fn draw(&mut self, scene: &mut Scene, width: f32, height: f32);
+    ///
+    /// 注意：`draw()` 接收 `&self`（不可变引用），
+    /// 保证绘制过程中不修改应用状态。
+    /// 状态变更应通过信号（`Signal::set()`）触发。
+    fn draw(&self, scene: &mut Scene, width: f32, height: f32);
 
     /// 初始化应用（可选）。
     ///
@@ -139,6 +143,7 @@ pub fn run(app: impl WyApp + 'static) -> Result<(), Box<dyn std::error::Error>> 
         needs_redraw: Rc::new(Cell::new(true)),
         access_adapter: None,
         proxy,
+        redraw_tracker: None,
     };
 
     event_loop.run_app(&mut state)?;
@@ -163,6 +168,7 @@ struct AppState<A: WyApp> {
     needs_redraw: Rc<Cell<bool>>,
     access_adapter: Option<accesskit_winit::Adapter>,
     proxy: winit::event_loop::EventLoopProxy<AppEvent>,
+    redraw_tracker: Option<crate::redraw_tracker::RedrawTracker>,
 }
 
 impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
@@ -235,7 +241,6 @@ impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
         let vello_renderer = vello::Renderer::new(
             &device,
             vello::RendererOptions {
-                use_cpu: true,
                 ..Default::default()
             },
         )
@@ -258,6 +263,12 @@ impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
             needs_redraw.set(true);
             window_ref.request_redraw();
         });
+
+        // 创建自动重绘追踪器：框架层自动关联信号 → 重绘
+        self.redraw_tracker = Some(crate::redraw_tracker::RedrawTracker::new(
+            request_redraw.clone(),
+        ));
+
         self.app.setup(request_redraw);
 
         // 请求首帧绘制
@@ -394,13 +405,28 @@ impl<A: WyApp> AppState<A> {
             return;
         }
 
-        // 1. 调用应用绘制，生成高层 Scene
+        // 1. 调用应用绘制，生成高层 Scene（通过 RedrawTracker 自动追踪信号依赖）
+        //
+        // 两个路径都包在 tracker.draw() 中，确保信号自动追踪：
+        // - widget_tree() 路径：tree.draw_scene() 读 Widget → 信号追踪
+        // - draw() 路径：app.draw() 中的 Signal.get() → 信号追踪
+        //
+        // widget_tree() 需要 &mut self，必须在 tracker.draw() 之后调用
+        // （tracker.draw() 的闭包 borrow 已释放）。
         let mut scene = Scene::new();
-        if let Some(tree) = self.app.widget_tree() {
-            // 使用 WidgetTree 绘制
+        if let Some(tracker) = &self.redraw_tracker {
+            let tracker = tracker.clone();
+            // 在 collect 上下文中构建 tree（MveApp）或绘制 scene（CounterApp）
+            tracker.draw(|| {
+                self.app.draw(&mut scene, width as f32, height as f32);
+            });
+            // draw() 可能已构建 widget_tree，绘制它
+            if let Some(tree) = self.app.widget_tree() {
+                tree.draw_scene(&mut scene);
+            }
+        } else if let Some(tree) = self.app.widget_tree() {
             tree.draw_scene(&mut scene);
         } else {
-            // 直接绘制
             self.app.draw(&mut scene, width as f32, height as f32);
         }
 

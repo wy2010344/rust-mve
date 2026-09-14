@@ -194,3 +194,110 @@ fn nested_memo() {
     a.set(5);
     assert_eq!(outer.get(), 80);
 }
+
+// ===== 对齐 Kotlin SignalFlowTest 的端到端链路测试 =====
+
+/// memo 幂等性：同 stateVersion 内多次读取，过程体只执行一次。
+/// 对齐 Kotlin SignalFlowTest.memoProcessRunsOnceWithinSameStateVersion。
+#[test]
+fn memo_idempotent_within_same_state_version() {
+    let base = create_signal(2);
+    let recompute = Rc::new(Cell::new(0));
+    let doubled = create_memo({
+        let base = base.clone();
+        let recompute = recompute.clone();
+        move || {
+            recompute.set(recompute.get() + 1);
+            base.get() * 2
+        }
+    });
+
+    assert_eq!(doubled.get(), 4);
+    assert_eq!(doubled.get(), 4);
+    assert_eq!(doubled.get(), 4);
+    assert_eq!(
+        recompute.get(),
+        1,
+        "同 stateVersion 内多次读取过程体只执行一次"
+    );
+
+    base.set(3);
+    assert_eq!(doubled.get(), 6);
+    assert_eq!(recompute.get(), 2, "上游变化应导致过程体重算");
+}
+
+/// memo 链式派生：signal → memo → memo → effect。
+/// 对齐 Kotlin SignalFlowTest.memoChainsThroughAnotherMemo。
+#[test]
+fn memo_chains_through_another_memo() {
+    let a = create_signal(1);
+    let b = create_memo({
+        let a = a.clone();
+        move || a.get() + 10
+    });
+    let c = create_memo({
+        let b = b.clone();
+        move || b.get() * 2
+    });
+
+    let received = Rc::new(Cell::new(0));
+    create_effect({
+        let c = c.clone();
+        let received = received.clone();
+        move || {
+            received.set(c.get());
+        }
+    });
+
+    assert_eq!(received.get(), 22, "a=1 -> b=11 -> c=22");
+
+    a.set(5);
+    assert_eq!(received.get(), 30, "a=5 -> b=15 -> c=30");
+}
+
+/// 新观察者加入时重放 relays 不得重算 memo 过程体。
+/// 对齐 Kotlin SignalFlowTest.memoProcessNotReRunWhenNewObserverReplaysRelay。
+#[test]
+fn memo_new_observer_does_not_rerun_process() {
+    let base = create_signal(5);
+    let recompute = Rc::new(Cell::new(0));
+    let squared = create_memo({
+        let base = base.clone();
+        let recompute = recompute.clone();
+        move || {
+            recompute.set(recompute.get() + 1);
+            base.get() * base.get()
+        }
+    });
+
+    let a_val = Rc::new(Cell::new(0));
+    create_effect({
+        let squared = squared.clone();
+        let a_val = a_val.clone();
+        move || {
+            a_val.set(squared.get());
+        }
+    });
+    assert_eq!(a_val.get(), 25);
+    assert_eq!(recompute.get(), 1, "首次计算一次");
+
+    let b_val = Rc::new(Cell::new(0));
+    create_effect({
+        let squared = squared.clone();
+        let b_val = b_val.clone();
+        move || {
+            b_val.set(squared.get());
+        }
+    });
+    assert_eq!(b_val.get(), 25, "新观察者应拿到缓存值");
+    assert_eq!(
+        recompute.get(),
+        1,
+        "新增观察者重放 relays 不得重算 memo 过程体"
+    );
+
+    base.set(6);
+    assert_eq!(a_val.get(), 36, "观察者 A 应感知变化");
+    assert_eq!(b_val.get(), 36, "观察者 B 应感知变化");
+    assert_eq!(recompute.get(), 2, "一次上游变化只重算一次");
+}

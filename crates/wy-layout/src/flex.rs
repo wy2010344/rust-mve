@@ -282,11 +282,13 @@ mod tests {
     use super::*;
     use crate::layout::{Layout, LayoutInsideObject};
 
-    /// 测试子节点：携带索引、尺寸与 grow 权重。
+    /// 测试子节点：携带索引、尺寸、grow 权重与 ignore 标记。
     struct Child {
         idx: usize,
         size: f32,
         grow: f32,
+        #[allow(dead_code)]
+        ignored: bool,
     }
 
     /// 通用 Flex 测试容器。
@@ -331,6 +333,7 @@ mod tests {
                 idx,
                 size,
                 grow: 0.0,
+                ignored: false,
             })
             .collect()
     }
@@ -374,16 +377,19 @@ mod tests {
                 idx: 0,
                 size: 10.0,
                 grow: 0.0,
+                ignored: false,
             },
             Child {
                 idx: 1,
                 size: 20.0,
                 grow: 1.0,
+                ignored: false,
             },
             Child {
                 idx: 2,
                 size: 30.0,
                 grow: 3.0,
+                ignored: false,
             },
         ];
         let inside = LayoutInsideObject::new(&children, 100.0);
@@ -484,11 +490,13 @@ mod tests {
                 idx: 0,
                 size: 10.0,
                 grow: 0.0,
+                ignored: true,
             },
             Child {
                 idx: 1,
                 size: 20.0,
                 grow: 0.0,
+                ignored: false,
             },
         ];
         let inside = LayoutInsideObject::new(&children, 100.0);
@@ -497,5 +505,277 @@ mod tests {
         assert!(l.child_size(0).is_err());
         // 未被忽略的子节点正常
         assert_eq!(l.child_position(1).unwrap(), 0.0);
+    }
+
+    // ===== 对齐 Kotlin FlexLayoutIgnoreTest =====
+
+    /// ignored 子节点不参与 grow 分配。
+    #[test]
+    fn ignored_child_not_counted_in_grow() {
+        struct IgnoreRow;
+        impl FlexChildConvert<Child> for IgnoreRow {
+            fn index(&self, c: &Child) -> usize {
+                c.idx
+            }
+            fn grow(&self, c: &Child) -> f32 {
+                c.grow
+            }
+            fn outer_size(&self, c: &Child) -> f32 {
+                c.size
+            }
+            fn ignore(&self, c: &Child) -> bool {
+                c.ignored
+            }
+        }
+        impl FlexObject<Child> for IgnoreRow {
+            fn direction_justify(&self) -> DirectionJustify {
+                DirectionJustify::Grow
+            }
+        }
+        let children = [
+            Child {
+                idx: 0,
+                size: 10.0,
+                grow: 1.0,
+                ignored: true,
+            },
+            Child {
+                idx: 1,
+                size: 30.0,
+                grow: 0.0,
+                ignored: false,
+            },
+            Child {
+                idx: 2,
+                size: 40.0,
+                grow: 0.0,
+                ignored: false,
+            },
+        ];
+        let inside = LayoutInsideObject::new(&children, 200.0);
+        let l = IgnoreRow.to_layout(&inside);
+        // ignored child: position/size 不可用
+        assert!(l.child_position(0).is_err());
+        assert!(l.child_size(0).is_err());
+        // 非 ignored 子节点正常
+        assert_eq!(l.child_position(1).unwrap(), 0.0);
+        assert_eq!(l.child_size(1).unwrap(), 30.0);
+        assert_eq!(l.child_position(2).unwrap(), 30.0);
+        assert_eq!(l.child_size(2).unwrap(), 40.0);
+    }
+
+    /// ignored grow 子节点不消费剩余空间。
+    #[test]
+    fn ignored_grow_child_does_not_consume_remaining() {
+        struct IgnoreRow;
+        impl FlexChildConvert<Child> for IgnoreRow {
+            fn index(&self, c: &Child) -> usize {
+                c.idx
+            }
+            fn grow(&self, c: &Child) -> f32 {
+                c.grow
+            }
+            fn outer_size(&self, c: &Child) -> f32 {
+                c.size
+            }
+            fn ignore(&self, c: &Child) -> bool {
+                c.ignored
+            }
+        }
+        impl FlexObject<Child> for IgnoreRow {
+            fn direction_justify(&self) -> DirectionJustify {
+                DirectionJustify::Grow
+            }
+        }
+        let children = [
+            Child {
+                idx: 0,
+                size: 0.0,
+                grow: 1.0,
+                ignored: false,
+            },
+            Child {
+                idx: 1,
+                size: 50.0,
+                grow: 1.0,
+                ignored: true,
+            },
+            Child {
+                idx: 2,
+                size: 0.0,
+                grow: 1.0,
+                ignored: false,
+            },
+        ];
+        let inside = LayoutInsideObject::new(&children, 200.0);
+        let l = IgnoreRow.to_layout(&inside);
+        // 容器 200，只有两个有效子节点平分
+        assert_eq!(l.child_size(0).unwrap(), 100.0);
+        assert_eq!(l.child_size(2).unwrap(), 100.0);
+        // 被 ignore 的子节点：不可用
+        assert!(l.child_position(1).is_err());
+        assert!(l.child_size(1).is_err());
+        assert_eq!(l.child_position(0).unwrap(), 0.0);
+        assert_eq!(l.child_position(2).unwrap(), 100.0);
+    }
+
+    /// ignored 子节点不消费 gap。
+    #[test]
+    fn ignored_child_does_not_consume_gap() {
+        struct IgnoreRow;
+        impl FlexChildConvert<Child> for IgnoreRow {
+            fn index(&self, c: &Child) -> usize {
+                c.idx
+            }
+            fn grow(&self, c: &Child) -> f32 {
+                c.grow
+            }
+            fn outer_size(&self, c: &Child) -> f32 {
+                c.size
+            }
+            fn ignore(&self, c: &Child) -> bool {
+                c.ignored
+            }
+        }
+        impl FlexObject<Child> for IgnoreRow {
+            fn direction_justify(&self) -> DirectionJustify {
+                DirectionJustify::Start
+            }
+            fn gap(&self) -> f32 {
+                10.0
+            }
+        }
+        let children = [
+            Child {
+                idx: 0,
+                size: 30.0,
+                grow: 0.0,
+                ignored: false,
+            },
+            Child {
+                idx: 1,
+                size: 20.0,
+                grow: 0.0,
+                ignored: true,
+            },
+            Child {
+                idx: 2,
+                size: 40.0,
+                grow: 0.0,
+                ignored: false,
+            },
+        ];
+        let inside = LayoutInsideObject::new(&children, 200.0);
+        let l = IgnoreRow.to_layout(&inside);
+        // 只有两个有效子节点参与 gap：A 在 0，C 在 30+10=40
+        assert_eq!(l.child_position(0).unwrap(), 0.0);
+        assert_eq!(l.child_position(2).unwrap(), 40.0);
+        // ignored child: 不可用
+        assert!(l.child_position(1).is_err());
+        assert!(l.child_size(1).is_err());
+    }
+
+    /// center 容器中 ignored 子节点不参与居中。
+    #[test]
+    fn ignored_child_in_center_container() {
+        struct IgnoreRow;
+        impl FlexChildConvert<Child> for IgnoreRow {
+            fn index(&self, c: &Child) -> usize {
+                c.idx
+            }
+            fn grow(&self, c: &Child) -> f32 {
+                c.grow
+            }
+            fn outer_size(&self, c: &Child) -> f32 {
+                c.size
+            }
+            fn ignore(&self, c: &Child) -> bool {
+                c.ignored
+            }
+        }
+        impl FlexObject<Child> for IgnoreRow {
+            fn direction_justify(&self) -> DirectionJustify {
+                DirectionJustify::Center
+            }
+        }
+        let children = [
+            Child {
+                idx: 0,
+                size: 20.0,
+                grow: 0.0,
+                ignored: true,
+            },
+            Child {
+                idx: 1,
+                size: 30.0,
+                grow: 0.0,
+                ignored: false,
+            },
+        ];
+        let inside = LayoutInsideObject::new(&children, 200.0);
+        let l = IgnoreRow.to_layout(&inside);
+        // 只有 B 参与居中：(200-30)/2 = 85
+        assert_eq!(l.child_position(1).unwrap(), 85.0);
+        assert!(l.child_size(0).is_err());
+    }
+
+    /// 全部 ignored 时 size_from_children 返回 0。
+    #[test]
+    fn all_children_ignored_returns_zero() {
+        struct IgnoreRow;
+        impl FlexChildConvert<Child> for IgnoreRow {
+            fn index(&self, c: &Child) -> usize {
+                c.idx
+            }
+            fn grow(&self, _c: &Child) -> f32 {
+                0.0
+            }
+            fn outer_size(&self, c: &Child) -> f32 {
+                c.size
+            }
+            fn ignore(&self, _c: &Child) -> bool {
+                true
+            }
+        }
+        impl FlexObject<Child> for IgnoreRow {
+            fn direction_justify(&self) -> DirectionJustify {
+                DirectionJustify::Grow
+            }
+        }
+        let children = [
+            Child {
+                idx: 0,
+                size: 10.0,
+                grow: 0.0,
+                ignored: false,
+            },
+            Child {
+                idx: 1,
+                size: 20.0,
+                grow: 0.0,
+                ignored: false,
+            },
+        ];
+        let inside = LayoutInsideObject::new(&children, 200.0);
+        let l = IgnoreRow.to_layout(&inside);
+        assert_eq!(l.size_from_children().unwrap(), 0.0);
+        assert!(l.child_position(0).is_err());
+        assert!(l.child_position(1).is_err());
+        assert!(l.child_size(0).is_err());
+        assert!(l.child_size(1).is_err());
+    }
+
+    /// 无 ignore 时行为与经典 flex 一致。
+    #[test]
+    fn no_ignore_behaves_as_classic_flex() {
+        let children = children(&[30.0, 40.0]);
+        let arg = row(0.0, DirectionJustify::Start, false);
+        let inside = LayoutInsideObject::new(&children, 200.0);
+        let l = arg.to_layout(&inside);
+        // Start 模式 size_from_children 返回 inner_size
+        assert_eq!(l.child_position(0).unwrap(), 0.0);
+        assert_eq!(l.child_position(1).unwrap(), 30.0);
+        assert_eq!(l.child_size(0).unwrap(), 30.0);
+        assert_eq!(l.child_size(1).unwrap(), 40.0);
     }
 }
