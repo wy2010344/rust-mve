@@ -36,6 +36,27 @@ use winit::window::{Window, WindowId};
 use crate::frame_source::WinitFrameSource;
 use wy_render::{vello_executor, Scene};
 
+// Blit shader: 将 Rgba8Unorm 中间纹理 blit 到任意 surface 格式
+const BLIT_WGSL: &str = r#"
+@vertex fn vs_main(@builtin(vertex_index) idx: u32) -> @builtin(position) vec4<f32> {
+    var pos = array<vec2<f32>, 3>(
+        vec2(-1.0, -1.0),
+        vec2(3.0, -1.0),
+        vec2(-1.0, 3.0),
+    );
+    return vec4<f32>(pos[idx], 0.0, 1.0);
+}
+
+@group(0) @binding(0) var src_tex: texture_2d<f32>;
+@group(0) @binding(1) var src_sampler: sampler;
+
+@fragment fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let dims = textureDimensions(src_tex);
+    let uv = pos.xy / vec2<f32>(f32(dims.x), f32(dims.y));
+    return textureSample(src_tex, src_sampler, uv);
+}
+"#;
+
 // 当前活跃的帧源（由 runner 设置，供应用代码读取）。
 thread_local! {
     static CURRENT_FRAME_SOURCE: std::cell::RefCell<Option<WinitFrameSource>> = const { std::cell::RefCell::new(None) };
@@ -161,6 +182,10 @@ pub fn run(app: impl WyApp + 'static) -> Result<(), Box<dyn std::error::Error>> 
         proxy,
         redraw_tracker: None,
         frame_source,
+        vello_target: None,
+        vello_target_view: None,
+        blit_pipeline: None,
+        blit_bind_group_layout: None,
     };
 
     event_loop.run_app(&mut state)?;
@@ -187,6 +212,12 @@ struct AppState<A: WyApp> {
     proxy: winit::event_loop::EventLoopProxy<AppEvent>,
     redraw_tracker: Option<crate::redraw_tracker::RedrawTracker>,
     frame_source: WinitFrameSource,
+    /// Vello 中间渲染目标（Rgba8Unorm），用于兼容不支持 Rgba8Unorm 的 surface。
+    vello_target: Option<wgpu::Texture>,
+    vello_target_view: Option<wgpu::TextureView>,
+    /// Blit 管线：将 Rgba8Unorm 中间纹理 blit 到 surface 纹理。
+    blit_pipeline: Option<wgpu::RenderPipeline>,
+    blit_bind_group_layout: Option<wgpu::BindGroupLayout>,
 }
 
 impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
@@ -235,16 +266,11 @@ impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
         }))
         .unwrap();
 
-        // 配置 surface — 优先选 Rgba8Unorm（Vello render_to_texture 要求）
+        // 配置 surface — 使用 adapter 首选格式（兼容 macOS Bgra8UnormSrgb）
         let caps = surface.get_capabilities(&adapter);
-        let format = caps
-            .formats
-            .iter()
-            .find(|f| **f == wgpu::TextureFormat::Rgba8Unorm)
-            .copied()
-            .unwrap_or(caps.formats[0]);
+        let format = caps.formats[0];
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::STORAGE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST,
             format,
             width: size.width.max(1),
             height: size.height.max(1),
@@ -264,12 +290,23 @@ impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
         )
         .unwrap();
 
+        // 创建中间 Rgba8Unorm 纹理供 Vello 渲染（Vello render_to_texture 要求 Rgba8Unorm）
+        let (vello_target, vello_target_view) =
+            Self::create_vello_target(&device, size.width.max(1), size.height.max(1));
+
+        // 创建 blit 管线：将 Rgba8Unorm 中间纹理 blit 到 surface 纹理
+        let (blit_pipeline, blit_bind_group_layout) = Self::create_blit_pipeline(&device, format);
+
         self.window = Some(window);
         self.renderer = Some(vello_renderer);
         self.surface = Some(surface);
         self.device = Some(device);
         self.queue = Some(queue);
         self.config = Some(config);
+        self.vello_target = Some(vello_target);
+        self.vello_target_view = Some(vello_target_view);
+        self.blit_pipeline = Some(blit_pipeline);
+        self.blit_bind_group_layout = Some(blit_bind_group_layout);
 
         // 通知应用 resize
         self.app.on_resize(size.width as f32, size.height as f32);
@@ -327,6 +364,16 @@ impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
                         config.width = new_size.width;
                         config.height = new_size.height;
                         surface.configure(device, config);
+                    }
+                    // 重建 Vello 中间渲染目标
+                    if let Some(device) = &self.device {
+                        let (target, view) = Self::create_vello_target(
+                            device,
+                            new_size.width.max(1),
+                            new_size.height.max(1),
+                        );
+                        self.vello_target = Some(target);
+                        self.vello_target_view = Some(view);
                     }
                     self.app
                         .on_resize(new_size.width as f32, new_size.height as f32);
@@ -431,21 +478,12 @@ impl<A: WyApp> AppState<A> {
         }
 
         // 1. 调用应用绘制，生成高层 Scene（通过 RedrawTracker 自动追踪信号依赖）
-        //
-        // 两个路径都包在 tracker.draw() 中，确保信号自动追踪：
-        // - widget_tree() 路径：tree.draw_scene() 读 Widget → 信号追踪
-        // - draw() 路径：app.draw() 中的 Signal.get() → 信号追踪
-        //
-        // widget_tree() 需要 &mut self，必须在 tracker.draw() 之后调用
-        // （tracker.draw() 的闭包 borrow 已释放）。
         let mut scene = Scene::new();
         if let Some(tracker) = &self.redraw_tracker {
             let tracker = tracker.clone();
-            // 在 collect 上下文中构建 tree（MveApp）或绘制 scene（CounterApp）
             tracker.draw(|| {
                 self.app.draw(&mut scene, width as f32, height as f32);
             });
-            // draw() 可能已构建 widget_tree，绘制它
             if let Some(tree) = self.app.widget_tree() {
                 tree.draw_scene(&mut scene);
             }
@@ -480,11 +518,15 @@ impl<A: WyApp> AppState<A> {
             }
         };
 
-        let texture_view = surface_texture
+        let surface_view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        // 4. Vello 渲染到 surface texture
+        // 4. Vello 渲染到中间 Rgba8Unorm 纹理，再 blit 到 surface
+        //
+        // Vello render_to_texture 内部 bind group 硬编码 Rgba8Unorm，
+        // macOS 等平台 surface 可能只支持 Bgra8UnormSrgb，
+        // 两者不 copy-compatible，所以需要通过 render pass blit 转换格式。
         let render_params = vello::RenderParams {
             base_color: vello::peniko::Color::WHITE,
             width,
@@ -492,9 +534,59 @@ impl<A: WyApp> AppState<A> {
             antialiasing_method: vello::AaConfig::Area,
         };
 
-        match renderer.render_to_texture(device, queue, &vello_scene, &texture_view, &render_params)
-        {
+        let vello_view = match &self.vello_target_view {
+            Some(v) => v,
+            None => return,
+        };
+
+        match renderer.render_to_texture(device, queue, &vello_scene, vello_view, &render_params) {
             Ok(_) => {
+                // Blit: Rgba8Unorm 中间纹理 → surface 纹理
+                if let (Some(pipeline), Some(blit_layout)) =
+                    (&self.blit_pipeline, &self.blit_bind_group_layout)
+                {
+                    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("blit_bind_group"),
+                        layout: blit_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(vello_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Sampler(
+                                    &device.create_sampler(&wgpu::SamplerDescriptor::default()),
+                                ),
+                            },
+                        ],
+                    });
+
+                    let mut encoder =
+                        device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("blit_encoder"),
+                        });
+                    {
+                        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("blit_pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &surface_view,
+                                resolve_target: None,
+                                depth_slice: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            ..Default::default()
+                        });
+                        pass.set_pipeline(pipeline);
+                        pass.set_bind_group(0, &bind_group, &[]);
+                        pass.draw(0..3, 0..1);
+                    }
+                    queue.submit(std::iter::once(encoder.finish()));
+                }
                 surface_texture.present();
             }
             Err(e) => {
@@ -521,5 +613,107 @@ impl<A: WyApp> AppState<A> {
             self.needs_redraw.set(false);
             window.request_redraw();
         }
+    }
+
+    /// 创建 Vello 中间渲染目标（Rgba8Unorm）。
+    ///
+    /// Vello `render_to_texture` 内部 bind group 硬编码 Rgba8Unorm。
+    /// macOS Apple Silicon 等平台 surface 可能只支持 Bgra8UnormSrgb，
+    /// 所以需要始终使用中间 Rgba8Unorm 纹理渲染，再复制到 surface。
+    fn create_vello_target(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("vello_intermediate_target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (texture, view)
+    }
+
+    /// 创建 blit 渲染管线：将 Rgba8Unorm 中间纹理 blit 到 surface 纹理。
+    ///
+    /// 使用全屏三角形 + 纹理采样，兼容任意 surface 格式。
+    fn create_blit_pipeline(
+        device: &wgpu::Device,
+        surface_format: wgpu::TextureFormat,
+    ) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("blit_shader"),
+            source: wgpu::ShaderSource::Wgsl(BLIT_WGSL.into()),
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("blit_bind_group_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("blit_pipeline_layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            ..Default::default()
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("blit_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        (pipeline, bind_group_layout)
     }
 }
