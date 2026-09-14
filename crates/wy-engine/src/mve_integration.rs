@@ -63,7 +63,7 @@ fn draw_tree(nodes: &[ExpandedNode], scene: &mut Scene) {
     }
 }
 
-/// 命中测试：从上到下（后绘制的在上面）。
+/// 命中测试：从上到下（后绘制的在上面），子节点优先于父节点。
 fn hit_test_tree(nodes: &[ExpandedNode], x: f32, y: f32) -> bool {
     let mut i = nodes.len();
     while i > 0 {
@@ -71,19 +71,21 @@ fn hit_test_tree(nodes: &[ExpandedNode], x: f32, y: f32) -> bool {
         let child = &nodes[i];
         let nx = x - child.node.x;
         let ny = y - child.node.y;
-        if child.node.run_hit_test(nx, ny) {
-            if hit_test_tree(&child.children, nx, ny) {
-                return true;
-            }
-            if child.node.on_click_fn.is_some() || child.node.on_down_fn.is_some() {
-                return true;
-            }
+        // 先递归子节点（子节点优先于父节点）
+        if hit_test_tree(&child.children, nx, ny) {
+            return true;
+        }
+        // 再检查当前节点
+        if child.node.run_hit_test(nx, ny)
+            && (child.node.on_click_fn.is_some() || child.node.on_down_fn.is_some())
+        {
+            return true;
         }
     }
     false
 }
 
-/// 递归分发点击事件。
+/// 递归分发点击事件（子节点优先于父节点）。
 fn dispatch_click_tree(nodes: &[ExpandedNode], x: f32, y: f32, event: &mut MvePointerEvent) {
     let mut i = nodes.len();
     while i > 0 {
@@ -92,10 +94,12 @@ fn dispatch_click_tree(nodes: &[ExpandedNode], x: f32, y: f32, event: &mut MvePo
         let nx = x - child.node.x;
         let ny = y - child.node.y;
         if child.node.run_hit_test(nx, ny) {
+            // 先分发到子节点（子节点优先）
             dispatch_click_tree(&child.children, nx, ny, event);
             if event.stopped {
                 return;
             }
+            // 再分发到当前节点
             child.node.run_on_click(event);
             if event.stopped {
                 return;

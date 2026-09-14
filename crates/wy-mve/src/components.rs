@@ -46,14 +46,22 @@ pub fn text_styled(content: impl Fn() -> String + 'static, font_size: f32, color
 }
 
 /// 信号文本：闭包返回值自动 Display。
+///
+/// 信号读取在 tree 构造阶段执行（被 tracker.collect 追踪），
+/// draw 阶段从缓存读取，不重新读信号。
 pub fn text_signal(value: impl Fn() -> Box<dyn std::fmt::Display> + 'static) -> Node {
-    let value = Rc::new(value);
+    // 构造时读取信号值（在 tracker.collect 阶段，被追踪为依赖）
+    let text = format!("{}", value());
+    let cache_key = crate::signal_cache::next_key();
+    crate::signal_cache::cache_signal_value(cache_key, text);
+
     Node {
         draw_fn: Rc::new(move |scene| {
             if let Some(scene) = scene.downcast_mut::<Scene>() {
-                let t = format!("{}", value());
-                if !t.is_empty() {
-                    scene.draw_text(Point::new(0.0, 0.0), &t, 14.0, Color::BLACK);
+                if let Some(t) = crate::signal_cache::get_cached_signal::<String>(cache_key) {
+                    if !t.is_empty() {
+                        scene.draw_text(Point::new(0.0, 0.0), &t, 14.0, Color::BLACK);
+                    }
                 }
             }
         }),

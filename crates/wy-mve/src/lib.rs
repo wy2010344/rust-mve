@@ -16,6 +16,7 @@ mod app;
 pub mod components;
 mod context;
 mod node;
+mod signal_cache;
 mod state_holder;
 
 pub use app::{run_mve_app, MouseButton, MveApp, WindowEvent};
