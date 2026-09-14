@@ -46,6 +46,11 @@ impl ChildrenCache {
         self.cache.borrow().clone()
     }
 
+    /// 借用缓存的子节点（避免克隆）。
+    pub fn borrow(&self) -> std::cell::Ref<'_, Vec<Node>> {
+        self.cache.borrow()
+    }
+
     /// 标记为脏（信号变化时调用）。
     pub fn invalidate(&self) {
         *self.dirty.borrow_mut() = true;
@@ -74,6 +79,11 @@ impl NodeContext {
             contexts: Vec::new(),
             parent_context_index,
         }
+    }
+
+    /// 添加一个子节点。
+    pub fn child(&mut self, node: Node) {
+        self.add_node(node);
     }
 
     /// 添加一个子节点。

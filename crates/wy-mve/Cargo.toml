@@ -7,3 +7,4 @@ license.workspace = true
 [dependencies]
 wy-signal = { workspace = true }
 wy-layout = { workspace = true }
+wy-render = { workspace = true }

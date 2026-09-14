@@ -27,7 +27,7 @@ type KeyFn = Rc<dyn Fn(&mut KeyEvent) -> bool>;
 /// };
 /// ```
 pub struct Node {
-    /// 绘制逻辑。
+    /// 绘制逻辑。参数：`(scene, x, y, width, height)`。
     pub draw_fn: DrawFn,
     /// 子节点构建逻辑。
     pub arg_children_fn: ArgChildrenFn,
@@ -53,6 +53,12 @@ pub struct Node {
     pub focus_trap: bool,
     /// 是否启用选择。
     pub selection_enabled: bool,
+    /// 布局位置（由布局系统或父节点设置）。
+    pub x: f32,
+    pub y: f32,
+    /// 布局尺寸（由布局系统或组件设置）。
+    pub width: f32,
+    pub height: f32,
 }
 
 impl Clone for Node {
@@ -71,6 +77,10 @@ impl Clone for Node {
             focus_order: self.focus_order,
             focus_trap: self.focus_trap,
             selection_enabled: self.selection_enabled,
+            x: self.x,
+            y: self.y,
+            width: self.width,
+            height: self.height,
         }
     }
 }
@@ -97,6 +107,10 @@ impl Default for Node {
             focus_order: None,
             focus_trap: false,
             selection_enabled: true,
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
         }
     }
 }

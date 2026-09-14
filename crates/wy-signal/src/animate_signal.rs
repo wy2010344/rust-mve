@@ -445,8 +445,10 @@ impl Drop for LockGuard<'_> {
 mod tests {
     use super::*;
 
+    type AnimCallback = Box<dyn FnMut(f32) -> bool>;
+
     struct SimpleFrameSource {
-        callback: RefCell<Option<Box<dyn FnMut(f32) -> bool>>>,
+        callback: RefCell<Option<AnimCallback>>,
     }
 
     impl SimpleFrameSource {
