@@ -31,9 +31,12 @@
 
 use crate::draw_context::DrawContext;
 use crate::event::{PointerEvent, PointerType};
+use crate::selection::SelectionManager;
 use crate::theme::Theme;
 use crate::widget::ChildBuilder;
 use crate::{Point, Rect, Size};
+
+use std::time::Instant;
 
 /// 树节点：存储 widget 和布局信息。
 struct TreeNode {
@@ -65,6 +68,14 @@ pub struct WidgetTree {
     focused: Option<usize>,
     /// 主题配置（传递给 DrawContext）。
     theme: Theme,
+    /// 文本选择管理器。
+    selection: SelectionManager,
+    /// 上次点击时间（用于双击检测）。
+    last_click_time: Option<Instant>,
+    /// 上次点击的节点索引。
+    last_click_node: Option<usize>,
+    /// Shift 键状态（用于扩展选择）。
+    shift_held: bool,
 }
 
 impl WidgetTree {
@@ -78,6 +89,10 @@ impl WidgetTree {
             root: 0,
             focused: None,
             theme: Theme::light(),
+            selection: SelectionManager::new(),
+            last_click_time: None,
+            last_click_node: None,
+            shift_held: false,
         };
 
         // 创建根节点
@@ -99,6 +114,21 @@ impl WidgetTree {
     /// 获取当前主题引用。
     pub fn theme(&self) -> &Theme {
         &self.theme
+    }
+
+    /// 获取文本选择管理器。
+    pub fn selection(&self) -> &SelectionManager {
+        &self.selection
+    }
+
+    /// 获取文本选择管理器的可变引用。
+    pub fn selection_mut(&mut self) -> &mut SelectionManager {
+        &mut self.selection
+    }
+
+    /// 设置 Shift 键状态（用于扩展文本选择）。
+    pub fn set_shift_held(&mut self, held: bool) {
+        self.shift_held = held;
     }
 
     /// 递归构建子节点。
@@ -361,6 +391,7 @@ impl WidgetTree {
     ///
     /// 先从根到叶子（capture），再从叶子到根（bubble）。
     /// 如果命中路径中有可聚焦组件，自动设置焦点。
+    /// 文本选择：Shift+点击扩展选择，双击选词，单击开始拖拽。
     /// 返回是否有人消费了事件。
     pub fn dispatch_pointer_down(&mut self, x: f32, y: f32) -> bool {
         if let Some(path) = self.hit_test(x, y) {
@@ -370,6 +401,37 @@ impl WidgetTree {
                     self.focused = Some(idx);
                     break;
                 }
+            }
+
+            // 文本选择：从叶子节点获取文本偏移
+            let target = *path.last().unwrap();
+            let text_offset = {
+                let cx = self.make_draw_context(target);
+                self.nodes[target].widget.position_for_text_point(x, y, &cx)
+            };
+
+            if let Some(offset) = text_offset {
+                let node_id = target;
+                let now = Instant::now();
+
+                if self.shift_held {
+                    // Shift+点击：扩展选择
+                    self.selection.on_shift_click(node_id, offset);
+                } else if self
+                    .last_click_time
+                    .map(|t| t.elapsed().as_millis() < 500)
+                    .unwrap_or(false)
+                    && self.last_click_node == Some(node_id)
+                {
+                    // 双击：选中单词
+                    self.selection.on_double_click(node_id, offset);
+                } else {
+                    // 单击：开始新的选择会话
+                    self.selection.on_pointer_down(node_id, offset);
+                }
+
+                self.last_click_time = Some(now);
+                self.last_click_node = Some(node_id);
             }
 
             let mut event = PointerEvent::new(PointerType::Down, x, y);
@@ -430,6 +492,9 @@ impl WidgetTree {
             let cx = self.make_draw_context(target);
             self.nodes[target].widget.on_click(&cx);
 
+            // 文本选择：指针释放，冻结选择
+            self.selection.on_pointer_up();
+
             true
         } else {
             false
@@ -455,6 +520,18 @@ impl WidgetTree {
                 self.nodes[idx].widget.on_pointer_move(&mut event, &cx);
                 if event.is_propagation_stopped() {
                     return true;
+                }
+            }
+
+            // 文本选择：拖拽时更新焦点
+            if self.selection.current_pair().is_some() {
+                let target = *path.last().unwrap();
+                let text_offset = {
+                    let cx = self.make_draw_context(target);
+                    self.nodes[target].widget.position_for_text_point(x, y, &cx)
+                };
+                if let Some(offset) = text_offset {
+                    self.selection.on_pointer_move(target, offset);
                 }
             }
 

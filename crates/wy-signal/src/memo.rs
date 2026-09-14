@@ -11,8 +11,14 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use crate::context::{bump_global_version, global_version, register_dep, with_global};
+use crate::context::{
+    bump_global_version, check_memo_cycle, global_version, pop_eval_stack, push_eval_stack,
+    register_dep, with_global,
+};
 use crate::get_::{GetValue, NodeId, ReGet, TrackDyn, ValBox};
+
+/// 值变化回调类型。
+type AfterCallback<T> = Box<dyn Fn(&T)>;
 
 struct MemoInner<T> {
     id: NodeId,
@@ -32,6 +38,8 @@ struct MemoInner<T> {
     value: RefCell<Option<T>>,
     /// 是否已初始化。
     inited: Cell<bool>,
+    /// 值变化回调：Memo 值变化时触发（含首次计算）。
+    afters: RefCell<Vec<AfterCallback<T>>>,
 }
 
 /// 派生值节点。
@@ -63,6 +71,7 @@ impl<T: Clone + PartialEq + 'static> Memo<T> {
             version: Cell::new(0),
             value: RefCell::new(None),
             inited: Cell::new(false),
+            afters: RefCell::new(Vec::new()),
         });
         *inner.self_cell.borrow_mut() = Some(Rc::clone(&inner));
         with_global(|g| {
@@ -93,6 +102,13 @@ impl<T: Clone + PartialEq + 'static> Memo<T> {
         self.inner.value.borrow().clone().expect("uninit memo")
     }
 
+    /// 注册值变化回调：memo 值变化时（含首次计算）调用 `f(new_value)`。
+    ///
+    /// 回调在 memo 重算完成后、通知下游观察者之前执行。
+    pub fn after(&self, f: impl Fn(&T) + 'static) {
+        self.inner.afters.borrow_mut().push(Box::new(f));
+    }
+
     /// 校验并可能重算：relay 快照比对。
     fn validate(&self, new_version: u64) {
         let inited = self.inner.inited.get();
@@ -110,6 +126,14 @@ impl<T: Clone + PartialEq + 'static> Memo<T> {
             self.inner.version.set(new_version);
 
             if changed {
+                // 执行 afters 回调（在通知下游观察者之前）。
+                let v_ref = self.inner.value.borrow();
+                let v = v_ref.as_ref().unwrap();
+                for after in self.inner.afters.borrow().iter() {
+                    after(v);
+                }
+                drop(v_ref);
+
                 // 通知依赖本 memo 的观察者。
                 self.notify_listeners();
             }
@@ -120,6 +144,14 @@ impl<T: Clone + PartialEq + 'static> Memo<T> {
 
     /// 执行求值闭包，并收集依赖到 relay map。
     fn evaluate(&self) -> T {
+        // 循环检测：若本 memo 已在求值栈中，说明存在循环依赖。
+        if check_memo_cycle(self.inner.id) {
+            panic!(
+                "信号系统：检测到循环 memo 依赖（memo id={}）",
+                self.inner.id.0
+            );
+        }
+
         self.inner.relays.borrow_mut().clear();
         self.inner.last_snap.borrow_mut().clear();
 
@@ -135,9 +167,11 @@ impl<T: Clone + PartialEq + 'static> Memo<T> {
             g.computing = true;
             prev
         });
+        push_eval_stack(self.inner.id);
         let v = crate::context::with_current_track(self_rc as Rc<dyn TrackDyn>, || {
             (self.inner.compute)()
         });
+        pop_eval_stack();
         with_global(|g| g.computing = prev_computing);
         v
     }

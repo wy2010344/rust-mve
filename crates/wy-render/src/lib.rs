@@ -12,6 +12,7 @@ mod draw_context;
 pub mod event;
 mod math;
 mod scene;
+pub mod selection;
 pub mod theme;
 pub mod vello_executor;
 pub mod widget;

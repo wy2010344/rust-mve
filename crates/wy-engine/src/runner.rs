@@ -33,7 +33,21 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
 
+use crate::frame_source::WinitFrameSource;
 use wy_render::{vello_executor, Scene};
+
+// 当前活跃的帧源（由 runner 设置，供应用代码读取）。
+thread_local! {
+    static CURRENT_FRAME_SOURCE: std::cell::RefCell<Option<WinitFrameSource>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 获取当前帧源的克隆（供 `AnimateSignal` 等使用）。
+///
+/// 必须在 `WyApp::setup()` 之后调用（即窗口创建后），
+/// 否则返回 `None`。
+pub fn current_frame_source() -> Option<WinitFrameSource> {
+    CURRENT_FRAME_SOURCE.with(|cell| cell.borrow().clone())
+}
 
 /// 应用事件类型（通过 EventLoopProxy 分发）。
 pub enum AppEvent {
@@ -126,6 +140,8 @@ pub fn run(app: impl WyApp + 'static) -> Result<(), Box<dyn std::error::Error>> 
 
     let proxy = event_loop.create_proxy();
 
+    let frame_source = WinitFrameSource::new();
+
     let mut state = AppState {
         app,
         window: None,
@@ -144,6 +160,7 @@ pub fn run(app: impl WyApp + 'static) -> Result<(), Box<dyn std::error::Error>> 
         access_adapter: None,
         proxy,
         redraw_tracker: None,
+        frame_source,
     };
 
     event_loop.run_app(&mut state)?;
@@ -169,6 +186,7 @@ struct AppState<A: WyApp> {
     access_adapter: Option<accesskit_winit::Adapter>,
     proxy: winit::event_loop::EventLoopProxy<AppEvent>,
     redraw_tracker: Option<crate::redraw_tracker::RedrawTracker>,
+    frame_source: WinitFrameSource,
 }
 
 impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
@@ -269,6 +287,11 @@ impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
             request_redraw.clone(),
         ));
 
+        // 将帧源注册到 thread-local，供应用代码访问
+        CURRENT_FRAME_SOURCE.with(|cell| {
+            *cell.borrow_mut() = Some(self.frame_source.clone());
+        });
+
         self.app.setup(request_redraw);
 
         // 请求首帧绘制
@@ -342,6 +365,8 @@ impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
                 }
             }
             WindowEvent::RedrawRequested => {
+                // 驱动帧动画：每次 redraw 前 tick 所有动画订阅
+                self.frame_source.tick();
                 self.render();
             }
             WindowEvent::KeyboardInput { event, .. } => {

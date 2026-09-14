@@ -14,6 +14,7 @@ mod accessibility;
 pub mod composition;
 mod event;
 mod focus;
+pub mod frame_source;
 pub mod mve_integration;
 pub mod redraw_tracker;
 pub mod runner;

@@ -108,6 +108,18 @@ impl Widget for TextWidget {
             self.color,
         );
     }
+
+    fn position_for_text_point(&self, x: f32, _y: f32, cx: &DrawContext) -> Option<usize> {
+        if self.content.is_empty() {
+            return Some(0);
+        }
+        let rect = cx.outer_rect();
+        let text_left = rect.x;
+        let char_width = self.font_size * 0.6;
+        let relative_x = (x - text_left).max(0.0);
+        let offset = (relative_x / char_width).round() as usize;
+        Some(offset.min(self.content.len()))
+    }
 }
 
 #[cfg(test)]
@@ -208,5 +220,51 @@ mod tests {
             .font_size(24.0)
             .measure(&mut font_cx, &mut layout_cx);
         assert!(h24 > h12, "24px height {h24} should be > 12px height {h12}");
+    }
+
+    #[test]
+    fn text_position_for_text_point_empty() {
+        let w = TextWidget::new("");
+        let cx = DrawContext::new(
+            Rect::new(10.0, 10.0, 100.0, 30.0),
+            crate::Point::new(10.0, 10.0),
+            crate::Size::new(100.0, 30.0),
+        );
+        assert_eq!(w.position_for_text_point(50.0, 20.0, &cx), Some(0));
+    }
+
+    #[test]
+    fn text_position_for_text_point_at_start() {
+        let w = TextWidget::new("hello").font_size(10.0);
+        let cx = DrawContext::new(
+            Rect::new(0.0, 0.0, 100.0, 30.0),
+            crate::Point::new(0.0, 0.0),
+            crate::Size::new(100.0, 30.0),
+        );
+        // text_left = 0; char_width = 10 * 0.6 = 6
+        assert_eq!(w.position_for_text_point(0.0, 15.0, &cx), Some(0));
+    }
+
+    #[test]
+    fn text_position_for_text_point_after_chars() {
+        let w = TextWidget::new("abc").font_size(10.0);
+        let cx = DrawContext::new(
+            Rect::new(0.0, 0.0, 100.0, 30.0),
+            crate::Point::new(0.0, 0.0),
+            crate::Size::new(100.0, 30.0),
+        );
+        // char_width = 6; x = 18 → offset 3
+        assert_eq!(w.position_for_text_point(18.0, 15.0, &cx), Some(3));
+    }
+
+    #[test]
+    fn text_position_for_text_point_clamps() {
+        let w = TextWidget::new("ab"); // len = 2
+        let cx = DrawContext::new(
+            Rect::new(0.0, 0.0, 100.0, 30.0),
+            crate::Point::new(0.0, 0.0),
+            crate::Size::new(100.0, 30.0),
+        );
+        assert_eq!(w.position_for_text_point(500.0, 15.0, &cx), Some(2));
     }
 }

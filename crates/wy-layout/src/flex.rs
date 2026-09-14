@@ -778,4 +778,119 @@ mod tests {
         assert_eq!(l.child_size(0).unwrap(), 30.0);
         assert_eq!(l.child_size(1).unwrap(), 40.0);
     }
+
+    // ===== 对齐 Kotlin FlexLayoutIgnoreTest — 补充测试 =====
+
+    /// Grow 容器中 ignored 子节点不计入 sizeFromChildren。
+    /// 对齐 Kotlin FlexLayoutIgnoreTest.ignoredChildNotCountedInGrowContainer。
+    #[test]
+    fn ignored_child_not_counted_in_grow_size_from_children() {
+        struct IgnoreRow;
+        impl FlexChildConvert<Child> for IgnoreRow {
+            fn index(&self, c: &Child) -> usize {
+                c.idx
+            }
+            fn grow(&self, c: &Child) -> f32 {
+                c.grow
+            }
+            fn outer_size(&self, c: &Child) -> f32 {
+                c.size
+            }
+            fn ignore(&self, c: &Child) -> bool {
+                c.ignored
+            }
+        }
+        impl FlexObject<Child> for IgnoreRow {
+            fn direction_justify(&self) -> DirectionJustify {
+                DirectionJustify::Grow
+            }
+        }
+        // 3 个子节点：ignored(size=10, grow=0), normal(size=30), normal(size=40)
+        let children = [
+            Child {
+                idx: 0,
+                size: 10.0,
+                grow: 0.0,
+                ignored: true,
+            },
+            Child {
+                idx: 1,
+                size: 30.0,
+                grow: 0.0,
+                ignored: false,
+            },
+            Child {
+                idx: 2,
+                size: 40.0,
+                grow: 0.0,
+                ignored: false,
+            },
+        ];
+        let inside = LayoutInsideObject::new(&children, 100.0);
+        let l = IgnoreRow.to_layout(&inside);
+        // Grow + 无 grow 子节点：size_from_children = 非忽略子节点自然尺寸之和
+        assert_eq!(l.size_from_children().unwrap(), 70.0);
+        // ignored 子节点位置/尺寸不可查询
+        assert!(l.child_position(0).is_err());
+        assert!(l.child_size(0).is_err());
+        // 非忽略子节点正常
+        assert_eq!(l.child_position(1).unwrap(), 0.0);
+        assert_eq!(l.child_position(2).unwrap(), 30.0);
+    }
+
+    /// Start 容器中 ignored 子节点的位置跳过，后续子节点从累计长度开始。
+    /// 对齐 Kotlin FlexLayoutIgnoreTest.ignoredChildSlotIsCurrentLengthInStartContainer。
+    #[test]
+    fn ignored_child_slot_is_current_length_in_start_container() {
+        struct IgnoreRow;
+        impl FlexChildConvert<Child> for IgnoreRow {
+            fn index(&self, c: &Child) -> usize {
+                c.idx
+            }
+            fn grow(&self, c: &Child) -> f32 {
+                c.grow
+            }
+            fn outer_size(&self, c: &Child) -> f32 {
+                c.size
+            }
+            fn ignore(&self, c: &Child) -> bool {
+                c.ignored
+            }
+        }
+        impl FlexObject<Child> for IgnoreRow {
+            fn direction_justify(&self) -> DirectionJustify {
+                DirectionJustify::Start
+            }
+        }
+        // 3 个子节点：ignored(size=10), normal(size=30), normal(size=40)
+        let children = [
+            Child {
+                idx: 0,
+                size: 10.0,
+                grow: 0.0,
+                ignored: true,
+            },
+            Child {
+                idx: 1,
+                size: 30.0,
+                grow: 0.0,
+                ignored: false,
+            },
+            Child {
+                idx: 2,
+                size: 40.0,
+                grow: 0.0,
+                ignored: false,
+            },
+        ];
+        let inside = LayoutInsideObject::new(&children, 100.0);
+        let l = IgnoreRow.to_layout(&inside);
+        // ignored 子节点位置/尺寸不可查询
+        assert!(l.child_position(0).is_err());
+        assert!(l.child_size(0).is_err());
+        // 子节点1 从 0 开始
+        assert_eq!(l.child_position(1).unwrap(), 0.0);
+        // 子节点2 从 30 开始（跳过 ignored 后累计）
+        assert_eq!(l.child_position(2).unwrap(), 30.0);
+    }
 }

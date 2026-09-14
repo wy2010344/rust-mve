@@ -207,6 +207,8 @@ mod tests {
         align_fix: bool,
         // 子节点自定义对齐（仅索引 0 有）
         custom: bool,
+        // 被忽略的子节点索引集合
+        ignored: std::collections::HashSet<usize>,
     }
 
     impl StackChildConvert<Child> for Stack {
@@ -220,8 +222,8 @@ mod tests {
         fn outer_size(&self, c: &Child) -> f32 {
             c.size
         }
-        fn ignore(&self, _c: &Child) -> bool {
-            false
+        fn ignore(&self, c: &Child) -> bool {
+            self.ignored.contains(&c.idx)
         }
     }
     impl StackObject<Child> for Stack {
@@ -247,6 +249,7 @@ mod tests {
             align_item: AlignItem::Stretch,
             align_fix: false,
             custom: false,
+            ignored: std::collections::HashSet::new(),
         };
         let children = children();
         let inside = LayoutInsideObject::new(&children, 100.0);
@@ -264,6 +267,7 @@ mod tests {
             align_item: AlignItem::Stretch,
             align_fix: true,
             custom: false,
+            ignored: std::collections::HashSet::new(),
         };
         let children = children();
         let inside = LayoutInsideObject::new(&children, 200.0);
@@ -278,6 +282,7 @@ mod tests {
             align_item: AlignItem::Center,
             align_fix: false,
             custom: false,
+            ignored: std::collections::HashSet::new(),
         };
         let children = children();
         let inside = LayoutInsideObject::new(&children, 100.0);
@@ -298,6 +303,7 @@ mod tests {
             align_item: AlignItem::End,
             align_fix: false,
             custom: false,
+            ignored: std::collections::HashSet::new(),
         };
         let children = children();
         let inside = LayoutInsideObject::new(&children, 100.0);
@@ -348,5 +354,127 @@ mod tests {
         // 自定义子节点0：size=5, position=30-5=25
         assert_eq!(l.child_size(0).unwrap(), 5.0);
         assert_eq!(l.child_position(0).unwrap(), 25.0);
+    }
+
+    // ===== 对齐 Kotlin StackLayoutIgnoreTest =====
+
+    /// ignore 子节点不参与交叉轴尺寸计算。
+    /// 对齐 Kotlin StackLayoutIgnoreTest.ignoredChildDoesNotStretchContainerSize。
+    #[test]
+    fn ignored_child_does_not_stretch_container_size() {
+        let mut ignored = std::collections::HashSet::new();
+        ignored.insert(1); // 忽略最大的子节点（size=30）
+        let arg = Stack {
+            align_item: AlignItem::Stretch,
+            align_fix: false,
+            custom: false,
+            ignored,
+        };
+        let children = children();
+        let inside = LayoutInsideObject::new(&children, 100.0);
+        let l = arg.to_layout(&inside);
+        // size = 非忽略子节点最大尺寸 = max(10, 20) = 20
+        assert_eq!(l.size(), 20.0);
+    }
+
+    /// ignore 子节点的位置为 None（查询时报错）。
+    /// 对齐 Kotlin StackLayoutIgnoreTest.ignoredChildPositionIsZero。
+    #[test]
+    fn ignored_child_position_is_none() {
+        let mut ignored = std::collections::HashSet::new();
+        ignored.insert(1);
+        let arg = Stack {
+            align_item: AlignItem::Center,
+            align_fix: false,
+            custom: false,
+            ignored,
+        };
+        let children = children();
+        let inside = LayoutInsideObject::new(&children, 100.0);
+        let l = arg.to_layout(&inside);
+        // ignore 子节点位置不可查询
+        assert!(l.child_position(1).is_err());
+    }
+
+    /// ignore 子节点在 center 容器中不参与尺寸计算。
+    /// 对齐 Kotlin StackLayoutIgnoreTest.ignoredChildInCenterContainer。
+    #[test]
+    fn ignored_child_in_center_container() {
+        let mut ignored = std::collections::HashSet::new();
+        ignored.insert(0);
+        let arg = Stack {
+            align_item: AlignItem::Center,
+            align_fix: false,
+            custom: false,
+            ignored,
+        };
+        let children = children();
+        let inside = LayoutInsideObject::new(&children, 100.0);
+        let l = arg.to_layout(&inside);
+        // size = max(非忽略子节点) = max(30, 20) = 30
+        assert_eq!(l.size(), 30.0);
+        // 子节点0 被 ignore，位置不可查询
+        assert!(l.child_position(0).is_err());
+        // 子节点1 居中：位置 (30-30)/2=0
+        assert_eq!(l.child_position(1).unwrap(), 0.0);
+    }
+
+    /// ignore 子节点 + 固定容器尺寸。
+    /// 对齐 Kotlin StackLayoutIgnoreTest.ignoredChildWithFixedContainerSize。
+    #[test]
+    fn ignored_child_with_fixed_container_size() {
+        let mut ignored = std::collections::HashSet::new();
+        ignored.insert(1);
+        let arg = Stack {
+            align_item: AlignItem::Stretch,
+            align_fix: true,
+            custom: false,
+            ignored,
+        };
+        let children = children();
+        let inside = LayoutInsideObject::new(&children, 100.0);
+        let l = arg.to_layout(&inside);
+        // alignFix: size = inner_size = 100（不管 ignore）
+        assert_eq!(l.size(), 100.0);
+        // ignore 子节点位置不可查询
+        assert!(l.child_position(1).is_err());
+    }
+
+    /// 全部子节点被 ignore → 交叉轴尺寸为 0。
+    /// 对齐 Kotlin StackLayoutIgnoreTest.allChildrenIgnoredSizeIsZero。
+    #[test]
+    fn all_children_ignored_size_is_zero_stack() {
+        let ignored: std::collections::HashSet<usize> = (0..3).collect();
+        let arg = Stack {
+            align_item: AlignItem::Stretch,
+            align_fix: false,
+            custom: false,
+            ignored,
+        };
+        let children = children();
+        let inside = LayoutInsideObject::new(&children, 100.0);
+        let l = arg.to_layout(&inside);
+        assert_eq!(l.size(), 0.0);
+    }
+
+    /// 无 ignore 时行为等价于常规 Stack。
+    /// 对齐 Kotlin StackLayoutIgnoreTest.noIgnoreBehavesAsClassicStack。
+    #[test]
+    fn no_ignore_behaves_as_classic_stack() {
+        let arg = Stack {
+            align_item: AlignItem::Stretch,
+            align_fix: false,
+            custom: false,
+            ignored: std::collections::HashSet::new(),
+        };
+        let children = children();
+        let inside = LayoutInsideObject::new(&children, 100.0);
+        let l = arg.to_layout(&inside);
+        // 无 ignore: size = max(10, 30, 20) = 30
+        assert_eq!(l.size(), 30.0);
+        // 所有子节点位置可查询
+        assert!(l.child_position(0).is_ok());
+        assert!(l.child_position(1).is_ok());
+        assert!(l.child_position(2).is_ok());
     }
 }

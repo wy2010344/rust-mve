@@ -209,4 +209,133 @@ mod tests {
         let key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape);
         assert_eq!(translate_key(&key), Key::Escape);
     }
+
+    // ===== 对齐 Kotlin Engine 更多按键翻译 =====
+
+    #[test]
+    fn translate_key_tab() {
+        let key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::Tab);
+        assert_eq!(translate_key(&key), Key::Tab);
+    }
+
+    #[test]
+    fn translate_key_delete() {
+        let key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::Delete);
+        assert_eq!(translate_key(&key), Key::Delete);
+    }
+
+    #[test]
+    fn translate_key_arrow_up() {
+        let key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowUp);
+        assert_eq!(translate_key(&key), Key::ArrowUp);
+    }
+
+    #[test]
+    fn translate_key_arrow_down() {
+        let key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowDown);
+        assert_eq!(translate_key(&key), Key::ArrowDown);
+    }
+
+    #[test]
+    fn translate_key_arrow_left() {
+        let key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowLeft);
+        assert_eq!(translate_key(&key), Key::ArrowLeft);
+    }
+
+    #[test]
+    fn translate_key_arrow_right() {
+        let key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowRight);
+        assert_eq!(translate_key(&key), Key::ArrowRight);
+    }
+
+    #[test]
+    fn translate_key_home() {
+        let key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::Home);
+        assert_eq!(translate_key(&key), Key::Home);
+    }
+
+    #[test]
+    fn translate_key_end() {
+        let key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::End);
+        assert_eq!(translate_key(&key), Key::End);
+    }
+
+    #[test]
+    fn translate_key_page_up() {
+        let key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::PageUp);
+        assert_eq!(translate_key(&key), Key::PageUp);
+    }
+
+    #[test]
+    fn translate_key_page_down() {
+        let key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::PageDown);
+        assert_eq!(translate_key(&key), Key::PageDown);
+    }
+
+    #[test]
+    fn translate_key_space() {
+        let key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::Space);
+        assert_eq!(translate_key(&key), Key::Char(' '));
+    }
+
+    #[test]
+    fn translate_modifiers_alt_meta() {
+        let state = winit::keyboard::ModifiersState::ALT | winit::keyboard::ModifiersState::SUPER;
+        let m = translate_modifiers(&state);
+        assert!(m & 0x4 != 0); // alt
+        assert!(m & 0x8 != 0); // meta
+        assert!(m & 0x1 == 0); // no shift
+        assert!(m & 0x2 == 0); // no ctrl
+    }
+
+    #[test]
+    fn translate_mouse_input_right_button() {
+        let event = winit::event::WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state: winit::event::ElementState::Pressed,
+            button: winit::event::MouseButton::Right,
+        };
+        let mods = winit::keyboard::ModifiersState::empty();
+        let result = translate_window_event(&event, &mods, (10.0, 20.0));
+        match result.unwrap() {
+            Event::Pointer(e) => assert_eq!(e.buttons, 2),
+            _ => panic!("expected Pointer"),
+        }
+    }
+
+    #[test]
+    fn translate_mouse_input_middle_button() {
+        let event = winit::event::WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state: winit::event::ElementState::Released,
+            button: winit::event::MouseButton::Middle,
+        };
+        let mods = winit::keyboard::ModifiersState::empty();
+        let result = translate_window_event(&event, &mods, (10.0, 20.0));
+        match result.unwrap() {
+            Event::Pointer(e) => {
+                assert_eq!(e.pointer_type, PointerType::Up);
+                assert_eq!(e.buttons, 4);
+            }
+            _ => panic!("expected Pointer"),
+        }
+    }
+
+    #[test]
+    fn translate_mouse_wheel() {
+        let event = winit::event::WindowEvent::MouseWheel {
+            device_id: winit::event::DeviceId::dummy(),
+            delta: winit::event::MouseScrollDelta::LineDelta(0.0, 3.0),
+            phase: winit::event::TouchPhase::Moved,
+        };
+        let mods = winit::keyboard::ModifiersState::empty();
+        let result = translate_window_event(&event, &mods, (0.0, 0.0));
+        match result.unwrap() {
+            Event::Pointer(e) => {
+                assert_eq!(e.pointer_type, PointerType::Wheel);
+                assert_eq!(e.wheel_delta, 3.0);
+            }
+            _ => panic!("expected Pointer"),
+        }
+    }
 }

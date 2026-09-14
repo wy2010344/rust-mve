@@ -68,6 +68,14 @@ pub trait Widget: 'static + Any {
     fn accessibility(&self) -> Option<(&str, Option<&str>)> {
         None
     }
+
+    /// 文本选择：给定全局坐标，返回文本偏移量。
+    ///
+    /// 用于文本选择（鼠标点击/拖拽）。仅文本类组件需要重写。
+    /// 默认返回 `None`（不参与文本选择）。
+    fn position_for_text_point(&self, _x: f32, _y: f32, _cx: &DrawContext) -> Option<usize> {
+        None
+    }
 }
 
 impl dyn Widget {

@@ -14,6 +14,9 @@ thread_local! {
 
     /// 当前线程的信号系统全局状态。
     static G: RefCell<Global> = RefCell::new(Global::empty());
+
+    /// 当前正在求值的 memo ID 栈（用于循环检测）。
+    static EVAL_STACK: RefCell<Vec<NodeId>> = const { RefCell::new(Vec::new()) };
 }
 
 /// 读取全局版本号。
@@ -127,4 +130,31 @@ pub(crate) fn register_dep(
         // 在全局 borrow 之外调用（可能内部借用 memo 的 relays RefCell）。
         cur.collect(dep_id, snapshot, reget);
     }
+}
+
+/// 重置信号系统全局状态。
+///
+/// 用于测试隔离：清除注册表、批次队列、全局版本号。
+/// 对齐 Kotlin `resetSignalGlobalState()`。
+pub fn reset_signal_global_state() {
+    GLOBAL_VERSION.with(|v| v.set(0));
+    G.with(|g| {
+        *g.borrow_mut() = Global::empty();
+    });
+    EVAL_STACK.with(|s| s.borrow_mut().clear());
+}
+
+/// 检查 memo 是否在求值栈中（循环检测）。
+pub(crate) fn check_memo_cycle(id: NodeId) -> bool {
+    EVAL_STACK.with(|s| s.borrow().contains(&id))
+}
+
+/// 进入 memo 求值：将 memo ID 压栈。
+pub(crate) fn push_eval_stack(id: NodeId) {
+    EVAL_STACK.with(|s| s.borrow_mut().push(id));
+}
+
+/// 退出 memo 求值：弹出 memo ID。
+pub(crate) fn pop_eval_stack() {
+    EVAL_STACK.with(|s| s.borrow_mut().pop());
 }

@@ -194,6 +194,18 @@ impl Widget for TextInputWidget {
     fn on_click(&mut self, _cx: &DrawContext) {
         // 获得焦点
     }
+
+    fn position_for_text_point(&self, x: f32, _y: f32, cx: &DrawContext) -> Option<usize> {
+        if self.text.is_empty() {
+            return Some(0);
+        }
+        let rect = cx.outer_rect();
+        let text_left = rect.x + 4.0;
+        let char_width = self.font_size * 0.6;
+        let relative_x = (x - text_left).max(0.0);
+        let offset = (relative_x / char_width).round() as usize;
+        Some(offset.min(self.text.len()))
+    }
 }
 
 #[cfg(test)]
@@ -313,5 +325,65 @@ mod tests {
         );
         w.draw(&mut scene, &mut cx);
         assert_eq!(scene.len(), 6);
+    }
+
+    #[test]
+    fn input_position_for_text_point_empty() {
+        let w = TextInputWidget::new();
+        let cx = DrawContext::new(
+            Rect::new(10.0, 10.0, 200.0, 30.0),
+            crate::Point::new(10.0, 10.0),
+            crate::Size::new(200.0, 30.0),
+        );
+        assert_eq!(w.position_for_text_point(50.0, 25.0, &cx), Some(0));
+    }
+
+    #[test]
+    fn input_position_for_text_point_at_start() {
+        let w = TextInputWidget::new().text("abc");
+        let cx = DrawContext::new(
+            Rect::new(10.0, 10.0, 200.0, 30.0),
+            crate::Point::new(10.0, 10.0),
+            crate::Size::new(200.0, 30.0),
+        );
+        // text_left = 10 + 4 = 14; clicking at x=14 → offset 0
+        assert_eq!(w.position_for_text_point(14.0, 25.0, &cx), Some(0));
+    }
+
+    #[test]
+    fn input_position_for_text_point_after_first_char() {
+        let w = TextInputWidget::new().text("abc").font_size(10.0);
+        let cx = DrawContext::new(
+            Rect::new(0.0, 0.0, 200.0, 30.0),
+            crate::Point::new(0.0, 0.0),
+            crate::Size::new(200.0, 30.0),
+        );
+        // text_left = 0 + 4 = 4; char_width = 10 * 0.6 = 6
+        // clicking at x = 4 + 6 = 10 → offset 1
+        assert_eq!(w.position_for_text_point(10.0, 15.0, &cx), Some(1));
+    }
+
+    #[test]
+    fn input_position_for_text_point_clamps_at_end() {
+        let w = TextInputWidget::new().text("ab"); // len = 2
+        let cx = DrawContext::new(
+            Rect::new(0.0, 0.0, 200.0, 30.0),
+            crate::Point::new(0.0, 0.0),
+            crate::Size::new(200.0, 30.0),
+        );
+        // clicking far right → offset clamped to 2
+        assert_eq!(w.position_for_text_point(500.0, 15.0, &cx), Some(2));
+    }
+
+    #[test]
+    fn input_position_for_text_point_before_text() {
+        let w = TextInputWidget::new().text("abc");
+        let cx = DrawContext::new(
+            Rect::new(10.0, 10.0, 200.0, 30.0),
+            crate::Point::new(10.0, 10.0),
+            crate::Size::new(200.0, 30.0),
+        );
+        // clicking before text_left → offset 0
+        assert_eq!(w.position_for_text_point(0.0, 25.0, &cx), Some(0));
     }
 }

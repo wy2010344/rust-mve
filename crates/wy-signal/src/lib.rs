@@ -24,6 +24,7 @@
 //! 信号与 memo 以 `Rc<RefCell<_>>` 组织，非 `Send`/`Sync`，仅在单一
 //! UI 线程内使用。批量更新通过 [`batch`] 闭包包裹。
 
+mod animate_signal;
 mod batch;
 mod context;
 mod get_;
@@ -31,8 +32,17 @@ mod memo;
 mod signal;
 mod track;
 
+pub use animate_signal::{
+    cubic, linear, quad, spring, spring_base, spring_is_stop, tween, AnimateSignal,
+    AnimateSignalConfig, EaseFn, FrameSource, FrameSubscription, SilentDiff, SpringAnimationArg,
+    SpringBaseArg, SpringOutValue, TweenConfig,
+};
 pub use batch::{batch, flush};
+pub use context::reset_signal_global_state;
 pub use get_::{GetValue, NodeId, SetValue};
 pub use memo::{create_memo, Memo};
-pub use signal::{create_signal, Signal};
+pub use signal::{
+    create_late_signal, create_signal, create_signal_with_comparator, LateSignal, Signal,
+    WriteHandle,
+};
 pub use track::{create_effect, track, Disposed, Track, TrackEffect};

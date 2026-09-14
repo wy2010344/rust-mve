@@ -82,17 +82,23 @@ impl FocusManager {
 
     /// Tab 遍历：移动焦点到下一个可焦点节点。
     ///
-    /// 遍历规则：
-    /// 1. 如果当前焦点有 `focus_trap`，只在陷阱子树内遍历
-    /// 2. 按 `focus_order` 排序（有显式顺序的在前，无顺序的按文档序）
-    /// 3. `shift` 为 true 时反向遍历（Shift+Tab）
+    /// 遍历规则（对齐 Kotlin `moveFocus()`）：
+    /// 1. 从当前焦点沿 parent 链上溯，找到最近的 `focus_trap` 祖先
+    /// 2. 若找到 trap，只在该 trap 子树内遍历；否则全局遍历
+    /// 3. 按 `focus_order` 排序（有显式顺序的在前，无顺序的按文档序）
+    /// 4. `shift` 为 true 时反向遍历（Shift+Tab）
     pub fn move_focus(&mut self, shift: bool) -> Option<usize> {
         if self.nodes.is_empty() {
             return None;
         }
 
-        // 获取排序后的焦点节点列表
-        let sorted = self.sorted_focusable_nodes();
+        // 确定遍历范围：trap 子树 or 全局
+        let trap_id = self.find_nearest_trap_ancestor();
+        let sorted = self.sorted_focusable_nodes_in_scope(trap_id);
+
+        if sorted.is_empty() {
+            return None;
+        }
 
         // 找到当前焦点在排序列表中的位置
         let current_pos = self
@@ -119,20 +125,66 @@ impl FocusManager {
         Some(next_id)
     }
 
-    /// 排序后的可焦点节点列表。
+    /// 从当前焦点沿 parent 链上溯，返回最近的 `focus_trap` 节点 ID。
     ///
-    /// 排序规则：有显式 `order` 的按 order 升序，无 order 的按文档序排在后面。
-    fn sorted_focusable_nodes(&self) -> Vec<&FocusableNode> {
-        let mut with_order: Vec<&FocusableNode> =
-            self.nodes.iter().filter(|n| n.order.is_some()).collect();
-        let without_order: Vec<&FocusableNode> =
-            self.nodes.iter().filter(|n| n.order.is_none()).collect();
+    /// 对齐 Kotlin `findFocusTrap()`：无状态，天然支持嵌套 trap。
+    fn find_nearest_trap_ancestor(&self) -> Option<usize> {
+        let focused_id = self.focused?;
+        let mut current = self.nodes.iter().find(|n| n.id == focused_id);
+        while let Some(node) = current {
+            if node.trap {
+                return Some(node.id);
+            }
+            current = node
+                .parent_id
+                .and_then(|pid| self.nodes.iter().find(|n| n.id == pid));
+        }
+        None
+    }
+
+    /// 在指定 scope 内排序后的可焦点节点列表。
+    ///
+    /// `trap_id = None` 时返回全局列表；`Some(id)` 时只返回该 trap 子树内的节点
+    /// （不包含 trap 节点本身，对齐 Kotlin `collectFocusable(trap)` 中 trap 默认不可聚焦）。
+    fn sorted_focusable_nodes_in_scope(&self, trap_id: Option<usize>) -> Vec<&FocusableNode> {
+        let candidates: Vec<&FocusableNode> = if let Some(tid) = trap_id {
+            // 只收集 trap 子树内的后代节点（不包含 trap 节点本身）
+            self.nodes
+                .iter()
+                .filter(|n| self.is_descendant_of(n.id, tid))
+                .collect()
+        } else {
+            self.nodes.iter().collect()
+        };
+
+        let mut with_order: Vec<&FocusableNode> = candidates
+            .iter()
+            .copied()
+            .filter(|n| n.order.is_some())
+            .collect();
+        let without_order: Vec<&FocusableNode> = candidates
+            .iter()
+            .copied()
+            .filter(|n| n.order.is_none())
+            .collect();
 
         with_order.sort_by_key(|n| n.order.unwrap());
-        // without_order 保持注册顺序（文档序）
-
         with_order.extend(without_order);
         with_order
+    }
+
+    /// 判断 `id` 是否是 `ancestor_id` 的后代（沿 parent 链上溯可达）。
+    fn is_descendant_of(&self, id: usize, ancestor_id: usize) -> bool {
+        let mut current = self.nodes.iter().find(|n| n.id == id);
+        while let Some(node) = current {
+            if node.parent_id == Some(ancestor_id) {
+                return true;
+            }
+            current = node
+                .parent_id
+                .and_then(|pid| self.nodes.iter().find(|n| n.id == pid));
+        }
+        false
     }
 
     /// 当前焦点是否在指定陷阱节点的子树内。
@@ -285,5 +337,246 @@ mod tests {
 
         fm.set_focus(3);
         assert!(!fm.is_focused_in_trap(1)); // 焦点不在 trap 1 的子树内
+    }
+
+    // ===== 对齐 Kotlin FocusScopeTest：trap 内循环 =====
+
+    #[test]
+    fn tab_stays_inside_trap() {
+        // Kotlin FocusScopeTest#tabStaysInsideOuterTrap
+        // trap(A, [A1, A2]) — Tab 在 A1→A2→A1 间循环，不跳出到外部节点
+        let mut fm = FocusManager::new();
+        fm.register(FocusableNode {
+            id: 10,
+            order: None,
+            trap: true,
+            parent_id: None,
+        });
+        fm.register(FocusableNode {
+            id: 11,
+            order: None,
+            trap: false,
+            parent_id: Some(10),
+        });
+        fm.register(FocusableNode {
+            id: 12,
+            order: None,
+            trap: false,
+            parent_id: Some(10),
+        });
+        fm.register(FocusableNode {
+            id: 20,
+            order: None,
+            trap: false,
+            parent_id: None,
+        }); // trap 外
+        fm.set_focus(11);
+
+        // Tab 应在 trap 内循环：11→12→11
+        assert_eq!(fm.move_focus(false), Some(12));
+        assert_eq!(fm.move_focus(false), Some(11));
+        assert_eq!(fm.move_focus(false), Some(12));
+        // 始终在 trap 内
+        assert!(fm.is_focused_in_trap(10));
+    }
+
+    #[test]
+    fn shift_tab_cycles_backwards_inside_trap() {
+        // Kotlin FocusScopeTest#shiftTabCyclesBackwardsInsideTrap
+        let mut fm = FocusManager::new();
+        fm.register(FocusableNode {
+            id: 10,
+            order: None,
+            trap: true,
+            parent_id: None,
+        });
+        fm.register(FocusableNode {
+            id: 11,
+            order: None,
+            trap: false,
+            parent_id: Some(10),
+        });
+        fm.register(FocusableNode {
+            id: 12,
+            order: None,
+            trap: false,
+            parent_id: Some(10),
+        });
+        fm.register(FocusableNode {
+            id: 20,
+            order: None,
+            trap: false,
+            parent_id: None,
+        });
+        fm.set_focus(11);
+
+        // Shift+Tab 应反向循环：11→12→11
+        assert_eq!(fm.move_focus(true), Some(12));
+        assert_eq!(fm.move_focus(true), Some(11));
+    }
+
+    #[test]
+    fn focus_outside_trap_uses_global_order() {
+        // Kotlin FocusScopeTest#focusOutsideTrapUsesGlobalOrder
+        // 无 trap 时，全局 Tab 遍历
+        let mut fm = FocusManager::new();
+        fm.register(FocusableNode {
+            id: 1,
+            order: None,
+            trap: false,
+            parent_id: None,
+        });
+        fm.register(FocusableNode {
+            id: 2,
+            order: None,
+            trap: false,
+            parent_id: None,
+        });
+        fm.register(FocusableNode {
+            id: 3,
+            order: None,
+            trap: false,
+            parent_id: None,
+        });
+        fm.set_focus(1);
+
+        assert_eq!(fm.move_focus(false), Some(2));
+        assert_eq!(fm.move_focus(false), Some(3));
+        assert_eq!(fm.move_focus(false), Some(1)); // 全局循环
+    }
+
+    #[test]
+    fn nested_trap_scopes_to_innermost() {
+        // Kotlin FocusScopeTest#tabStaysInsideInnermostTrap
+        // outer(trap) → inner(trap) → [I1, I2]
+        // 焦点在 inner 子树内时，只在 inner 的子节点间循环
+        let mut fm = FocusManager::new();
+        fm.register(FocusableNode {
+            id: 100,
+            order: None,
+            trap: true,
+            parent_id: None,
+        }); // outer
+        fm.register(FocusableNode {
+            id: 110,
+            order: None,
+            trap: true,
+            parent_id: Some(100),
+        }); // inner
+        fm.register(FocusableNode {
+            id: 111,
+            order: None,
+            trap: false,
+            parent_id: Some(110),
+        }); // I1
+        fm.register(FocusableNode {
+            id: 112,
+            order: None,
+            trap: false,
+            parent_id: Some(110),
+        }); // I2
+        fm.register(FocusableNode {
+            id: 101,
+            order: None,
+            trap: false,
+            parent_id: Some(100),
+        }); // outer child (not inner)
+        fm.register(FocusableNode {
+            id: 20,
+            order: None,
+            trap: false,
+            parent_id: None,
+        }); // global
+        fm.set_focus(111);
+
+        // 最近 trap 祖先是 inner(110)，只在 I1→I2 间循环
+        assert_eq!(fm.move_focus(false), Some(112));
+        assert_eq!(fm.move_focus(false), Some(111));
+        // 不会跳出到 outer child(101) 或 global(20)
+    }
+
+    #[test]
+    fn trap_excludes_hidden_and_non_focusable() {
+        // Kotlin FocusScopeTest#trapExcludesHiddenAndNonFocusable
+        // 注册的节点都是 focusable 的，trap 内只遍历已注册节点
+        let mut fm = FocusManager::new();
+        fm.register(FocusableNode {
+            id: 10,
+            order: None,
+            trap: true,
+            parent_id: None,
+        });
+        fm.register(FocusableNode {
+            id: 11,
+            order: None,
+            trap: false,
+            parent_id: Some(10),
+        });
+        // id=12 未注册（模拟 hidden/non-focusable）
+        fm.register(FocusableNode {
+            id: 13,
+            order: None,
+            trap: false,
+            parent_id: Some(10),
+        });
+        fm.register(FocusableNode {
+            id: 20,
+            order: None,
+            trap: false,
+            parent_id: None,
+        });
+        fm.set_focus(11);
+
+        // 只在 trap 内已注册的节点间循环：11→13→11
+        assert_eq!(fm.move_focus(false), Some(13));
+        assert_eq!(fm.move_focus(false), Some(11));
+    }
+
+    #[test]
+    fn register_replaces_existing_node() {
+        // 同一 ID 重复注册只保留最新
+        let mut fm = FocusManager::new();
+        fm.register(FocusableNode {
+            id: 1,
+            order: None,
+            trap: false,
+            parent_id: None,
+        });
+        fm.register(FocusableNode {
+            id: 1,
+            order: Some(5),
+            trap: true,
+            parent_id: None,
+        });
+        assert_eq!(fm.nodes.len(), 1);
+        let n = fm.nodes.iter().find(|n| n.id == 1).unwrap();
+        assert_eq!(n.order, Some(5));
+        assert!(n.trap);
+    }
+
+    #[test]
+    fn move_focus_single_node_wraps() {
+        let mut fm = FocusManager::new();
+        fm.register(node(1));
+        fm.set_focus(1);
+        assert_eq!(fm.move_focus(false), Some(1)); // 唯一节点，循环到自身
+    }
+
+    #[test]
+    fn focused_node_returns_info() {
+        let mut fm = FocusManager::new();
+        fm.register(ordered_node(5, 10));
+        fm.set_focus(5);
+        let info = fm.focused_node().unwrap();
+        assert_eq!(info.id, 5);
+        assert_eq!(info.order, Some(10));
+    }
+
+    #[test]
+    fn unregister_nonexistent_is_noop() {
+        let mut fm = FocusManager::new();
+        fm.register(node(1));
+        fm.unregister(99);
+        assert_eq!(fm.nodes.len(), 1);
     }
 }

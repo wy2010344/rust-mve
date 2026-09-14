@@ -255,4 +255,102 @@ mod tests {
             _ => panic!("expected Key"),
         }
     }
+
+    // ===== 对齐 Kotlin Engine 更多事件类型 =====
+
+    #[test]
+    fn pointer_event_root_position() {
+        let e = PointerEvent::new(PointerType::Move, 10.0, 20.0).with_root_position(100.0, 200.0);
+        assert_eq!(e.x, 10.0);
+        assert_eq!(e.y, 20.0);
+        assert_eq!(e.root_x, 100.0);
+        assert_eq!(e.root_y, 200.0);
+    }
+
+    #[test]
+    fn pointer_event_pen_device() {
+        let e = PointerEvent::new(PointerType::Down, 0.0, 0.0).with_device(PointerDevice::Pen);
+        assert_eq!(e.device, PointerDevice::Pen);
+    }
+
+    #[test]
+    fn pointer_event_touch_device() {
+        let e = PointerEvent::new(PointerType::Down, 0.0, 0.0).with_device(PointerDevice::Touch);
+        assert_eq!(e.device, PointerDevice::Touch);
+    }
+
+    #[test]
+    fn pointer_event_multi_touch_ids() {
+        let e1 = PointerEvent::new(PointerType::Down, 0.0, 0.0).with_id(0);
+        let e2 = PointerEvent::new(PointerType::Down, 0.0, 0.0).with_id(1);
+        assert_ne!(e1.id, e2.id);
+    }
+
+    #[test]
+    fn pointer_event_cancel_type() {
+        let e = PointerEvent::new(PointerType::Cancel, 0.0, 0.0);
+        assert_eq!(e.pointer_type, PointerType::Cancel);
+    }
+
+    #[test]
+    fn key_event_all_modifiers() {
+        let e = KeyEvent::new(Key::Tab, true).with_modifiers(true, true, true, true);
+        assert!(e.ctrl);
+        assert!(e.shift);
+        assert!(e.alt);
+        assert!(e.meta);
+    }
+
+    #[test]
+    fn key_event_release() {
+        let e = KeyEvent::new(Key::Enter, false);
+        assert!(!e.pressed);
+    }
+
+    #[test]
+    fn key_event_all_variants() {
+        // 确保所有 Key 变体都可构造
+        let _ = KeyEvent::new(Key::Char('a'), true);
+        let _ = KeyEvent::new(Key::Enter, true);
+        let _ = KeyEvent::new(Key::Backspace, true);
+        let _ = KeyEvent::new(Key::Delete, true);
+        let _ = KeyEvent::new(Key::ArrowUp, true);
+        let _ = KeyEvent::new(Key::ArrowDown, true);
+        let _ = KeyEvent::new(Key::ArrowLeft, true);
+        let _ = KeyEvent::new(Key::ArrowRight, true);
+        let _ = KeyEvent::new(Key::Tab, true);
+        let _ = KeyEvent::new(Key::Escape, true);
+        let _ = KeyEvent::new(Key::Home, true);
+        let _ = KeyEvent::new(Key::End, true);
+        let _ = KeyEvent::new(Key::PageUp, true);
+        let _ = KeyEvent::new(Key::PageDown, true);
+    }
+
+    #[test]
+    fn key_event_ctrl_c() {
+        let e = KeyEvent::new(Key::Char('c'), true).with_modifiers(true, false, false, false);
+        assert_eq!(e.key, Key::Char('c'));
+        assert!(e.ctrl);
+    }
+
+    #[test]
+    fn key_event_ctrl_shift_z() {
+        let e = KeyEvent::new(Key::Char('z'), true).with_modifiers(true, true, false, false);
+        assert!(e.ctrl);
+        assert!(e.shift);
+    }
+
+    #[test]
+    fn pointer_type_all_variants() {
+        assert_ne!(PointerType::Down, PointerType::Up);
+        assert_ne!(PointerType::Move, PointerType::Click);
+        assert_ne!(PointerType::Cancel, PointerType::Wheel);
+    }
+
+    #[test]
+    fn pointer_device_all_variants() {
+        assert_ne!(PointerDevice::Mouse, PointerDevice::Touch);
+        assert_ne!(PointerDevice::Touch, PointerDevice::Pen);
+        assert_ne!(PointerDevice::Pen, PointerDevice::Mouse);
+    }
 }
