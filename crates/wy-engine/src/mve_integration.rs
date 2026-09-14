@@ -75,12 +75,13 @@ fn hit_test_tree(nodes: &[ExpandedNode], x: f32, y: f32) -> bool {
         if hit_test_tree(&child.children, nx, ny) {
             return true;
         }
-        // 再检查当前节点
-        if child.node.run_hit_test(nx, ny)
-            && (child.node.on_click_fn.is_some() || child.node.on_down_fn.is_some())
+        // 再检查当前节点（必须有 handler 才算命中）
+        if (child.node.on_click_fn.is_some() || child.node.on_down_fn.is_some())
+            && child.node.run_hit_test(nx, ny)
         {
             return true;
         }
+        // 无 handler 的容器节点：继续检查兄弟节点
     }
     false
 }
@@ -419,5 +420,103 @@ mod tests {
 
         let tree = unsafe { &*app.expanded_tree.get() };
         assert_eq!(tree.as_ref().unwrap()[0].node.width, 50.0);
+    }
+
+    /// 模拟 counter 完整结构：column_at > text + row > button-, button+
+    /// 验证点击按钮能命中并触发 on_click_fn
+    #[test]
+    fn counter_click_dispatches_to_button() {
+        use wy_mve::components::{button, column_at, row, text_signal};
+
+        let count = Signal::new(0);
+
+        // 构建和 counter demo 相同的树结构
+        let mut root_cx = NodeContext::new(0);
+        let text_count = count.clone();
+        let col_count = count.clone();
+        let col_node = column_at(350.0, 250.0, move |cx| {
+            let c = text_count.clone();
+            cx.child(text_signal(move || Box::new(format!("Count: {}", c.get()))));
+
+            let row_count = col_count.clone();
+            cx.child(row(move |cx| {
+                cx.child(button(|| "−".into(), {
+                    let s = row_count.clone();
+                    move || s.set(s.get() - 1)
+                }));
+                cx.child(button(|| "+".into(), {
+                    let s = row_count.clone();
+                    move || s.set(s.get() + 1)
+                }));
+            }));
+        });
+        root_cx.add_node(col_node);
+        let nodes = root_cx.into_nodes();
+
+        // 展开树
+        let expanded = expand_tree(&nodes);
+
+        // 验证树结构
+        assert_eq!(expanded.len(), 1); // column_at
+        let col = &expanded[0];
+        assert_eq!(col.node.x, 350.0);
+        assert_eq!(col.node.y, 250.0);
+        assert_eq!(col.children.len(), 2); // text + row
+
+        let row = &col.children[1];
+        assert_eq!(row.children.len(), 2); // button- and button+
+        let btn_minus = &row.children[0];
+        let btn_plus = &row.children[1];
+        assert_eq!(btn_minus.node.x, 0.0); // row arranges: first at x=0
+        assert_eq!(btn_plus.node.x, 98.0); // 90 + 8 gap
+        assert_eq!(btn_minus.node.width, 90.0);
+        assert_eq!(btn_plus.node.width, 90.0);
+        assert!(btn_minus.node.on_click_fn.is_some());
+        assert!(btn_plus.node.on_click_fn.is_some());
+
+        // 点击 "+" 按钮中心（屏幕坐标）
+        let click_x = 350.0 + 98.0 + 45.0;
+        let click_y = 250.0 + 8.0 + 16.0;
+
+        assert!(hit_test_tree(&expanded, click_x, click_y));
+
+        // 分发点击
+        let mut event = MvePointerEvent::new(click_x, click_y);
+        dispatch_click_tree(&expanded, click_x, click_y, &mut event);
+        assert!(event.stopped, "event should be stopped by button handler");
+
+        // 验证信号已更新
+        assert_eq!(count.get(), 1);
+    }
+
+    /// 直接测试坐标变换链：screen → column → row → button
+    #[test]
+    fn coordinate_chain_debug() {
+        let click_x = 350.0 + 98.0 + 45.0; // = 493
+        let click_y = 250.0 + 8.0 + 16.0; // = 274
+
+        // column_at(350, 250) → nx = 493-350 = 143, ny = 274-250 = 24
+        let col_nx = click_x - 350.0;
+        let col_ny = click_y - 250.0;
+        assert_eq!(col_nx, 143.0);
+        assert_eq!(col_ny, 24.0);
+
+        // row 在 column 中的位置：text height=0 + gap=8 → row.y = 8
+        let row_ny = col_ny - 8.0;
+        assert_eq!(row_ny, 16.0);
+
+        // button+ 在 row 中的位置：x = 90 + 8 = 98
+        let btn_nx = col_nx - 98.0;
+        let btn_ny = row_ny;
+        assert_eq!(btn_nx, 45.0); // button center x
+        assert_eq!(btn_ny, 16.0); // button center y
+
+        // button hit_test: 45 < 90 AND 16 < 32 → should be true
+        let btn = Node {
+            width: 90.0,
+            height: 32.0,
+            ..Node::default()
+        };
+        assert!(btn.run_hit_test(btn_nx, btn_ny));
     }
 }

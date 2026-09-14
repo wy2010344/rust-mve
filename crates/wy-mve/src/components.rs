@@ -93,6 +93,7 @@ pub fn button(label: impl Fn() -> String + 'static, on_click: impl Fn() + 'stati
         focusable: true,
         width: 90.0,
         height: 32.0,
+        hit_test_fn: Rc::new(|x, y| (0.0..90.0).contains(&x) && (0.0..32.0).contains(&y)),
         draw_fn: Rc::new(move |scene| {
             if let Some(scene) = scene.downcast_mut::<Scene>() {
                 let bg = Color::from_u32(0xFF_DCDCDC);
@@ -103,8 +104,9 @@ pub fn button(label: impl Fn() -> String + 'static, on_click: impl Fn() + 'stati
                 scene.draw_text(Point::new(10.0, 8.0), &t, 14.0, Color::BLACK);
             }
         }),
-        on_click_fn: Some(Rc::new(move |_| {
+        on_click_fn: Some(Rc::new(move |event| {
             on_click2();
+            event.stop_propagation();
         })),
         ..Node::default()
     }
