@@ -2,15 +2,15 @@
 //!
 //! 运行：`cargo run -p wy-app --example counter`
 
-use wy_mve::{button, column, render_root, row, text_signal, NodeContext};
+use wy_mve::{button, column_at, render_root, row, text_signal, NodeContext};
 use wy_signal::{GetValue, SetValue, Signal};
 
 fn counter_ui(cx: &mut NodeContext, count: Signal<i32>) {
-    let c = count.clone();
-    cx.child(text_signal(move || Box::new(c.get())));
+    cx.child(column_at(350.0, 250.0, move |cx| {
+        // text_signal 在构造时读信号（被 tracker 追踪）
+        let c = count.clone();
+        cx.child(text_signal(move || Box::new(format!("Count: {}", c.get()))));
 
-    cx.child(column(move |cx| {
-        // Signal 内部 Rc，clone 只增引用计数（纳秒级）
         let row_count = count.clone();
         cx.child(row(move |cx| {
             cx.child(button(|| "−".into(), {

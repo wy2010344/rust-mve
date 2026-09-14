@@ -20,7 +20,9 @@ mod signal_cache;
 mod state_holder;
 
 pub use app::{run_mve_app, MouseButton, MveApp, WindowEvent};
-pub use components::{button, column, row, spacer, text, text_signal, text_styled};
+pub use components::{
+    button, column, column_at, row, row_at, spacer, text, text_signal, text_styled,
+};
 pub use context::{render_root, ChildrenCache, Context, NodeContext};
 pub use node::{Key, KeyEvent, Node, PointerEvent};
 pub use state_holder::StateHolder;

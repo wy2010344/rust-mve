@@ -125,9 +125,43 @@ pub fn row(children: impl Fn(&mut NodeContext) + 'static) -> Node {
     }
 }
 
+/// 水平排列容器（带位置）。
+pub fn row_at(x: f32, y: f32, children: impl Fn(&mut NodeContext) + 'static) -> Node {
+    Node {
+        x,
+        y,
+        arg_children_fn: Rc::new(move |cx| {
+            children(cx);
+            let mut offset_x = 0.0;
+            for node in cx.nodes_mut().iter_mut() {
+                node.x = offset_x;
+                offset_x += node.width + 8.0;
+            }
+        }),
+        ..Node::default()
+    }
+}
+
 /// 垂直排列容器。
 pub fn column(children: impl Fn(&mut NodeContext) + 'static) -> Node {
     Node {
+        arg_children_fn: Rc::new(move |cx| {
+            children(cx);
+            let mut offset_y = 0.0;
+            for node in cx.nodes_mut().iter_mut() {
+                node.y = offset_y;
+                offset_y += node.height + 8.0;
+            }
+        }),
+        ..Node::default()
+    }
+}
+
+/// 垂直排列容器（带位置）。
+pub fn column_at(x: f32, y: f32, children: impl Fn(&mut NodeContext) + 'static) -> Node {
+    Node {
+        x,
+        y,
         arg_children_fn: Rc::new(move |cx| {
             children(cx);
             let mut offset_y = 0.0;
