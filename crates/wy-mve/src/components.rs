@@ -1,16 +1,19 @@
 //! 声明式组件辅助函数：text / button / row / column。
 //!
 //! 用户通过组合这些函数构建 UI，不需要手动写 draw/hit_test/event。
+//!
+//! 布局在**渲染期**由容器节点的 `Layout` 角色完成（对应 Kotlin Flex 一维布局），
+//! 组件构造时不计算任何位置。
 
 use std::rc::Rc;
 
 use crate::context::NodeContext;
-use crate::node::Node;
+use crate::node::{Layout, Node};
 use wy_render::{Color, Point, Rect, Scene};
 
 /// 文本组件：闭包返回文本内容。
 ///
-/// 闭包在 draw 时执行，内部读取信号会自动追踪。
+/// 闭包在 draw 时执行，内部读取信号会自动追踪依赖。
 ///
 /// ```ignore
 /// let count = Signal::new(0);
@@ -45,23 +48,14 @@ pub fn text_styled(content: impl Fn() -> String + 'static, font_size: f32, color
     }
 }
 
-/// 信号文本：闭包返回值自动 Display。
-///
-/// 信号读取在 tree 构造阶段执行（被 tracker.collect 追踪），
-/// draw 阶段从缓存读取，不重新读信号。
+/// 信号文本：draw 期读取信号并 Display 格式化，信号变化自动触发重绘。
 pub fn text_signal(value: impl Fn() -> Box<dyn std::fmt::Display> + 'static) -> Node {
-    // 构造时读取信号值（在 tracker.collect 阶段，被追踪为依赖）
-    let text = format!("{}", value());
-    let cache_key = crate::signal_cache::next_key();
-    crate::signal_cache::cache_signal_value(cache_key, text);
-
     Node {
         draw_fn: Rc::new(move |scene| {
             if let Some(scene) = scene.downcast_mut::<Scene>() {
-                if let Some(t) = crate::signal_cache::get_cached_signal::<String>(cache_key) {
-                    if !t.is_empty() {
-                        scene.draw_text(Point::new(0.0, 0.0), &t, 14.0, Color::BLACK);
-                    }
+                let t = format!("{}", value());
+                if !t.is_empty() {
+                    scene.draw_text(Point::new(0.0, 0.0), &t, 14.0, Color::BLACK);
                 }
             }
         }),
@@ -71,7 +65,7 @@ pub fn text_signal(value: impl Fn() -> Box<dyn std::fmt::Display> + 'static) -> 
 
 /// 按钮组件：标签文本 + 点击回调。
 ///
-/// 内置：hover/pressed 视觉反馈、焦点支持、Enter/Space 键盘触发。
+/// 内置：pressed 视觉反馈、焦点支持、点击后停止事件冒泡。
 ///
 /// ```ignore
 /// let count = Signal::new(0);
@@ -112,66 +106,42 @@ pub fn button(label: impl Fn() -> String + 'static, on_click: impl Fn() + 'stati
     }
 }
 
-/// 水平排列容器。
+/// 水平排列容器（主轴 = X，子节点依次右排，间距 8）。
 pub fn row(children: impl Fn(&mut NodeContext) + 'static) -> Node {
     Node {
-        arg_children_fn: Rc::new(move |cx| {
-            children(cx);
-            let mut offset_x = 0.0;
-            for node in cx.nodes_mut().iter_mut() {
-                node.x = offset_x;
-                offset_x += node.width + 8.0;
-            }
-        }),
+        layout: Some(Layout::Row { gap: 8.0 }),
+        arg_children_fn: Rc::new(move |cx| children(cx)),
         ..Node::default()
     }
 }
 
-/// 水平排列容器（带位置）。
+/// 水平排列容器（带绝对位置）。
 pub fn row_at(x: f32, y: f32, children: impl Fn(&mut NodeContext) + 'static) -> Node {
     Node {
         x,
         y,
-        arg_children_fn: Rc::new(move |cx| {
-            children(cx);
-            let mut offset_x = 0.0;
-            for node in cx.nodes_mut().iter_mut() {
-                node.x = offset_x;
-                offset_x += node.width + 8.0;
-            }
-        }),
+        layout: Some(Layout::Row { gap: 8.0 }),
+        arg_children_fn: Rc::new(move |cx| children(cx)),
         ..Node::default()
     }
 }
 
-/// 垂直排列容器。
+/// 垂直排列容器（主轴 = Y，子节点依次下排，间距 8）。
 pub fn column(children: impl Fn(&mut NodeContext) + 'static) -> Node {
     Node {
-        arg_children_fn: Rc::new(move |cx| {
-            children(cx);
-            let mut offset_y = 0.0;
-            for node in cx.nodes_mut().iter_mut() {
-                node.y = offset_y;
-                offset_y += node.height + 8.0;
-            }
-        }),
+        layout: Some(Layout::Column { gap: 8.0 }),
+        arg_children_fn: Rc::new(move |cx| children(cx)),
         ..Node::default()
     }
 }
 
-/// 垂直排列容器（带位置）。
+/// 垂直排列容器（带绝对位置）。
 pub fn column_at(x: f32, y: f32, children: impl Fn(&mut NodeContext) + 'static) -> Node {
     Node {
         x,
         y,
-        arg_children_fn: Rc::new(move |cx| {
-            children(cx);
-            let mut offset_y = 0.0;
-            for node in cx.nodes_mut().iter_mut() {
-                node.y = offset_y;
-                offset_y += node.height + 8.0;
-            }
-        }),
+        layout: Some(Layout::Column { gap: 8.0 }),
+        arg_children_fn: Rc::new(move |cx| children(cx)),
         ..Node::default()
     }
 }
@@ -188,17 +158,7 @@ pub fn spacer(width: f32, height: f32) -> Node {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn node_has_layout_fields() {
-        let mut node = Node::default();
-        assert_eq!(node.x, 0.0);
-        assert_eq!(node.width, 0.0);
-        node.x = 10.0;
-        node.width = 100.0;
-        assert_eq!(node.x, 10.0);
-        assert_eq!(node.width, 100.0);
-    }
+    use crate::node::children_nodes;
 
     #[test]
     fn button_creates_node() {
@@ -217,8 +177,19 @@ mod tests {
     }
 
     #[test]
-    fn row_arranges_children() {
-        let mut cx = NodeContext::new(0);
+    fn row_sets_layout() {
+        let r = row(|_| {});
+        assert_eq!(r.layout, Some(Layout::Row { gap: 8.0 }));
+    }
+
+    #[test]
+    fn column_sets_layout() {
+        let c = column(|_| {});
+        assert_eq!(c.layout, Some(Layout::Column { gap: 8.0 }));
+    }
+
+    #[test]
+    fn row_offsets_children() {
         let r = row(|cx| {
             cx.add_node(Node {
                 width: 50.0,
@@ -231,30 +202,9 @@ mod tests {
                 ..Node::default()
             });
         });
-        r.run_arg_children(&mut cx);
-        let nodes = cx.nodes();
-        assert_eq!(nodes[0].x, 0.0);
-        assert_eq!(nodes[1].x, 58.0);
-    }
-
-    #[test]
-    fn column_arranges_children() {
-        let mut cx = NodeContext::new(0);
-        let c = column(|cx| {
-            cx.add_node(Node {
-                width: 50.0,
-                height: 20.0,
-                ..Node::default()
-            });
-            cx.add_node(Node {
-                width: 50.0,
-                height: 30.0,
-                ..Node::default()
-            });
-        });
-        c.run_arg_children(&mut cx);
-        let nodes = cx.nodes();
-        assert_eq!(nodes[0].y, 0.0);
-        assert_eq!(nodes[1].y, 28.0);
+        let children = children_nodes(&r);
+        let offsets = crate::node::layout_offsets(Layout::Row { gap: 8.0 }, &children);
+        assert_eq!(offsets[0], (0.0, 0.0));
+        assert_eq!(offsets[1], (58.0, 0.0));
     }
 }

@@ -1,167 +1,133 @@
-//! Demo：MVE 模式的列表应用。
+//! DemoList 复刻：`renderForEach` + 每项独立信号 + 局部重绘。
 //!
-//! 对应 Kotlin 的 DemoList.kt，使用 `wy-mve` 的 Node + 信号系统。
-//! 复刻 Kotlin MVE 模式：信号在 effect 闭包内读取，不克隆传递。
-//! 信号变化时自动重建 Node 树。
+//! 运行：`cargo run -p wy-app --example demo`
+//!
+//! 对应 Kotlin `DemoList.kt`：
+//! - 顶层按钮统计列表长度并添加条目（写主列表）；
+//! - 每项在 creater 里持有自己的信号（文本 / 折叠开关），
+//!   显示/隐藏明细只写项信号，不触碰主列表 → 该项局部重绘。
 
 use std::rc::Rc;
 
-use wy_mve::Node;
-use wy_render::{Color, Point, Rect, Scene};
-use wy_signal::{create_signal, GetValue, SetValue};
-use wy_text::FontContext;
+use wy_mve::{button, column_at, row, text_signal, Node};
+use wy_render::{Color, Rect, Scene};
+use wy_signal::{create_signal, GetValue, SetValue, Signal};
 
-// --- 数据模型 ---
-
-#[derive(Clone, Debug, PartialEq)]
-struct RowItem {
-    key: u64,
-    hide: bool,
+#[derive(Clone, PartialEq, Debug)]
+struct Item {
+    id: u64,
+    label: String,
 }
 
-impl RowItem {
-    fn new(key: u64) -> Self {
-        Self { key, hide: false }
-    }
-}
-
-// --- 辅助：绘制按钮 ---
-
-fn draw_button(scene: &mut Scene, fc: &std::cell::RefCell<FontContext>, label: &str) {
-    let (w, h) = fc.borrow_mut().measure_text(label, 14.0);
-    scene.fill_round_rect(
-        Rect::new(0.0, 0.0, w + 16.0, h + 14.0),
-        8.0,
-        Color::rgb(232, 232, 232),
-    );
-    scene.stroke_round_rect(
-        Rect::new(0.0, 0.0, w + 16.0, h + 14.0),
-        8.0,
-        Color::rgb(200, 200, 200),
-        2.0,
-    );
-    scene.draw_text(Point::new(8.0, 7.0), label, 14.0, Color::BLACK);
-}
-
-// --- 入口 ---
-
-fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
-
-    // 创建信号（Kotlin 的 remember { mutableStateOf(...) }）
-    let state_list = create_signal(vec![
-        RowItem::new(0),
-        RowItem::new(1),
-        RowItem::new(2),
-        RowItem::new(3),
-        RowItem::new(4),
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let state_list = Signal::new(vec![
+        Item {
+            id: 0,
+            label: "row 0".into(),
+        },
+        Item {
+            id: 1,
+            label: "row 1".into(),
+        },
+        Item {
+            id: 2,
+            label: "row 2".into(),
+        },
     ]);
-    let toggle_id = create_signal(0u64);
-    let next_id = create_signal(5u64);
-    let font_cx = Rc::new(std::cell::RefCell::new(FontContext::new()));
+    let next_id = Signal::new(3u64);
 
-    // MveApp::new(callback) — callback 中读取的信号会被 effect 自动追踪
-    // 信号变化时 effect 自动重建 Node 树
     let app = wy_engine::mve_integration::MveApp::new(move |cx| {
-        // 计数按钮
-        let count = state_list.get().len();
-        {
-            let fc = font_cx.clone();
-            let list = state_list.clone();
-            let next = next_id.clone();
-            cx.add_node(Node {
-                draw_fn: Rc::new(move |scene| {
-                    let scene = scene.downcast_mut::<Scene>().unwrap();
-                    draw_button(scene, &fc, &format!("共有{count}条数据"));
-                }),
-                on_click_fn: Some(Rc::new(move |_| {
-                    let id = next.get();
-                    next.set(id + 1);
-                    let mut v = list.get();
-                    v.push(RowItem::new(id));
-                    list.set(v);
-                })),
-                ..Node::default()
-            });
-        }
+        let state_list = state_list.clone();
+        let next_id = next_id.clone();
+        let push_list = state_list.clone();
+        let next = next_id.clone();
+        let count_list = state_list.clone();
+        cx.child(column_at(50.0, 30.0, move |cx| {
+            let cnt = count_list.clone();
+            let nxt = next.clone();
+            let pl = push_list.clone();
+            cx.child(button(
+                move || format!("共有{}条 +", cnt.get().len()),
+                move || {
+                    let id = nxt.get();
+                    nxt.set(id + 1);
+                    let mut v = pl.get();
+                    v.push(Item {
+                        id,
+                        label: format!("row {id}"),
+                    });
+                    pl.set(v);
+                },
+            ));
 
-        // 列表
-        let snapshot = state_list.get();
-        for item in snapshot {
-            if item.hide {
-                continue;
-            }
+            let candidates = state_list.clone();
+            let for_del = state_list.clone();
+            cx.render_for_each(
+                move |emit| {
+                    for it in candidates.get() {
+                        emit(it.id, it);
+                    }
+                },
+                move |id, value, item_cx| {
+                    let item = create_signal(value.borrow().clone());
+                    let detail = create_signal(false);
 
-            let key = item.key;
-            let fc = font_cx.clone();
-            let toggle = toggle_id.clone();
-            let list = state_list.clone();
+                    let item_text = item.clone();
+                    let toggle_lbl = detail.clone();
+                    let toggle_set = detail.clone();
+                    let detail_show = detail.clone();
+                    let del_src = for_del.clone();
+                    item_cx.child(row(move |cx| {
+                        let it = item_text.clone();
+                        cx.child(text_signal(move || {
+                            let i = it.get();
+                            Box::new(format!("#{} {}", i.id, i.label))
+                        }));
 
-            cx.add_node(Node {
-                draw_fn: Rc::new(move |scene| {
-                    let scene = scene.downcast_mut::<Scene>().unwrap();
-                    scene.fill_round_rect(
-                        Rect::new(0.0, 0.0, 300.0, 40.0),
-                        8.0,
-                        Color::rgb(240, 240, 240),
-                    );
-                }),
-                arg_children_fn: Rc::new(move |child_cx| {
-                    // show 按钮
-                    {
-                        let fc = fc.clone();
-                        let toggle = toggle.clone();
-                        child_cx.add_node(Node {
+                        let lbl = toggle_lbl.clone();
+                        let set = toggle_set.clone();
+                        cx.child(button(
+                            move || {
+                                if lbl.get() {
+                                    "hide".into()
+                                } else {
+                                    "show".into()
+                                }
+                            },
+                            move || set.set(!set.get()),
+                        ));
+
+                        let d = detail_show.clone();
+                        cx.child(Node {
                             draw_fn: Rc::new(move |scene| {
-                                let scene = scene.downcast_mut::<Scene>().unwrap();
-                                draw_button(scene, &fc, &format!("show {key}"));
+                                if !d.get() {
+                                    return;
+                                }
+                                if let Some(scene) = scene.downcast_mut::<Scene>() {
+                                    scene.fill_round_rect(
+                                        Rect::new(0.0, 40.0, 140.0, 20.0),
+                                        4.0,
+                                        Color::from_u32(0xFF_F0F0F0),
+                                    );
+                                }
                             }),
-                            on_click_fn: Some(Rc::new(move |_| {
-                                toggle.set(key);
-                            })),
                             ..Node::default()
                         });
-                    }
 
-                    // hide 按钮
-                    {
-                        let fc = fc.clone();
-                        let toggle = toggle.clone();
-                        child_cx.add_node(Node {
-                            draw_fn: Rc::new(move |scene| {
-                                let scene = scene.downcast_mut::<Scene>().unwrap();
-                                draw_button(scene, &fc, &format!("hide {key}"));
-                            }),
-                            on_click_fn: Some(Rc::new(move |_| {
-                                toggle.set(key);
-                            })),
-                            ..Node::default()
-                        });
-                    }
-
-                    // delete 按钮
-                    {
-                        let fc = fc.clone();
-                        let list = list.clone();
-                        child_cx.add_node(Node {
-                            draw_fn: Rc::new(move |scene| {
-                                let scene = scene.downcast_mut::<Scene>().unwrap();
-                                draw_button(scene, &fc, &format!("delete {key}"));
-                            }),
-                            on_click_fn: Some(Rc::new(move |_| {
-                                let current = list.get();
-                                let filtered: Vec<RowItem> =
-                                    current.into_iter().filter(|x| x.key != key).collect();
-                                list.set(filtered);
-                            })),
-                            ..Node::default()
-                        });
-                    }
-                }),
-                ..Node::default()
-            });
-        }
+                        let del = del_src.clone();
+                        cx.child(button(
+                            move || "×".into(),
+                            move || {
+                                let mut v = del.get();
+                                v.retain(|i| i.id != id);
+                                del.set(v);
+                            },
+                        ));
+                    }));
+                },
+            );
+        }));
     });
 
-    let _ = wy_engine::runner::run(app);
+    wy_engine::runner::run(app)
 }

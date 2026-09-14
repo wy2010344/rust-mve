@@ -1,245 +1,131 @@
-//! NodeContext：传入 `arg_children()` 的上下文。
+//! `NodeContext`：构建树的上下文 + `render_root` 入口。
+//!
+//! # 构建一次模型
+//!
+//! `render_root(callback)` 一次性执行 callback，把顶层节点存成静态 slots；
+//! 动态列表区域用 [`render_for_each`] 封成 memo，只在信号变化时重算。
+//! 顶层不可变 `slots` 与列表 memo 由 `Root` 的 `target` memo 合成当前扁平节点列表，
+//! 结构与 Kotlin `TargetStateHolder.renderRoot` 的 `target` 一致。
 
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::node::Node;
+use wy_signal::{GetValue, Memo};
 
-/// 上下文键（用于 provide/consume）。
-pub struct Context<T: 'static> {
-    _marker: std::marker::PhantomData<T>,
-}
+use crate::foreach::render_for_each;
+use crate::node::{flatten, ChildSlot, Node};
 
-impl<T: 'static> Context<T> {
-    pub fn new() -> Self {
-        Self {
-            _marker: std::marker::PhantomData,
-        }
-    }
-}
-
-impl<T: 'static> Default for Context<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// 子节点缓存：存储子节点构建结果，支持信号驱动重建。
-pub struct ChildrenCache {
-    cache: Rc<RefCell<Vec<Node>>>,
-    dirty: Rc<RefCell<bool>>,
-}
-
-impl Clone for ChildrenCache {
-    fn clone(&self) -> Self {
-        Self {
-            cache: Rc::clone(&self.cache),
-            dirty: Rc::clone(&self.dirty),
-        }
-    }
-}
-
-impl ChildrenCache {
-    /// 获取缓存的子节点列表。
-    pub fn get(&self) -> Vec<Node> {
-        self.cache.borrow().clone()
-    }
-
-    /// 借用缓存的子节点（避免克隆）。
-    pub fn borrow(&self) -> std::cell::Ref<'_, Vec<Node>> {
-        self.cache.borrow()
-    }
-
-    /// 标记为脏（信号变化时调用）。
-    pub fn invalidate(&self) {
-        *self.dirty.borrow_mut() = true;
-    }
-
-    /// 检查是否需要重建。
-    pub fn is_dirty(&self) -> bool {
-        *self.dirty.borrow()
-    }
-}
-
-/// NodeContext：`arg_children()` 的执行上下文。
+/// 节点树的构建上下文（对应 Kotlin `StateHolderI.buildChildren` 的容器）。
+#[derive(Default)]
 pub struct NodeContext {
-    pub(crate) nodes: Vec<Node>,
-    pub(crate) children_caches: Vec<ChildrenCache>,
-    pub(crate) contexts: Vec<(u64, Box<dyn Any>)>,
-    #[expect(dead_code)]
-    pub(crate) parent_context_index: usize,
+    pub(crate) slots: Vec<ChildSlot>,
+    /// 提供者注册表：`type_id -> value`。
+    pub(crate) provided: Vec<(TypeId, Box<dyn Any>)>,
 }
 
 impl NodeContext {
-    pub fn new(parent_context_index: usize) -> Self {
-        Self {
-            nodes: Vec::new(),
-            children_caches: Vec::new(),
-            contexts: Vec::new(),
-            parent_context_index,
-        }
+    /// 创建空上下文。
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// 添加一个子节点。
+    /// 追加快照节点。
     pub fn child(&mut self, node: Node) {
-        self.add_node(node);
+        self.slots.push(ChildSlot::Node(node));
     }
 
-    /// 添加一个子节点。
+    /// 追加快照节点（`add_node` 别名）。
     pub fn add_node(&mut self, node: Node) {
-        self.nodes.push(node);
+        self.child(node);
     }
 
-    /// 渲染一个子节点，创建子节点缓存。
+    /// 追加动态区域：按 key 复用的列表渲染。
     ///
-    /// `callback` 中读取的信号会被自动追踪。
-    /// 信号变化时缓存自动失效，下次 get 时重新构建。
-    pub fn render_node(
-        &mut self,
-        node: Node,
-        callback: impl Fn(&mut Node, &mut NodeContext) + 'static,
-    ) -> ChildrenCache {
-        let cache = ChildrenCache {
-            cache: Rc::new(RefCell::new(Vec::new())),
-            dirty: Rc::new(RefCell::new(true)),
-        };
-
-        let cache_ref = cache.clone();
-        let cb = Rc::new(callback);
-
-        // create_effect 追踪依赖：callback 中读取的信号会被追踪
-        // 信号变化时自动重新执行
-        wy_signal::create_effect(move || {
-            let mut child_cx = NodeContext::new(0);
-            let mut fresh_node = node.clone();
-            cb(&mut fresh_node, &mut child_cx);
-            *cache_ref.cache.borrow_mut() = child_cx.nodes;
-            *cache_ref.dirty.borrow_mut() = false;
-        });
-
-        self.children_caches.push(cache.clone());
-        cache
-    }
-
-    /// 渲染一个子节点（带配置）。
-    pub fn render_node_with_config<C>(
-        &mut self,
-        node: Node,
-        _config: C,
-        callback: impl Fn(&mut Node, &mut NodeContext) + 'static,
-    ) -> ChildrenCache {
-        self.render_node(node, callback)
-    }
-
-    /// 获取所有子节点缓存。
-    pub fn children_caches(&self) -> &[ChildrenCache] {
-        &self.children_caches
-    }
-
-    /// 获取直接添加的子节点。
-    pub fn nodes(&self) -> &[Node] {
-        &self.nodes
-    }
-
-    /// 获取可变子节点列表。
-    pub fn nodes_mut(&mut self) -> &mut Vec<Node> {
-        &mut self.nodes
-    }
-
-    /// 消费上下文并返回所有子节点。
-    pub fn into_nodes(self) -> Vec<Node> {
-        self.nodes
-    }
-
-    /// 提供上下文值。
-    pub fn provide<T: 'static>(&mut self, context_id: u64, value: T) {
-        self.contexts.push((context_id, Box::new(value)));
-    }
-
-    /// 消费最近的祖先提供的上下文值。
-    pub fn consume<T: 'static>(&self, context_id: u64) -> Option<&T> {
-        for (id, value) in self.contexts.iter().rev() {
-            if *id == context_id {
-                return value.downcast_ref::<T>();
-            }
-        }
-        None
-    }
-
-    /// 信号驱动的列表渲染（对应 Kotlin 的 `renderForEach`）。
-    ///
-    /// 基于 key 的 diff：已有 key 复用 Node，新增 key 创建 Node，
-    /// 删除的 key 移除 Node。
-    ///
-    /// `items_fn` 读取信号时会被追踪，信号变化时自动重建。
+    /// 对应 Kotlin `StateHolderI.renderForEach`。见 [`render_for_each`]。
     pub fn render_for_each<K, T>(
         &mut self,
-        items_fn: impl Fn() -> Vec<(K, T)> + 'static,
-        creator: impl Fn(K, T, &mut NodeContext) + 'static,
+        for_each: impl Fn(&mut dyn FnMut(K, T)) + 'static,
+        creater: impl Fn(K, Rc<RefCell<T>>, &mut NodeContext) + 'static,
     ) where
-        K: Eq + Clone + 'static,
-        T: 'static,
+        K: Eq + std::hash::Hash + Clone + 'static,
+        T: Clone + PartialEq + 'static,
     {
-        let cache = ChildrenCache {
-            cache: Rc::new(RefCell::new(Vec::new())),
-            dirty: Rc::new(RefCell::new(true)),
-        };
+        render_for_each(&mut self.slots, for_each, creater);
+    }
 
-        let cache_ref = cache.clone();
-        let cr = Rc::new(creator);
+    /// 提供值：构建该节点子树时可供兄弟节点通过 [`Self::consume`] 读取。
+    pub fn provide<T: 'static>(&mut self, value: T) {
+        self.provided.push((TypeId::of::<T>(), Box::new(value)));
+    }
 
-        // create_effect 追踪 items_fn 中读取的信号
-        wy_signal::create_effect(move || {
-            let items = items_fn();
-
-            // 将旧 Node 按 key 存入 HashMap，以便复用
-            let old_nodes: Vec<Node> = cache_ref.cache.borrow().clone();
-            // 注意：当前 Node 不存储 key，使用位置复用策略
-            // 位置匹配的节点直接复用，超出部分创建新节点
-            let mut new_nodes = Vec::with_capacity(items.len());
-            let old_len = old_nodes.len();
-
-            for (i, (key, value)) in items.into_iter().enumerate() {
-                if i < old_len {
-                    // 复用已有 Node（按位置）
-                    new_nodes.push(old_nodes[i].clone());
-                    let _ = key;
-                    let _ = value;
-                } else {
-                    // 新增：创建新 Node
-                    let mut child_cx = NodeContext::new(0);
-                    cr(key, value, &mut child_cx);
-                    for node in child_cx.nodes {
-                        new_nodes.push(node);
-                    }
-                }
+    /// 读取最近一次 [`Self::provide`] 的对应类型的值。
+    pub fn consume<T: 'static>(&self) -> Option<&T> {
+        self.provided.iter().rev().find_map(|(tid, v)| {
+            if *tid == TypeId::of::<T>() {
+                v.downcast_ref::<T>()
+            } else {
+                None
             }
+        })
+    }
 
-            *cache_ref.cache.borrow_mut() = new_nodes;
-            *cache_ref.dirty.borrow_mut() = false;
-        });
+    /// 取当前收集的 slots。
+    pub fn slots(&self) -> &[ChildSlot] {
+        &self.slots
+    }
 
-        self.children_caches.push(cache);
+    /// 取当前收集的 slots（`slots` 别名，历史兼容）。
+    pub fn nodes(&self) -> &[ChildSlot] {
+        &self.slots
+    }
+
+    /// 取走收集的 slots。
+    pub fn into_slots(self) -> Vec<ChildSlot> {
+        self.slots
     }
 }
 
-/// 渲染根节点。
-pub fn render_root(callback: impl Fn(&mut NodeContext) + 'static) -> ChildrenCache {
-    let cache = ChildrenCache {
-        cache: Rc::new(RefCell::new(Vec::new())),
-        dirty: Rc::new(RefCell::new(true)),
-    };
+/// `render_root(callback)` 的产物：持有目标 memo，给出当前节点列表。
+///
+/// 树结构构建一次；`target` 是"快照 + 动态区域"合成的扁平节点列表 memo，
+/// 结构变化（列表增删）时重算，绘制期直接读取。
+pub struct Root {
+    /// 顶层节点列表 memo。
+    target: Memo<Vec<Node>>,
+}
 
-    let cache_ref = cache.clone();
-    let cb = Rc::new(callback);
+impl Root {
+    /// 当前扁平化节点列表（读取会自动追踪依赖）。
+    pub fn nodes(&self) -> Vec<Node> {
+        self.target.get()
+    }
 
-    wy_signal::create_effect(move || {
-        let mut cx = NodeContext::new(0);
-        cb(&mut cx);
-        *cache_ref.cache.borrow_mut() = cx.nodes;
-        *cache_ref.dirty.borrow_mut() = false;
+    /// 目标 memo（供宿主动画循环/追踪）。
+    pub fn target(&self) -> Memo<Vec<Node>> {
+        self.target.clone()
+    }
+}
+
+/// 构建根节点树（复刻 Kotlin `TargetStateHolder.renderRoot`）。
+///
+/// - `callback` **只执行一次**，产物为顶层快照 slots 与动态列表区域。
+/// - 返回的 `Root.target` 实时合成当前扁平节点列表。
+pub fn render_root(callback: impl Fn(&mut NodeContext) + 'static) -> Root {
+    let top: Rc<RefCell<Vec<ChildSlot>>> = Rc::new(RefCell::new(Vec::new()));
+    {
+        let mut cx = NodeContext::new();
+        callback(&mut cx);
+        *top.borrow_mut() = cx.into_slots();
+    }
+
+    let top2 = Rc::clone(&top);
+    let target = Memo::new(move || {
+        let slots = top2.borrow();
+        let mut out = Vec::new();
+        flatten(&slots, &mut out);
+        out
     });
 
-    cache
+    Root { target }
 }
