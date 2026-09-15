@@ -89,12 +89,15 @@ impl Default for TextLayoutCache {
 ///
 /// `font_cx` 和 `layout_cx` 用于文本图元的 Parley 排版。
 /// `text_cache` 缓存文本布局结果，避免每帧重建。
+/// `scale` 是设备像素比（macOS Retina 等 HiDPI 为 2.0）：
+/// 场景坐标/字体均为逻辑点数，输出前统一放大到物理像素。
 pub fn execute_scene(
     src: &Scene,
     dst: &mut vello::Scene,
     font_cx: &mut parley::FontContext,
     layout_cx: &mut parley::LayoutContext,
     text_cache: &mut TextLayoutCache,
+    scale: f32,
 ) {
     // 累积坐标偏移栈（用于 TransformPush/TransformPop）
     let mut offset_stack: Vec<(f32, f32)> = Vec::new();
@@ -103,9 +106,9 @@ pub fn execute_scene(
     for prim in src.iter() {
         match prim {
             Primitive::Rect { rect, color } => {
-                let x = rect.x + cumulative.0;
-                let y = rect.y + cumulative.1;
-                let k_rect = kurbo_rect(x, y, rect.width, rect.height);
+                let x = (rect.x + cumulative.0) * scale;
+                let y = (rect.y + cumulative.1) * scale;
+                let k_rect = kurbo_rect(x, y, rect.width * scale, rect.height * scale);
                 let c = to_peniko_color(*color);
                 dst.fill(Fill::NonZero, Affine::IDENTITY, c, None, &k_rect);
             }
@@ -114,10 +117,10 @@ pub fn execute_scene(
                 radius,
                 color,
             } => {
-                let x = rect.x + cumulative.0;
-                let y = rect.y + cumulative.1;
-                let k_rect = kurbo_rect(x, y, rect.width, rect.height);
-                let rr = RoundedRect::from_rect(k_rect, *radius as f64);
+                let x = (rect.x + cumulative.0) * scale;
+                let y = (rect.y + cumulative.1) * scale;
+                let k_rect = kurbo_rect(x, y, rect.width * scale, rect.height * scale);
+                let rr = RoundedRect::from_rect(k_rect, *radius as f64 * f64::from(scale));
                 let c = to_peniko_color(*color);
                 dst.fill(Fill::NonZero, Affine::IDENTITY, c, None, &rr);
             }
@@ -127,12 +130,12 @@ pub fn execute_scene(
                 color,
                 stroke_width,
             } => {
-                let x = rect.x + cumulative.0;
-                let y = rect.y + cumulative.1;
-                let k_rect = kurbo_rect(x, y, rect.width, rect.height);
-                let rr = RoundedRect::from_rect(k_rect, *radius as f64);
+                let x = (rect.x + cumulative.0) * scale;
+                let y = (rect.y + cumulative.1) * scale;
+                let k_rect = kurbo_rect(x, y, rect.width * scale, rect.height * scale);
+                let rr = RoundedRect::from_rect(k_rect, *radius as f64 * f64::from(scale));
                 let c = to_peniko_color(*color);
-                let stroke = Stroke::new(*stroke_width as f64);
+                let stroke = Stroke::new(*stroke_width as f64 * f64::from(scale));
                 dst.stroke(&stroke, Affine::IDENTITY, c, None, &rr);
             }
             Primitive::Text {
@@ -146,16 +149,19 @@ pub fn execute_scene(
                     font_cx,
                     layout_cx,
                     text_cache,
-                    point: crate::math::Point::new(point.x + cumulative.0, point.y + cumulative.1),
+                    point: crate::math::Point::new(
+                        (point.x + cumulative.0) * scale,
+                        (point.y + cumulative.1) * scale,
+                    ),
                     text,
-                    font_size: *font_size,
+                    font_size: *font_size * scale,
                     color: *color,
                 });
             }
             Primitive::ClipPush { rect } => {
-                let x = rect.x + cumulative.0;
-                let y = rect.y + cumulative.1;
-                let k_rect = kurbo_rect(x, y, rect.width, rect.height);
+                let x = (rect.x + cumulative.0) * scale;
+                let y = (rect.y + cumulative.1) * scale;
+                let k_rect = kurbo_rect(x, y, rect.width * scale, rect.height * scale);
                 dst.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &k_rect);
             }
             Primitive::ClipPop => {
@@ -289,6 +295,7 @@ mod tests {
             &mut font_cx,
             &mut layout_cx,
             &mut text_cache,
+            1.0,
         );
     }
 
@@ -309,6 +316,7 @@ mod tests {
             &mut font_cx,
             &mut layout_cx,
             &mut text_cache,
+            1.0,
         );
     }
 
@@ -330,6 +338,7 @@ mod tests {
             &mut font_cx,
             &mut layout_cx,
             &mut text_cache,
+            1.0,
         );
     }
 
@@ -344,6 +353,7 @@ mod tests {
             &mut font_cx,
             &mut layout_cx,
             &mut text_cache,
+            1.0,
         );
     }
 
@@ -367,6 +377,7 @@ mod tests {
             &mut font_cx,
             &mut layout_cx,
             &mut text_cache,
+            1.0,
         );
     }
 
@@ -383,6 +394,7 @@ mod tests {
             &mut font_cx,
             &mut layout_cx,
             &mut text_cache,
+            1.0,
         );
     }
 
@@ -405,6 +417,7 @@ mod tests {
             &mut font_cx,
             &mut layout_cx,
             &mut text_cache,
+            1.0,
         );
         assert_eq!(text_cache.cache.len(), 1);
         // 第二次：命中缓存，不再构建
@@ -414,6 +427,7 @@ mod tests {
             &mut font_cx,
             &mut layout_cx,
             &mut text_cache,
+            1.0,
         );
         assert_eq!(text_cache.cache.len(), 1);
     }

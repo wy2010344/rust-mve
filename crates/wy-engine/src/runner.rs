@@ -493,14 +493,16 @@ impl<A: WyApp> AppState<A> {
             self.app.draw(&mut scene, width as f32, height as f32);
         }
 
-        // 2. 翻译到 Vello Scene
+        // 2. 翻译到 Vello Scene（scale = 设备像素比，坐标统一放大到物理像素）
         let mut vello_scene = vello::Scene::new();
+        let scale = window.scale_factor() as f32;
         vello_executor::execute_scene(
             &scene,
             &mut vello_scene,
             &mut self.font_cx,
             &mut self.layout_cx,
             &mut self.text_cache,
+            scale,
         );
 
         // 3. 获取 surface texture
