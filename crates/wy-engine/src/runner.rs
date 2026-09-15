@@ -346,6 +346,15 @@ impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
             adapter.process_event(window, &event);
         }
 
+        // HiDPI：渲染按逻辑坐标×scale 放大到物理像素，事件坐标需转回逻辑
+        //（winit 的 CursorMoved.position 是物理像素），否则命中测试偏移。
+        let scale = self.window.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0);
+        let event = if scale != 1.0 {
+            Self::to_logical_window_event(&event, scale).unwrap_or(event)
+        } else {
+            event
+        };
+
         // 让应用有机会处理事件
         if self.app.handle_event(&event) {
             return;
@@ -718,5 +727,70 @@ impl<A: WyApp> AppState<A> {
         });
 
         (pipeline, bind_group_layout)
+    }
+
+    /// 将带坐标的窗口事件物理像素转为逻辑坐标（scale ≠ 1 时），
+    /// 未含坐标的事件原样返回 `None`。
+    fn to_logical_window_event(event: &WindowEvent, scale: f64) -> Option<WindowEvent> {
+        match event {
+            WindowEvent::CursorMoved {
+                device_id,
+                position,
+                ..
+            } => Some(WindowEvent::CursorMoved {
+                device_id: *device_id,
+                position: to_logical_position(*position, scale),
+            }),
+            WindowEvent::MouseWheel {
+                device_id,
+                delta,
+                phase,
+                ..
+            } => Some(WindowEvent::MouseWheel {
+                device_id: *device_id,
+                delta: *delta,
+                phase: *phase,
+            }),
+            _ => None,
+        }
+    }
+
+    /// 物理像素坐标 → 逻辑坐标（除以 scale）。
+    fn to_logical_position(
+        pos: winit::dpi::PhysicalPosition<f64>,
+        scale: f64,
+    ) -> winit::dpi::PhysicalPosition<f64> {
+        winit::dpi::PhysicalPosition::new(pos.x / scale, pos.y / scale)
+    }
+}
+
+/// 物理像素坐标 → 逻辑坐标（除以 scale）。
+fn to_logical_position(
+    pos: winit::dpi::PhysicalPosition<f64>,
+    scale: f64,
+) -> winit::dpi::PhysicalPosition<f64> {
+    winit::dpi::PhysicalPosition::new(pos.x / scale, pos.y / scale)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn physical_coords_convert_to_logical_on_hidpi() {
+        let logical = to_logical_position(
+            winit::dpi::PhysicalPosition::new(200.0, 100.0),
+            2.0,
+        );
+        assert_eq!((logical.x, logical.y), (100.0, 50.0));
+    }
+
+    #[test]
+    fn no_scaling_keeps_coords_unchanged() {
+        let logical = to_logical_position(
+            winit::dpi::PhysicalPosition::new(200.0, 100.0),
+            1.0,
+        );
+        assert_eq!((logical.x, logical.y), (200.0, 100.0));
     }
 }
