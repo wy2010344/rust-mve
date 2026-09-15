@@ -5,13 +5,16 @@
 //! - [`TextStyle`] / [`TextSpan`] — 文本样式与片段（对应 Kotlin `RichTextStyle`/`RichTextSpan`）
 //! - [`TextParagraph`] — 排版结果（对应 Kotlin `PlatformParagraph`）
 //! - [`build_paragraph`] — 排版入口函数
+//! - [`EditableParagraph`] — 可编辑段落（封装 Parley PlainEditor）
 
 mod build_paragraph;
+pub mod editable;
 mod font_cache;
 mod text_paragraph;
 mod text_style;
 
 pub use build_paragraph::{build_paragraph, TextError};
+pub use editable::{EditableParagraph, EditSnapshot, Rect4};
 pub use font_cache::FontContext;
 pub use text_paragraph::TextParagraph;
 pub use text_style::{LineMetric, TextAlign, TextDecoration, TextRect, TextSpan, TextStyle};

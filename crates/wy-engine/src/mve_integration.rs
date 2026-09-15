@@ -14,6 +14,8 @@ use std::cell::UnsafeCell;
 use wy_mve::{children_nodes, has_handler, layout_offsets, render_root, Node, NodeContext};
 use wy_render::{Point, Scene};
 
+use crate::focus::{tab_navigate, FocusManager, FocusPath};
+
 /// 顶层节点遍历（origin 为节点坐标系原点在父坐标系中的位置）。
 fn draw_nodes(nodes: &[Node], scene: &mut Scene) {
     for node in nodes {
@@ -107,6 +109,8 @@ fn dispatch_click_nodes(nodes: &[Node], x: f32, y: f32, event: &mut wy_mve::Poin
 pub struct MveApp {
     root: wy_mve::Root,
     cursor: UnsafeCell<(f32, f32)>,
+    /// 焦点管理（identity 链定位，复刻 Kotlin Renderer）。
+    focus: FocusManager,
 }
 
 impl MveApp {
@@ -119,7 +123,13 @@ impl MveApp {
         Self {
             root,
             cursor: UnsafeCell::new((0.0, 0.0)),
+            focus: FocusManager::default(),
         }
+    }
+
+    /// 当前焦点路径（叶子→根）；空 = 无焦点。
+    pub fn focus_path(&self) -> &FocusPath {
+        self.focus.path()
     }
 }
 
@@ -158,7 +168,12 @@ impl crate::runner::WyApp for MveApp {
                 let (x, y) = *cursor;
                 let nodes = self.root.nodes();
                 if hit_test_nodes(&nodes, x, y) {
+                    // 点击聚焦：命中链中更新焦点（Kotlin Renderer 点击聚焦逻辑）。
                     let mut mve_event = wy_mve::PointerEvent::new(x, y);
+                    let chain = hit_test_node_chain(&nodes, x, y);
+                    if let Some(chain) = &chain {
+                        self.focus.focus_on_click(chain);
+                    }
                     dispatch_click_nodes(&nodes, x, y, &mut mve_event);
                     return mve_event.stopped;
                 }
@@ -167,6 +182,68 @@ impl crate::runner::WyApp for MveApp {
             _ => false,
         }
     }
+
+    /// 处理键盘事件：Tab 触发焦点遍历，其余按键沿焦点链冒泡。
+    fn handle_key_event(&mut self, event: &crate::event::KeyEvent) {
+        let nodes = self.root.nodes();
+        let forward = !event.shift;
+        match event.key {
+            crate::event::Key::Tab if event.pressed => {
+                // Tab / Shift+Tab 焦点遍历
+                let new_focus = tab_navigate(&nodes, self.focus.path(), forward, true);
+                self.focus.set_focus(new_focus);
+            }
+            _ if event.pressed => {
+                let mut mve_event = wy_mve::KeyEvent {
+                    key: to_mve_key(&event.key),
+                    ctrl: event.ctrl,
+                    shift: event.shift,
+                    alt: event.alt,
+                    meta: event.meta,
+                };
+                self.focus.dispatch_key(&nodes, &mut mve_event);
+            }
+            _ => {}
+        }
+    }
+
+    /// 处理 IME 输入法组合事件（沿焦点链分发）。
+    fn handle_ime_event(&mut self, event: &wy_mve::ImeEvent) {
+        let nodes = self.root.nodes();
+        let mut mve_event = event.clone();
+        self.focus.dispatch_ime(&nodes, &mut mve_event);
+    }
+}
+
+/// wy-render `Key` → wy-mve `Key`（两者变体同构）。
+fn to_mve_key(key: &crate::event::Key) -> wy_mve::Key {
+    use crate::event::Key as RK;
+    use wy_mve::Key as MK;
+    match key {
+        RK::Char(c) => MK::Char(*c),
+        RK::Enter => MK::Enter,
+        RK::Backspace => MK::Backspace,
+        RK::Delete => MK::Delete,
+        RK::ArrowUp => MK::ArrowUp,
+        RK::ArrowDown => MK::ArrowDown,
+        RK::ArrowLeft => MK::ArrowLeft,
+        RK::ArrowRight => MK::ArrowRight,
+        RK::Tab => MK::Tab,
+        RK::Escape => MK::Escape,
+        RK::Home => MK::Home,
+        RK::End => MK::End,
+        RK::PageUp => MK::PageUp,
+        RK::PageDown => MK::PageDown,
+    }
+}
+
+/// 命中节点链（子→根；`hit_test_node` 的公开包装，供点击聚焦复用）。
+fn hit_test_node_chain(
+    nodes: &[Node],
+    x: f32,
+    y: f32,
+) -> Option<Vec<Node>> {
+    nodes.iter().find_map(|node| hit_test_node(node, (0.0, 0.0), x, y))
 }
 
 #[cfg(test)]

@@ -20,6 +20,8 @@ type DrawFn = Rc<dyn Fn(&mut dyn std::any::Any)>;
 type HitTestFn = Rc<dyn Fn(f32, f32) -> bool>;
 type ClickFn = Rc<dyn Fn(&mut PointerEvent)>;
 type KeyFn = Rc<dyn Fn(&mut KeyEvent) -> bool>;
+/// IME 输入法事件处理（组合态文本上报）。
+type ImeFn = Rc<dyn Fn(&mut ImeEvent) -> bool>;
 /// 测量节点自然尺寸（宽高像素）。文本等内容撑开型节点用它提供 intrinsic 尺寸，
 /// 供容器布局消费（复刻 Kotlin `RichTextNode.argWidth/argHeight`）。
 type MeasureFn = Rc<dyn Fn() -> (f32, f32)>;
@@ -47,6 +49,8 @@ pub struct Node {
     pub on_up_fn: Option<ClickFn>,
     /// 按键事件。
     pub key_fn: Option<KeyFn>,
+    /// IME 输入法组合事件（组合文本 / 光标偏移；返回 true 表示已消费）。
+    pub ime_fn: Option<ImeFn>,
     /// 是否可聚焦。
     pub focusable: bool,
     /// 是否隐藏（不参与布局和命中测试）。
@@ -88,6 +92,7 @@ impl Clone for Node {
             on_down_fn: self.on_down_fn.as_ref().map(Rc::clone),
             on_up_fn: self.on_up_fn.as_ref().map(Rc::clone),
             key_fn: self.key_fn.as_ref().map(Rc::clone),
+            ime_fn: self.ime_fn.as_ref().map(Rc::clone),
             focusable: self.focusable,
             hidden: self.hidden,
             skip_draw: self.skip_draw,
@@ -139,6 +144,7 @@ impl Default for Node {
             on_down_fn: None,
             on_up_fn: None,
             key_fn: None,
+            ime_fn: None,
             focusable: false,
             hidden: false,
             skip_draw: false,
@@ -193,6 +199,15 @@ impl Node {
 
     pub fn run_key(&self, event: &mut KeyEvent) -> bool {
         if let Some(f) = &self.key_fn {
+            f(event)
+        } else {
+            false
+        }
+    }
+
+    /// 向上传播 IME 组合事件；返回 `true` 表示已消费。
+    pub fn run_ime(&self, event: &mut ImeEvent) -> bool {
+        if let Some(f) = &self.ime_fn {
             f(event)
         } else {
             false
@@ -408,4 +423,25 @@ pub enum Key {
     ArrowRight,
     Tab,
     Escape,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+}
+
+/// IME 输入法事件（组合态文本）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ImeEvent {
+    /// 输入法已激活（开始组合）。
+    Enabled,
+    /// 输入法已停用。
+    Disabled,
+    /// 组合文本更新。[cursor] 为组合带内光标区间 `(start, end)`（字节，
+    /// 对齐 winit `Ime::Preedit` 与 Parley `set_compose`）；`None` 表示隐藏光标。
+    Preedit {
+        text: String,
+        cursor: Option<(usize, usize)>,
+    },
+    /// 组合确认文本。
+    Commit(String),
 }

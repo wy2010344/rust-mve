@@ -23,7 +23,7 @@ wgpu = "29"
 winit = "0.30"
 
 # 文本
-parley = "0.11"
+parley = { version = "0.11", features = ["accesskit"] }
 swash = "0.2"
 fontique = "0.11"
 
@@ -36,6 +36,10 @@ log = "0.4"
 env_logger = "0.11"
 thiserror = "2"
 pollster = "0.4"
+arboard = "3.6"
+
+# 文本边界
+unicode-segmentation = "1.12"
 
 [profile.release]
 lto = "fat"

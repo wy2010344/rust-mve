@@ -13,11 +13,13 @@
 //! - [`components::text`] / [`components::text_signal`] — 文本
 //! - [`components::button`] — 按钮
 //! - [`components::row`] / [`components::column`] — 布局容器
+//! - [`text_field`] / [`text_field_opts`] — 单行文本输入
 
 pub mod components;
 mod context;
 mod foreach;
 mod node;
+mod text_field;
 
 pub use components::{
     button, column, column_at, row, row_at, spacer, text, text_signal, text_styled,
@@ -25,9 +27,10 @@ pub use components::{
 pub use context::{render_root, NodeContext, Root};
 pub use foreach::render_for_each;
 pub use node::{
-    children_nodes, flatten, has_handler, layout_offsets, materialize, node_size, ChildSlot, Key,
-    KeyEvent, Layout, Node, PointerEvent,
+    children_nodes, flatten, has_handler, layout_offsets, materialize, node_size, ChildSlot,
+    ImeEvent, Key, KeyEvent, Layout, Node, PointerEvent,
 };
+pub use text_field::{text_field, text_field_opts, TextFieldOpts};
 
 #[cfg(test)]
 mod tests;

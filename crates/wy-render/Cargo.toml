@@ -12,4 +12,5 @@ vello = { workspace = true }
 wgpu = { workspace = true }
 parley = { workspace = true }
 fontique = { workspace = true }
+unicode-segmentation = { workspace = true }
 log = { workspace = true }

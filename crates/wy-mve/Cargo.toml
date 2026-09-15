@@ -8,3 +8,5 @@ license.workspace = true
 wy-signal = { workspace = true }
 wy-layout = { workspace = true }
 wy-render = { workspace = true }
+wy-text = { workspace = true }
+unicode-segmentation = { workspace = true }

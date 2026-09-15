@@ -137,6 +137,12 @@ pub trait WyApp {
     /// Tab/Shift+Tab 用于焦点遍历，其他按键可自定义处理。
     fn handle_key_event(&mut self, _event: &crate::event::KeyEvent) {}
 
+    /// 处理 IME 输入法事件（可选）。
+    ///
+    /// winit `Ime` 事件已翻译为 [`wy_mve::ImeEvent`]。
+    /// 默认不处理（无输入法消费者）。
+    fn handle_ime_event(&mut self, _event: &wy_mve::ImeEvent) {}
+
     /// 提供无障碍树更新（可选）。
     ///
     /// 每次渲染后调用。返回 `Some(TreeUpdate)` 会更新平台无障碍树。
@@ -431,6 +437,28 @@ impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
                     crate::winit_translate::translate_key_event(event, self.modifiers)
                 {
                     self.app.handle_key_event(&key_event);
+                }
+            }
+            WindowEvent::Ime(ime) => {
+                // 输入法事件 → 统一 ImeEvent 转发给应用（聚焦节点消费）
+                match ime {
+                    winit::event::Ime::Enabled => {
+                        self.app.handle_ime_event(&wy_mve::ImeEvent::Enabled);
+                    }
+                    winit::event::Ime::Disabled => {
+                        self.app.handle_ime_event(&wy_mve::ImeEvent::Disabled);
+                    }
+                    // winit Preedit 的 (usize,usize) 即组合带内光标区间，直接透传
+                    winit::event::Ime::Preedit(text, sel) => {
+                        self.app.handle_ime_event(&wy_mve::ImeEvent::Preedit {
+                            text: text.clone(),
+                            cursor: *sel,
+                        });
+                    }
+                    winit::event::Ime::Commit(text) => {
+                        self.app
+                            .handle_ime_event(&wy_mve::ImeEvent::Commit(text.clone()));
+                    }
                 }
             }
             _ => {}
@@ -753,14 +781,6 @@ impl<A: WyApp> AppState<A> {
             }),
             _ => None,
         }
-    }
-
-    /// 物理像素坐标 → 逻辑坐标（除以 scale）。
-    fn to_logical_position(
-        pos: winit::dpi::PhysicalPosition<f64>,
-        scale: f64,
-    ) -> winit::dpi::PhysicalPosition<f64> {
-        winit::dpi::PhysicalPosition::new(pos.x / scale, pos.y / scale)
     }
 }
 
