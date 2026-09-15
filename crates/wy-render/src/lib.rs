@@ -13,6 +13,7 @@ pub mod event;
 mod math;
 mod scene;
 pub mod selection;
+pub mod text_measure;
 pub mod theme;
 pub mod vello_executor;
 pub mod widget;

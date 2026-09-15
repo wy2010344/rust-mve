@@ -20,6 +20,9 @@ type DrawFn = Rc<dyn Fn(&mut dyn std::any::Any)>;
 type HitTestFn = Rc<dyn Fn(f32, f32) -> bool>;
 type ClickFn = Rc<dyn Fn(&mut PointerEvent)>;
 type KeyFn = Rc<dyn Fn(&mut KeyEvent) -> bool>;
+/// 测量节点自然尺寸（宽高像素）。文本等内容撑开型节点用它提供 intrinsic 尺寸，
+/// 供容器布局消费（复刻 Kotlin `RichTextNode.argWidth/argHeight`）。
+type MeasureFn = Rc<dyn Fn() -> (f32, f32)>;
 
 /// 节点是否参与事件命中（有 handler 才算可命中）。
 pub fn has_handler(node: &Node) -> bool {
@@ -58,12 +61,15 @@ pub struct Node {
     pub selection_enabled: bool,
     /// 一维容器角色：渲染期对扁平化后的子节点做排布。
     pub layout: Option<Layout>,
-    /// 布局位置（由布局系统或组件设置）。
+    /// 布局尺寸（由布局系统或组件设置）。
     pub x: f32,
     pub y: f32,
     /// 布局尺寸（由布局系统或组件设置）。
     pub width: f32,
     pub height: f32,
+    /// 自然尺寸测量：文本等内容型节点的 intrinsic 尺寸来源；
+    /// `node_size` 优先取它，其次才用 `width`/`height`。
+    pub measure_fn: Option<MeasureFn>,
     /// 子节点缓存：构建期由 `arg_children_fn` 产出，之后复用。
     pub children: Rc<RefCell<Option<Vec<ChildSlot>>>>,
     /// 节点实例标识：克隆共享，用于依赖比对（复刻 Kotlin 引用相等语义）。
@@ -93,6 +99,7 @@ impl Clone for Node {
             y: self.y,
             width: self.width,
             height: self.height,
+            measure_fn: self.measure_fn.as_ref().map(Rc::clone),
             children: Rc::clone(&self.children),
             identity: Rc::clone(&self.identity),
             _dummy: Cell::new(()),
@@ -143,6 +150,7 @@ impl Default for Node {
             y: 0.0,
             width: 0.0,
             height: 0.0,
+            measure_fn: None,
             children: Rc::new(RefCell::new(None)),
             identity,
             _dummy: Cell::new(()),
@@ -340,7 +348,14 @@ pub fn node_size(node: &Node) -> (f32, f32) {
             let h = if children.is_empty() { 0.0 } else { y - gap };
             (w, h)
         }
-        None => (node.width, node.height),
+        None => {
+            if let Some(m) = &node.measure_fn {
+                let (w, h) = m();
+                (w.max(node.width), h.max(node.height))
+            } else {
+                (node.width, node.height)
+            }
+        }
     }
 }
 

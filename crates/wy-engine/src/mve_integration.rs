@@ -256,13 +256,23 @@ mod tests {
         app.draw(&mut scene, 100.0, 100.0);
 
         // column > text + row(button-, button+)
-        // column: text height=0, gap=8 → row at y=8；text at y=0
-        // row: button- (90宽) gap 8 → button+ at x=98, y=0
-        // 点击 "+" 中心：row.x +98+45=143, row.y +8+16=24 → 屏幕 (143, 24)
+        // 坐标由布局实时计算（文本高度来自 Parley 测量），不硬编码
         let nodes = app.root.nodes();
         assert_eq!(nodes.len(), 1); // column
 
-        let chain = hit_test_node(&nodes[0], (0.0, 0.0), 143.0, 24.0);
+        let col = &nodes[0];
+        let children = children_nodes(col);
+        assert_eq!(children.len(), 2); // text + row
+        let (_, text_h) = node_size(&children[0]);
+        let row_y = text_h + 8.0; // column gap=8
+
+        let row = &children[1];
+        let row_children = children_nodes(row);
+        let (btn_w, _) = node_size(&row_children[0]);
+        let plus_x = btn_w + 8.0 + btn_w / 2.0; // button- 宽 + gap + button+ 半宽
+
+        let click = (plus_x, row_y + 16.0); // 按钮垂直中心
+        let chain = hit_test_node(col, (0.0, 0.0), click.0, click.1);
         assert!(chain.is_some());
         let chain = chain.unwrap();
         assert_eq!(chain.len(), 3); // +, row, column
@@ -270,8 +280,8 @@ mod tests {
         assert_eq!(chain[1].layout, Some(wy_mve::Layout::Row { gap: 8.0 }));
 
         // 分发点击 → + 按钮 handler 执行并 stop
-        let mut event = PointerEvent::new(143.0, 24.0);
-        dispatch_click_nodes(&nodes, 143.0, 24.0, &mut event);
+        let mut event = PointerEvent::new(click.0, click.1);
+        dispatch_click_nodes(&nodes, click.0, click.1, &mut event);
         assert!(event.stopped);
         assert_eq!(count.get(), 1);
     }

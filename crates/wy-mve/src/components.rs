@@ -14,51 +14,71 @@ use wy_render::{Color, Point, Rect, Scene};
 /// 文本组件：闭包返回文本内容。
 ///
 /// 闭包在 draw 时执行，内部读取信号会自动追踪依赖。
+/// 尺寸来自 Parley 排版测量（`measure_fn`），布局时文本自然占位。
 ///
 /// ```ignore
 /// let count = Signal::new(0);
 /// cx.child(text(move || format!("Count: {}", count.get())));
 /// ```
 pub fn text(content: impl Fn() -> String + 'static) -> Node {
+    let content = Rc::new(content);
+    let draw_content = Rc::clone(&content);
+    let measure_content = Rc::clone(&content);
     Node {
         draw_fn: Rc::new(move |scene| {
             if let Some(scene) = scene.downcast_mut::<Scene>() {
-                let t = content();
+                let t = draw_content();
                 if !t.is_empty() {
                     scene.draw_text(Point::new(0.0, 0.0), &t, 14.0, Color::BLACK);
                 }
             }
         }),
+        measure_fn: Some(Rc::new(move || {
+            wy_render::text_measure::measure_text(&measure_content(), 14.0)
+        })),
         ..Node::default()
     }
 }
 
 /// 文本组件（带配置）：闭包返回文本内容，指定字号和颜色。
 pub fn text_styled(content: impl Fn() -> String + 'static, font_size: f32, color: Color) -> Node {
+    let content = Rc::new(content);
+    let draw_content = Rc::clone(&content);
+    let measure_content = Rc::clone(&content);
     Node {
         draw_fn: Rc::new(move |scene| {
             if let Some(scene) = scene.downcast_mut::<Scene>() {
-                let t = content();
+                let t = draw_content();
                 if !t.is_empty() {
                     scene.draw_text(Point::new(0.0, 0.0), &t, font_size, color);
                 }
             }
         }),
+        measure_fn: Some(Rc::new(move || {
+            wy_render::text_measure::measure_text(&measure_content(), font_size)
+        })),
         ..Node::default()
     }
 }
 
 /// 信号文本：draw 期读取信号并 Display 格式化，信号变化自动触发重绘。
 pub fn text_signal(value: impl Fn() -> Box<dyn std::fmt::Display> + 'static) -> Node {
+    let value = Rc::new(value);
+    let draw_value = Rc::clone(&value);
+    let measure_value = Rc::clone(&value);
     Node {
         draw_fn: Rc::new(move |scene| {
             if let Some(scene) = scene.downcast_mut::<Scene>() {
-                let t = format!("{}", value());
+                let t = format!("{}", draw_value());
                 if !t.is_empty() {
                     scene.draw_text(Point::new(0.0, 0.0), &t, 14.0, Color::BLACK);
                 }
             }
         }),
+        measure_fn: Some(Rc::new(move || {
+            let t = format!("{}", measure_value());
+            wy_render::text_measure::measure_text(&t, 14.0)
+        })),
         ..Node::default()
     }
 }
