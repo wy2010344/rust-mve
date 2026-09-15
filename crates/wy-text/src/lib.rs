@@ -9,12 +9,14 @@
 
 mod build_paragraph;
 pub mod editable;
+mod editing;
 mod font_cache;
 mod text_paragraph;
 mod text_style;
 
 pub use build_paragraph::{build_paragraph, TextError};
 pub use editable::{EditableParagraph, EditSnapshot, Rect4};
+pub use editing::{TextBuffer, TextSegment};
 pub use font_cache::FontContext;
 pub use text_paragraph::TextParagraph;
 pub use text_style::{LineMetric, TextAlign, TextDecoration, TextRect, TextSpan, TextStyle};

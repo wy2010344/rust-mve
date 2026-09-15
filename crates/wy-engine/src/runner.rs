@@ -143,6 +143,15 @@ pub trait WyApp {
     /// 默认不处理（无输入法消费者）。
     fn handle_ime_event(&mut self, _event: &wy_mve::ImeEvent) {}
 
+    /// 当前是否允许 IME（输入法）。
+    ///
+    /// 返回 `Some(true/false)` 表示应用明确希望启用/禁用输入法
+    /// （runner 会调用 `Window::set_ime_allowed`）；返回 `None` 表示
+    /// 不干预（runner 保持现状）。默认不干预。
+    fn ime_allowed(&self) -> Option<bool> {
+        None
+    }
+
     /// 提供无障碍树更新（可选）。
     ///
     /// 每次渲染后调用。返回 `Some(TreeUpdate)` 会更新平台无障碍树。
@@ -192,6 +201,7 @@ pub fn run(app: impl WyApp + 'static) -> Result<(), Box<dyn std::error::Error>> 
         vello_target_view: None,
         blit_pipeline: None,
         blit_bind_group_layout: None,
+        ime_allowed: None,
     };
 
     event_loop.run_app(&mut state)?;
@@ -224,6 +234,8 @@ struct AppState<A: WyApp> {
     /// Blit 管线：将 Rgba8Unorm 中间纹理 blit 到 surface 纹理。
     blit_pipeline: Option<wgpu::RenderPipeline>,
     blit_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    /// 已同步到窗口的 IME 允许状态（`None` = 未设置过）。
+    ime_allowed: Option<bool>,
 }
 
 impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
@@ -493,10 +505,25 @@ impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         // 非 Poll 模式下不需要主动请求重绘
+        self.sync_ime_allowed();
     }
 }
 
 impl<A: WyApp> AppState<A> {
+    /// 同步应用期望的 IME 允许状态到窗口（仅在变化时调用 winit API）。
+    fn sync_ime_allowed(&mut self) {
+        let want = self.app.ime_allowed();
+        if want == self.ime_allowed {
+            return;
+        }
+        if let Some(window) = &self.window {
+            if let Some(allowed) = want {
+                window.set_ime_allowed(allowed);
+            }
+        }
+        self.ime_allowed = want;
+    }
+
     fn render(&mut self) {
         let (Some(window), Some(renderer), Some(surface), Some(device), Some(queue), Some(config)) = (
             &self.window,

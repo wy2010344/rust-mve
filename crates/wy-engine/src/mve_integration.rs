@@ -14,7 +14,7 @@ use std::cell::UnsafeCell;
 use wy_mve::{children_nodes, has_handler, layout_offsets, render_root, Node, NodeContext};
 use wy_render::{Point, Scene};
 
-use crate::focus::{tab_navigate, FocusManager, FocusPath};
+use crate::focus::{locate, tab_navigate, FocusManager, FocusPath};
 
 /// 顶层节点遍历（origin 为节点坐标系原点在父坐标系中的位置）。
 fn draw_nodes(nodes: &[Node], scene: &mut Scene) {
@@ -213,6 +213,17 @@ impl crate::runner::WyApp for MveApp {
         let mut mve_event = event.clone();
         self.focus.dispatch_ime(&nodes, &mut mve_event);
     }
+
+    /// IME 允许状态：焦点在可输入节点（含 `ime_fn`）→ 允许，否则禁止；
+    /// 无焦点 → 不干预。
+    fn ime_allowed(&self) -> Option<bool> {
+        if self.focus.path().is_empty() {
+            return None;
+        }
+        let nodes = self.root.nodes();
+        locate(self.focus.path(), &nodes)
+            .map(|chain| chain.first().is_some_and(|n| n.ime_fn.is_some()))
+    }
 }
 
 /// wy-render `Key` → wy-mve `Key`（两者变体同构）。
@@ -386,6 +397,32 @@ mod tests {
         // draw 读信号在 tracker.draw 外不触发 memo；直接验证信号可读
         count.set(5);
         assert_eq!(count.get(), 5);
+    }
+
+    #[test]
+    fn ime_allowed_after_click_focus() {
+        let text = Signal::new(String::new());
+        let t1 = text.clone();
+        let t2 = text.clone();
+        let mut app = MveApp::new(move |cx| {
+            let v = t1.clone();
+            let s = t2.clone();
+            cx.child(wy_mve::text_field(move || v.get(), move |t| s.set(t)));
+        });
+        assert_eq!(app.ime_allowed(), None, "无焦点不干预");
+
+        let mut scene = Scene::new();
+        app.draw(&mut scene, 100.0, 100.0);
+
+        // 点击输入框（默认 200x32 内点 (50,16)）→ 聚焦 → 允许 IME
+        let nodes = app.root.nodes();
+        let chain = hit_test_node(&nodes[0], (0.0, 0.0), 50.0, 16.0).unwrap();
+        app.focus.focus_on_click(&chain);
+        assert_eq!(app.ime_allowed(), Some(true), "聚焦输入框允许 IME");
+
+        // 清除焦点 → 不干预
+        app.focus.clear_focus();
+        assert_eq!(app.ime_allowed(), None);
     }
 
     #[test]
