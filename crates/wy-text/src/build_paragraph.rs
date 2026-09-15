@@ -2,7 +2,7 @@
 
 use crate::font_cache::FontContext;
 use crate::text_paragraph::TextParagraph;
-use crate::text_style::{LineMetric, TextAlign, TextSpan};
+use crate::text_style::{TextAlign, TextSpan};
 
 /// 排版错误。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,8 +52,8 @@ fn color_to_brush(rgba: u32) -> [u8; 4] {
     ]
 }
 
-/// 将 [`TextSpan`] 的样式推送到 Parley builder。
-fn push_span_styles(builder: &mut parley::RangedBuilder<'_, [u8; 4]>, span: &TextSpan) {
+/// 将 [`TextSpan`] 的样式作为全局默认样式推送到 Parley builder。
+fn push_span_defaults(builder: &mut parley::RangedBuilder<'_, [u8; 4]>, span: &TextSpan) {
     use parley::StyleProperty;
 
     let s = &span.style;
@@ -84,6 +84,44 @@ fn push_span_styles(builder: &mut parley::RangedBuilder<'_, [u8; 4]>, span: &Tex
     }
 }
 
+/// 将 [`TextSpan`] 的样式应用到指定字节区间（覆盖全局默认）。
+fn push_span_range(
+    builder: &mut parley::RangedBuilder<'_, [u8; 4]>,
+    range: core::ops::Range<usize>,
+    span: &TextSpan,
+) {
+    use parley::StyleProperty;
+
+    let s = &span.style;
+    builder.push(StyleProperty::FontSize(s.font_size), range.clone());
+    builder.push(
+        StyleProperty::FontWeight(parley::FontWeight::new(s.font_weight as f32)),
+        range.clone(),
+    );
+    if s.italic {
+        builder.push(StyleProperty::FontStyle(parley::FontStyle::Italic), range.clone());
+    }
+    builder.push(StyleProperty::Brush(color_to_brush(s.color)), range.clone());
+    if s.letter_spacing != 0.0 {
+        builder.push(StyleProperty::LetterSpacing(s.letter_spacing), range.clone());
+    }
+    if s.word_spacing != 0.0 {
+        builder.push(StyleProperty::WordSpacing(s.word_spacing), range.clone());
+    }
+    if let Some(lh) = s.line_height_multiplier {
+        builder.push(
+            StyleProperty::LineHeight(parley::LineHeight::FontSizeRelative(lh)),
+            range.clone(),
+        );
+    }
+    if s.decoration.underline {
+        builder.push(StyleProperty::Underline(true), range.clone());
+    }
+    if s.decoration.line_through {
+        builder.push(StyleProperty::Strikethrough(true), range);
+    }
+}
+
 /// 构建文本段落：排版 + 换行 + 对齐。
 ///
 /// 对应 Kotlin `buildParagraph()`。输入文本片段列表、最大宽度、最大行数、
@@ -93,17 +131,18 @@ fn push_span_styles(builder: &mut parley::RangedBuilder<'_, [u8; 4]>, span: &Tex
 /// - `font_cx` — 全局字体上下文（可变引用，Parley 需要）。
 /// - `spans` — 文本片段列表（按顺序拼接）。
 /// - `max_width` — 最大宽度（`None` 表示不换行）。
-/// - `max_lines` — 最大行数（超出部分截断）。
+/// - `_max_lines` — 最大行数（预留：当前构建完整布局，不实现截断/省略号）。
 /// - `text_align` — 对齐方式。
 pub fn build_paragraph(
     font_cx: &mut FontContext,
     spans: &[TextSpan],
     max_width: Option<f32>,
-    max_lines: usize,
+    _max_lines: usize,
     text_align: TextAlign,
 ) -> Result<TextParagraph, TextError> {
     if spans.is_empty() {
-        return Ok(TextParagraph::new(0.0, 0.0, vec![], String::new()));
+        let empty: parley::Layout<[u8; 4]> = parley::Layout::new();
+        return Ok(TextParagraph::new(empty, String::new()));
     }
 
     // 拼接全部文本
@@ -116,8 +155,16 @@ pub fn build_paragraph(
             .layout_cx
             .ranged_builder(&mut font_cx.font_cx, &full_text, display_scale, false);
 
-    // 设置全局默认样式（用第一个 span 的样式）
-    push_span_styles(&mut builder, &spans[0]);
+    // root 样式用第一个 span，各 span 再按区间精确覆盖
+    push_span_defaults(&mut builder, &spans[0]);
+    let mut offset = 0usize;
+    for span in spans {
+        let len = span.text.len();
+        if len > 0 {
+            push_span_range(&mut builder, offset..offset + len, span);
+        }
+        offset += len;
+    }
 
     // 构建 layout
     let mut layout: parley::Layout<[u8; 4]> = builder.build(&full_text);
@@ -131,26 +178,7 @@ pub fn build_paragraph(
         parley::AlignmentOptions::default(),
     );
 
-    // 提取尺寸
-    let width = layout.width();
-    let height = layout.height();
-
-    // 提取行度量
-    let mut line_metrics = Vec::new();
-    for line in layout.lines() {
-        let run_range = line.text_range();
-        line_metrics.push(LineMetric {
-            start_index: run_range.start,
-            end_index: run_range.end,
-        });
-    }
-
-    // 截断到 max_lines
-    if line_metrics.len() > max_lines {
-        line_metrics.truncate(max_lines);
-    }
-
-    Ok(TextParagraph::new(width, height, line_metrics, full_text))
+    Ok(TextParagraph::new(layout, full_text))
 }
 
 #[cfg(test)]

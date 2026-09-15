@@ -149,6 +149,16 @@ pub struct LineMetric {
     pub end_index: usize,
 }
 
+/// 文本矩形区域边界样式（对应 Kotlin `RectStyle`）。
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum RectStyle {
+    /// 紧贴字形边界。
+    #[default]
+    Tight,
+    /// 整行全宽。
+    Full,
+}
+
 /// 文本矩形区域。
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct TextRect {
@@ -163,6 +173,16 @@ pub struct TextRect {
 }
 
 impl TextRect {
+    /// 构造矩形。
+    pub fn new(left: f32, top: f32, right: f32, bottom: f32) -> Self {
+        Self {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
     /// 宽度。
     pub fn width(self) -> f32 {
         self.right - self.left

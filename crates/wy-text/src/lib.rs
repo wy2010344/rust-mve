@@ -19,4 +19,4 @@ pub use editable::{EditableParagraph, EditSnapshot, Rect4};
 pub use editing::{TextBuffer, TextSegment};
 pub use font_cache::FontContext;
 pub use text_paragraph::TextParagraph;
-pub use text_style::{LineMetric, TextAlign, TextDecoration, TextRect, TextSpan, TextStyle};
+pub use text_style::{LineMetric, RectStyle, TextAlign, TextDecoration, TextRect, TextSpan, TextStyle};
