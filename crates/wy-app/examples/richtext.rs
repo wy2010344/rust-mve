@@ -12,7 +12,9 @@
 
 use std::rc::Rc;
 
-use wy_mve::{button, column_at, rich_editable_opts, rich_text_opts, row, text, Node, RichTextOpts};
+use wy_mve::{
+    button, column_at, rich_editable_opts, rich_text_opts, row, text, Node, RichTextOpts,
+};
 use wy_render::{Color, Point, Scene};
 use wy_signal::{GetValue, SetValue, Signal};
 use wy_text::TextStyle;
@@ -54,11 +56,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             let d1 = doc.clone();
             let d2 = doc.clone();
-            let (editor_node, core_rc) = rich_editable_opts(
-                move || d1.get(),
-                move |t| d2.set(t),
-                editor_opts,
-            );
+            let (editor_node, core_rc) =
+                rich_editable_opts(move || d1.get(), move |t| d2.set(t), editor_opts);
             cx.child(editor_node);
 
             // ---- 样式按钮行 ----
@@ -68,56 +67,71 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // 红色：把选区样式设为红色
                 let c = Rc::clone(&c1);
                 let lg = d_log.clone();
-                cx.child(button(move || "红色".into(), move || {
-                    {
+                cx.child(button(
+                    move || "红色".into(),
+                    move || {
+                        {
+                            let mut core = c.borrow_mut();
+                            let (s, e) = (core.sel_start(), core.sel_end());
+                            if s < e {
+                                core.buffer_mut().style_range(
+                                    s,
+                                    e,
+                                    Some(TextStyle::normal().with_color(0xFFFF0000)),
+                                );
+                            }
+                        }
+                        lg.set("已应用红色".into());
+                    },
+                ));
+
+                // 蓝色
+                let c = Rc::clone(&c1);
+                cx.child(button(
+                    move || "蓝色".into(),
+                    move || {
                         let mut core = c.borrow_mut();
                         let (s, e) = (core.sel_start(), core.sel_end());
                         if s < e {
                             core.buffer_mut().style_range(
                                 s,
                                 e,
-                                Some(TextStyle::normal().with_color(0xFFFF0000)),
+                                Some(TextStyle::normal().with_color(0xFF0000FF)),
                             );
                         }
-                    }
-                    lg.set("已应用红色".into());
-                }));
-
-                // 蓝色
-                let c = Rc::clone(&c1);
-                cx.child(button(move || "蓝色".into(), move || {
-                    let mut core = c.borrow_mut();
-                    let (s, e) = (core.sel_start(), core.sel_end());
-                    if s < e {
-                        core.buffer_mut().style_range(
-                            s,
-                            e,
-                            Some(TextStyle::normal().with_color(0xFF0000FF)),
-                        );
-                    }
-                }));
+                    },
+                ));
 
                 // 清除选区样式（回退基础样式）
                 let c = Rc::clone(&c1);
-                cx.child(button(move || "清除样式".into(), move || {
-                    let mut core = c.borrow_mut();
-                    let (s, e) = (core.sel_start(), core.sel_end());
-                    if s < e {
-                        core.buffer_mut().style_range(s, e, None);
-                    }
-                }));
+                cx.child(button(
+                    move || "清除样式".into(),
+                    move || {
+                        let mut core = c.borrow_mut();
+                        let (s, e) = (core.sel_start(), core.sel_end());
+                        if s < e {
+                            core.buffer_mut().style_range(s, e, None);
+                        }
+                    },
+                ));
 
                 // 撤销
                 let c = Rc::clone(&c1);
-                cx.child(button(move || "撤销".into(), move || {
-                    c.borrow_mut().undo();
-                }));
+                cx.child(button(
+                    move || "撤销".into(),
+                    move || {
+                        c.borrow_mut().undo();
+                    },
+                ));
 
                 // 重做
                 let c = Rc::clone(&c1);
-                cx.child(button(move || "重做".into(), move || {
-                    c.borrow_mut().redo();
-                }));
+                cx.child(button(
+                    move || "重做".into(),
+                    move || {
+                        c.borrow_mut().redo();
+                    },
+                ));
             }));
 
             // ---- 密码框标签 ----

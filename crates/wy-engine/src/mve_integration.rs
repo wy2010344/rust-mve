@@ -65,7 +65,12 @@ fn hit_test_nodes(nodes: &[Node], x: f32, y: f32) -> bool {
 ///
 /// 每项为 `(Node, 绝对坐标)`，其中绝对坐标是该节点在根坐标系下的原点
 /// （Kotlin `NodeWithPosition.position`），供分发时换算局部坐标。
-fn hit_test_node(node: &Node, origin: (f32, f32), x: f32, y: f32) -> Option<Vec<(Node, (f32, f32))>> {
+fn hit_test_node(
+    node: &Node,
+    origin: (f32, f32),
+    x: f32,
+    y: f32,
+) -> Option<Vec<(Node, (f32, f32))>> {
     if node.hidden {
         return None;
     }
@@ -95,12 +100,7 @@ fn hit_test_node(node: &Node, origin: (f32, f32), x: f32, y: f32) -> Option<Vec<
 /// 每节点用**局部坐标**（命中链携带的绝对位置换算），复刻 Kotlin
 /// `dispatchClick`/`dispatchPointerEvent`：先 `runOnDown` 再 `runOnClick`，
 /// 任一阶段 stopPropagation 即终止。
-fn dispatch_click_nodes(
-    nodes: &[Node],
-    x: f32,
-    y: f32,
-    event: &mut wy_mve::PointerEvent,
-) {
+fn dispatch_click_nodes(nodes: &[Node], x: f32, y: f32, event: &mut wy_mve::PointerEvent) {
     let hit = nodes
         .iter()
         .find_map(|node| hit_test_node(node, (0.0, 0.0), x, y));
@@ -277,11 +277,7 @@ fn to_mve_key(key: &crate::event::Key) -> wy_mve::Key {
 }
 
 /// 命中节点链（子→根；`hit_test_node` 的公开包装，供点击聚焦复用）。
-fn hit_test_node_chain(
-    nodes: &[Node],
-    x: f32,
-    y: f32,
-) -> Option<Vec<Node>> {
+fn hit_test_node_chain(nodes: &[Node], x: f32, y: f32) -> Option<Vec<Node>> {
     nodes
         .iter()
         .find_map(|node| hit_test_node(node, (0.0, 0.0), x, y))

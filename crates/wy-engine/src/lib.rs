@@ -22,4 +22,4 @@ pub mod winit_translate;
 
 pub use accessibility::{AccessNode, AccessRole, AccessibilityBridge};
 pub use event::{Event, Key, KeyEvent, PointerDevice, PointerEvent, PointerType};
-pub use focus::{FocusManager, FocusPath, focusable_nodes, tab_navigate};
+pub use focus::{focusable_nodes, tab_navigate, FocusManager, FocusPath};

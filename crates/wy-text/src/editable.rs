@@ -19,7 +19,7 @@
 use std::cell::RefCell;
 
 use parley::editing::{PlainEditor, PlainEditorDriver};
-use parley::{LayoutContext, FontContext as ParleyFontContext};
+use parley::{FontContext as ParleyFontContext, LayoutContext};
 
 /// 段落 `Brush` 类型（与 `wy-text` 排版一致）。
 type Brush = [u8; 4];

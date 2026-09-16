@@ -211,7 +211,11 @@ pub fn rich_editable_opts(
             if core.has_selection() && focused {
                 let sel_s = core.logic_to_display_index(core.sel_start());
                 let sel_e = core.logic_to_display_index(core.sel_end());
-                let text_for_x = if is_mask { shown.as_str() } else { &core.display_text() };
+                let text_for_x = if is_mask {
+                    shown.as_str()
+                } else {
+                    &core.display_text()
+                };
                 let ax = PAD_X + cursor_x_from_display(text_for_x, opts.font_size, sel_s);
                 let bx = PAD_X + cursor_x_from_display(text_for_x, opts.font_size, sel_e);
                 if bx > ax {
@@ -224,7 +228,11 @@ pub fn rich_editable_opts(
 
             // 光标（聚焦 + 未组合时显示）
             if focused && !core.in_composing() {
-                let text_for_x = if is_mask { shown.as_str() } else { &core.display_text() };
+                let text_for_x = if is_mask {
+                    shown.as_str()
+                } else {
+                    &core.display_text()
+                };
                 let disp_idx = core.logic_to_display_index(core.cursor());
                 let cx = PAD_X + cursor_x_from_display(text_for_x, opts.font_size, disp_idx);
                 scene.fill_rect(Rect::new(cx, top, 1.0, opts.font_size), opts.text_color);
@@ -232,7 +240,11 @@ pub fn rich_editable_opts(
 
             // IME 组合带下划线
             if let Some((cs, ce)) = core.composing_display_range() {
-                let text_for_x = if is_mask { shown.as_str() } else { &core.display_text() };
+                let text_for_x = if is_mask {
+                    shown.as_str()
+                } else {
+                    &core.display_text()
+                };
                 let ax = PAD_X + cursor_x_from_display(text_for_x, opts.font_size, cs);
                 let bx = PAD_X + cursor_x_from_display(text_for_x, opts.font_size, ce);
                 let y = top + opts.font_size + 1.0;
@@ -581,7 +593,10 @@ mod tests {
         let mut c = core("hi");
         for k in [Key::Tab, Key::Escape, Key::PageUp, Key::PageDown] {
             let ev = key(k, false, false);
-            assert!(!editable_handle_key(&mut c, &ev), "{k:?} should not consume");
+            assert!(
+                !editable_handle_key(&mut c, &ev),
+                "{k:?} should not consume"
+            );
         }
     }
 
@@ -679,10 +694,15 @@ mod tests {
             RichTextOpts::default(),
         );
         // 组件外直接操作样式段
-        core.borrow_mut()
-            .buffer_mut()
-            .style_range(0, 5, Some(wy_text::TextStyle::normal().with_color(0xFFFF0000)));
-        assert_eq!(core.borrow().buffer().style_at(0).unwrap().color, 0xFFFF0000);
+        core.borrow_mut().buffer_mut().style_range(
+            0,
+            5,
+            Some(wy_text::TextStyle::normal().with_color(0xFFFF0000)),
+        );
+        assert_eq!(
+            core.borrow().buffer().style_at(0).unwrap().color,
+            0xFFFF0000
+        );
         assert!(node.focusable);
         assert!(node.ime_fn.is_some());
         assert!(node.on_down_fn.is_some());

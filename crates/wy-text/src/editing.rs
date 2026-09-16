@@ -129,14 +129,7 @@ impl TextBuffer {
         let (p, ins_end) = diff_bounds(&old, &new_value);
         let old_n = old.chars().count();
         let new_n = new_value.chars().count();
-        let aligned = align_segments(
-            &self.segments,
-            old_n,
-            new_n,
-            p,
-            ins_end,
-            self,
-        );
+        let aligned = align_segments(&self.segments, old_n, new_n, p, ins_end, self);
         self.segments = aligned;
         self.text = new_value;
     }
@@ -265,7 +258,10 @@ fn normalize(segments: Vec<TextSegment>, len: usize) -> Vec<TextSegment> {
             // 被覆盖
         } else if s.style == out[last_idx].style {
             // 合并相邻同款
-            out[last_idx] = TextSegment { end: e, style: s.style };
+            out[last_idx] = TextSegment {
+                end: e,
+                style: s.style,
+            };
         } else {
             out.push(TextSegment {
                 end: e,
@@ -462,7 +458,7 @@ mod tests {
     fn kotlin_scenario_type_delete_append() {
         let mut buf = TextBuffer::from_plain("hello");
         buf.style_range(0, 3, Some(style_marker(1))); // hel 有样式
-        // 打字：末尾插 x
+                                                      // 打字：末尾插 x
         buf.write_text("hellox".into());
         assert_eq!(buf.style_at(2), Some(&style_marker(1)));
         assert_eq!(buf.style_at(5), None, "x 继承左邻 l（无样式）");

@@ -8,17 +8,19 @@
 //! - [`EditableParagraph`] — 可编辑段落（封装 Parley PlainEditor）
 
 mod build_paragraph;
+mod edit_core;
 pub mod editable;
 mod editing;
-mod edit_core;
 mod font_cache;
 mod text_paragraph;
 mod text_style;
 
 pub use build_paragraph::{build_paragraph, TextError};
-pub use editable::{EditableParagraph, EditSnapshot, Rect4};
-pub use editing::{TextBuffer, TextSegment};
 pub use edit_core::EditCore;
+pub use editable::{EditSnapshot, EditableParagraph, Rect4};
+pub use editing::{TextBuffer, TextSegment};
 pub use font_cache::FontContext;
 pub use text_paragraph::TextParagraph;
-pub use text_style::{LineMetric, RectStyle, TextAlign, TextDecoration, TextRect, TextSpan, TextStyle};
+pub use text_style::{
+    LineMetric, RectStyle, TextAlign, TextDecoration, TextRect, TextSpan, TextStyle,
+};

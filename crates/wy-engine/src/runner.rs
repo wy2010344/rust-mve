@@ -366,7 +366,11 @@ impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
 
         // HiDPI：渲染按逻辑坐标×scale 放大到物理像素，事件坐标需转回逻辑
         //（winit 的 CursorMoved.position 是物理像素），否则命中测试偏移。
-        let scale = self.window.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0);
+        let scale = self
+            .window
+            .as_ref()
+            .map(|w| w.scale_factor())
+            .unwrap_or(1.0);
         let event = if scale != 1.0 {
             Self::to_logical_window_event(&event, scale).unwrap_or(event)
         } else {
@@ -825,19 +829,13 @@ mod tests {
 
     #[test]
     fn physical_coords_convert_to_logical_on_hidpi() {
-        let logical = to_logical_position(
-            winit::dpi::PhysicalPosition::new(200.0, 100.0),
-            2.0,
-        );
+        let logical = to_logical_position(winit::dpi::PhysicalPosition::new(200.0, 100.0), 2.0);
         assert_eq!((logical.x, logical.y), (100.0, 50.0));
     }
 
     #[test]
     fn no_scaling_keeps_coords_unchanged() {
-        let logical = to_logical_position(
-            winit::dpi::PhysicalPosition::new(200.0, 100.0),
-            1.0,
-        );
+        let logical = to_logical_position(winit::dpi::PhysicalPosition::new(200.0, 100.0), 1.0);
         assert_eq!((logical.x, logical.y), (200.0, 100.0));
     }
 }

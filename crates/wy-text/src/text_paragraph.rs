@@ -207,7 +207,10 @@ mod tests {
     fn paragraph(text: &str) -> TextParagraph {
         use crate::build_paragraph;
         let mut fc = crate::font_cache::FontContext::new();
-        let spans = vec![TextSpan::styled(text, TextStyle::normal().with_font_size(16.0))];
+        let spans = vec![TextSpan::styled(
+            text,
+            TextStyle::normal().with_font_size(16.0),
+        )];
         build_paragraph(&mut fc, &spans, Some(200.0), 100, TextAlign::Start).unwrap()
     }
 
@@ -275,7 +278,9 @@ mod tests {
 
     #[test]
     fn multi_line_rects_per_line() {
-        let p = paragraph("This is a longer paragraph that will wrap given the modest max width used here.");
+        let p = paragraph(
+            "This is a longer paragraph that will wrap given the modest max width used here.",
+        );
         let r = p.rects_for_range(0, 100, FULL);
         assert_eq!(r.len(), p.line_metrics().len(), "每行一个 Full 矩形");
         for rect in &r {

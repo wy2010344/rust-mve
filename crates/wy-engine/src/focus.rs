@@ -53,7 +53,10 @@ impl FocusManager {
     pub fn focus_on_click(&mut self, hit_chain: &[Node]) {
         // hit_chain 子在前（深→浅）。找第一个 focusable。
         if let Some(idx) = hit_chain.iter().position(|n| n.focusable) {
-            let path: FocusPath = hit_chain[idx..].iter().map(|n| Rc::clone(&n.identity)).collect();
+            let path: FocusPath = hit_chain[idx..]
+                .iter()
+                .map(|n| Rc::clone(&n.identity))
+                .collect();
             self.set_focus(path);
         } else {
             self.clear_focus();
@@ -109,12 +112,7 @@ pub fn locate(path: &[Rc<()>], root_nodes: &[Node]) -> Option<Vec<Node>> {
 /// `path[last]`（根身份），逐层下钻匹配 `path[last-1]…path[0]`；
 /// 匹配成功的节点以**根→叶**顺序推入 `matches`，调用方需要时自行反转
 /// （如 `dispatch_key` 需要叶→根冒泡）。
-fn find_path(
-    nodes: &[Node],
-    path: &[Rc<()>],
-    depth: usize,
-    matches: &mut Vec<Node>,
-) -> bool {
+fn find_path(nodes: &[Node], path: &[Rc<()>], depth: usize, matches: &mut Vec<Node>) -> bool {
     if depth >= path.len() {
         return true;
     }
@@ -171,15 +169,10 @@ pub fn tab_navigate(
         return FocusPath::new();
     }
     // 当前焦点叶子身份
-    let pos = current
-        .first()
-        .and_then(|leaf| {
-            list.iter().position(|chain| {
-                chain
-                    .first()
-                    .is_some_and(|n| Rc::ptr_eq(&n.identity, leaf))
-            })
-        });
+    let pos = current.first().and_then(|leaf| {
+        list.iter()
+            .position(|chain| chain.first().is_some_and(|n| Rc::ptr_eq(&n.identity, leaf)))
+    });
 
     let next = match pos {
         Some(i) if forward => {
@@ -202,7 +195,13 @@ pub fn tab_navigate(
         }
         None => {
             // 无焦点或焦点不在此树：默认聚焦第一个
-            if forward { 0 } else if wrap { list.len() - 1 } else { 0 }
+            if forward {
+                0
+            } else if wrap {
+                list.len() - 1
+            } else {
+                0
+            }
         }
     };
     list[next].iter().map(|n| Rc::clone(&n.identity)).collect()
@@ -254,7 +253,10 @@ mod tests {
         let nodes = app(count);
         let first = tab_navigate(&nodes, &FocusPath::new(), true, true);
         let prev = tab_navigate(&nodes, &first, false, true);
-        assert!(Rc::ptr_eq(&prev[0], &nodes[2].identity), "反向回绕到最后 1 个");
+        assert!(
+            Rc::ptr_eq(&prev[0], &nodes[2].identity),
+            "反向回绕到最后 1 个"
+        );
     }
 
     #[test]

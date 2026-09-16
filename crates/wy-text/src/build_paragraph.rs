@@ -99,11 +99,17 @@ fn push_span_range(
         range.clone(),
     );
     if s.italic {
-        builder.push(StyleProperty::FontStyle(parley::FontStyle::Italic), range.clone());
+        builder.push(
+            StyleProperty::FontStyle(parley::FontStyle::Italic),
+            range.clone(),
+        );
     }
     builder.push(StyleProperty::Brush(color_to_brush(s.color)), range.clone());
     if s.letter_spacing != 0.0 {
-        builder.push(StyleProperty::LetterSpacing(s.letter_spacing), range.clone());
+        builder.push(
+            StyleProperty::LetterSpacing(s.letter_spacing),
+            range.clone(),
+        );
     }
     if s.word_spacing != 0.0 {
         builder.push(StyleProperty::WordSpacing(s.word_spacing), range.clone());

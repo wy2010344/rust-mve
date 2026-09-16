@@ -132,7 +132,7 @@ mod tests {
         assert_eq!(index_at_x("hello", 14.0, 0.0), 0);
         assert_eq!(index_at_x("hello", 14.0, w), 5);
         assert_eq!(index_at_x("hello", 14.0, w / 2.0), 2); // 中间落点
-        // 单字符
+                                                           // 单字符
         let (cw, _) = measure_text("h", 14.0);
         let idx = index_at_x("h", 14.0, cw * 0.5);
         assert!(idx == 0 || idx == 1);

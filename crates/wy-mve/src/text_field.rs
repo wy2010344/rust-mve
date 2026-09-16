@@ -145,7 +145,7 @@ pub fn text_field_opts(
             let Some(scene) = scene.downcast_mut::<Scene>() else {
                 return;
             };
-sync();
+            sync();
             let s = shared.borrow();
             let border = if s.focused {
                 opts.focus_border_color
@@ -221,7 +221,8 @@ sync();
         Rc::new(move |event: &mut PointerEvent| {
             let mut s = shared.borrow_mut();
             s.focused = true;
-            s.editable.move_to_point(event.x - PAD_X, text_top(&opts), false);
+            s.editable
+                .move_to_point(event.x - PAD_X, text_top(&opts), false);
         })
     };
 
@@ -270,11 +271,7 @@ sync();
 }
 
 /// 编辑后把快照写回外部（仅在文本变化时调用 `on_change`）。
-fn push_change(
-    s: &mut SharedState,
-    value: &dyn Fn() -> String,
-    on_change: &dyn Fn(String),
-) {
+fn push_change(s: &mut SharedState, value: &dyn Fn() -> String, on_change: &dyn Fn(String)) {
     let snap = s.editable.snapshot();
     s.last_synced = snap.text.clone();
     if snap.text != value() {
@@ -463,7 +460,8 @@ mod tests {
     #[test]
     fn left_arrow_moves_and_collapses() {
         let mut s = shared("hello", 14.0);
-        s.editable.with_driver(|mut drv| drv.select_byte_range(2, 5));
+        s.editable
+            .with_driver(|mut drv| drv.select_byte_range(2, 5));
         let ev = key(Key::ArrowLeft, false, false);
         assert!(editable_handle_key(&mut s, &default_opts(), &ev));
         // move_left 在选区非塌缩时塌缩到锚点
@@ -496,9 +494,18 @@ mod tests {
     #[test]
     fn enter_tab_escape_not_consumed() {
         let mut s = shared("hi", 14.0);
-        for k in [Key::Enter, Key::Tab, Key::Escape, Key::PageUp, Key::PageDown] {
+        for k in [
+            Key::Enter,
+            Key::Tab,
+            Key::Escape,
+            Key::PageUp,
+            Key::PageDown,
+        ] {
             let ev = key(k, false, false);
-            assert!(!editable_handle_key(&mut s, &default_opts(), &ev), "{k:?} 不应消费");
+            assert!(
+                !editable_handle_key(&mut s, &default_opts(), &ev),
+                "{k:?} 不应消费"
+            );
         }
     }
 
@@ -540,7 +547,7 @@ mod tests {
         assert_eq!(s.editable.text(), "a");
     }
 
-#[test]
+    #[test]
     fn push_change_writes_only_on_diff() {
         let cell = Rc::new(RefCell::new(String::from("hi")));
         let mut s = shared("hi", 14.0);
@@ -558,7 +565,8 @@ mod tests {
         assert_eq!(count.get(), 0);
         // 编辑后触发
         s.editable.with_driver(|mut drv| drv.move_to_byte(2));
-        s.editable.with_driver(|mut drv| drv.insert_or_replace_selection("!"));
+        s.editable
+            .with_driver(|mut drv| drv.insert_or_replace_selection("!"));
         push_change(&mut s, &value, &*on_change);
         assert_eq!(count.get(), 1);
         assert_eq!(cell.borrow().as_str(), "hi!");

@@ -195,12 +195,22 @@ struct InsertTextAction {
 
 impl TextEditAction for InsertTextAction {
     fn undo(&self, state: &TextState) -> TextState {
-        let new_text = remove_range(&state.text, self.position, self.position + self.inserted.len());
-        TextState { text: new_text, cursor: self.position }
+        let new_text = remove_range(
+            &state.text,
+            self.position,
+            self.position + self.inserted.len(),
+        );
+        TextState {
+            text: new_text,
+            cursor: self.position,
+        }
     }
     fn redo(&self, state: &TextState) -> TextState {
         let new_text = insert_at(&state.text, self.position, &self.inserted);
-        TextState { text: new_text, cursor: self.position + self.inserted.len() }
+        TextState {
+            text: new_text,
+            cursor: self.position + self.inserted.len(),
+        }
     }
 }
 
@@ -219,11 +229,21 @@ impl TextEditAction for DeleteTextAction {
         } else {
             self.position + self.deleted.len()
         };
-        TextState { text: new_text, cursor }
+        TextState {
+            text: new_text,
+            cursor,
+        }
     }
     fn redo(&self, state: &TextState) -> TextState {
-        let new_text = remove_range(&state.text, self.position, self.position + self.deleted.len());
-        TextState { text: new_text, cursor: self.position }
+        let new_text = remove_range(
+            &state.text,
+            self.position,
+            self.position + self.deleted.len(),
+        );
+        TextState {
+            text: new_text,
+            cursor: self.position,
+        }
     }
 }
 
@@ -239,11 +259,15 @@ impl TextEditAction for ReplaceSelectionAction {
         let head = &state.text[..slice_to_byte(&state.text, self.position)];
         let tail_start = slice_to_byte(&state.text, self.position + self.replacement.len());
         let tail = &state.text[tail_start.min(state.text.len())..];
-        let mut new_text = String::with_capacity(head.len() + self.original_selected.len() + tail.len());
+        let mut new_text =
+            String::with_capacity(head.len() + self.original_selected.len() + tail.len());
         new_text.push_str(head);
         new_text.push_str(&self.original_selected);
         new_text.push_str(tail);
-        TextState { text: new_text, cursor: self.position }
+        TextState {
+            text: new_text,
+            cursor: self.position,
+        }
     }
     fn redo(&self, state: &TextState) -> TextState {
         let head = &state.text[..slice_to_byte(&state.text, self.position)];
@@ -253,7 +277,10 @@ impl TextEditAction for ReplaceSelectionAction {
         new_text.push_str(head);
         new_text.push_str(&self.replacement);
         new_text.push_str(tail);
-        TextState { text: new_text, cursor: self.position + self.replacement.len() }
+        TextState {
+            text: new_text,
+            cursor: self.position + self.replacement.len(),
+        }
     }
 }
 
@@ -291,7 +318,11 @@ struct UndoRedo {
 
 impl UndoRedo {
     fn new(max_history: usize) -> Self {
-        Self { max_history, undo_stack: Vec::new(), redo_stack: Vec::new() }
+        Self {
+            max_history,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+        }
     }
 
     fn push(&mut self, action: Box<dyn TextEditAction>) {
@@ -386,31 +417,41 @@ impl EditCore {
         }
     }
 
-    pub fn buffer(&self) -> &TextBuffer { &self.buffer }
+    pub fn buffer(&self) -> &TextBuffer {
+        &self.buffer
+    }
 
-    pub fn buffer_mut(&mut self) -> &mut TextBuffer { &mut self.buffer }
+    pub fn buffer_mut(&mut self) -> &mut TextBuffer {
+        &mut self.buffer
+    }
 
     // -----------------------------------------------------------------------
     // 文本查询
     // -----------------------------------------------------------------------
 
-    pub fn text(&self) -> &str { self.buffer.text() }
+    pub fn text(&self) -> &str {
+        self.buffer.text()
+    }
 
-    pub fn text_len(&self) -> usize { self.buffer.text().chars().count() }
+    pub fn text_len(&self) -> usize {
+        self.buffer.text().chars().count()
+    }
 
     // -----------------------------------------------------------------------
     // 光标/选区查询
     // -----------------------------------------------------------------------
 
-    pub fn anchor(&self) -> Option<usize> { self.anchor }
+    pub fn anchor(&self) -> Option<usize> {
+        self.anchor
+    }
 
-    pub fn focus(&self) -> Option<usize> { self.focus }
+    pub fn focus(&self) -> Option<usize> {
+        self.focus
+    }
 
     /// 当前插入点位置（字符索引）；未定位返回 0。
     pub fn cursor(&self) -> usize {
-        self.anchor
-            .unwrap_or(0)
-            .min(self.text_len())
+        self.anchor.unwrap_or(0).min(self.text_len())
     }
 
     pub fn has_selection(&self) -> bool {
@@ -418,12 +459,14 @@ impl EditCore {
     }
 
     pub fn sel_start(&self) -> usize {
-        self.anchor.zip(self.focus)
+        self.anchor
+            .zip(self.focus)
             .map_or(0, |(a, f)| a.min(f).min(self.text_len()))
     }
 
     pub fn sel_end(&self) -> usize {
-        self.anchor.zip(self.focus)
+        self.anchor
+            .zip(self.focus)
             .map_or(0, |(a, f)| a.max(f).min(self.text_len()))
     }
 
@@ -482,7 +525,9 @@ impl EditCore {
         } else {
             inserted.to_string()
         };
-        if to_insert.is_empty() { return; }
+        if to_insert.is_empty() {
+            return;
+        }
         if self.has_selection() {
             self.replace_sel(&to_insert);
             return;
@@ -525,9 +570,13 @@ impl EditCore {
             return;
         }
         let pos = self.cursor();
-        if pos == 0 { return; }
+        if pos == 0 {
+            return;
+        }
         let start = grapheme_prev(self.text(), pos);
-        if start >= pos { return; }
+        if start >= pos {
+            return;
+        }
         let deleted = slice_chars(self.text(), start, pos);
         self.undo.push(Box::new(DeleteTextAction {
             position: start,
@@ -544,9 +593,13 @@ impl EditCore {
             return;
         }
         let pos = self.cursor();
-        if pos >= self.text_len() { return; }
+        if pos >= self.text_len() {
+            return;
+        }
         let end = grapheme_next(self.text(), pos);
-        if end <= pos { return; }
+        if end <= pos {
+            return;
+        }
         let deleted = slice_chars(self.text(), pos, end);
         self.undo.push(Box::new(DeleteTextAction {
             position: pos,
@@ -558,7 +611,9 @@ impl EditCore {
     }
 
     fn del_sel(&mut self) {
-        if !self.has_selection() { return; }
+        if !self.has_selection() {
+            return;
+        }
         let s = self.sel_start();
         let e = self.sel_end();
         let deleted = slice_chars(self.text(), s, e);
@@ -577,9 +632,13 @@ impl EditCore {
             return;
         }
         let pos = self.cursor();
-        if pos == 0 { return; }
+        if pos == 0 {
+            return;
+        }
         let start = word_prev(self.text(), pos);
-        if start >= pos { return; }
+        if start >= pos {
+            return;
+        }
         let deleted = slice_chars(self.text(), start, pos);
         self.undo.push(Box::new(DeleteTextAction {
             position: start,
@@ -597,9 +656,13 @@ impl EditCore {
             return;
         }
         let pos = self.cursor();
-        if pos >= self.text_len() { return; }
+        if pos >= self.text_len() {
+            return;
+        }
         let end = word_next(self.text(), pos);
-        if end <= pos { return; }
+        if end <= pos {
+            return;
+        }
         let deleted = slice_chars(self.text(), pos, end);
         self.undo.push(Box::new(DeleteTextAction {
             position: pos,
@@ -754,19 +817,29 @@ impl EditCore {
         self.move_to(pos, extend);
     }
 
-    pub fn preferred_x(&self) -> f32 { self.preferred_x }
+    pub fn preferred_x(&self) -> f32 {
+        self.preferred_x
+    }
 
-    pub fn set_preferred_x(&mut self, x: f32) { self.preferred_x = x; }
+    pub fn set_preferred_x(&mut self, x: f32) {
+        self.preferred_x = x;
+    }
 
     // -----------------------------------------------------------------------
     // 撤销/重做
     // -----------------------------------------------------------------------
 
-    pub fn can_undo(&self) -> bool { !self.undo.undo_stack.is_empty() }
-    pub fn can_redo(&self) -> bool { !self.undo.redo_stack.is_empty() }
+    pub fn can_undo(&self) -> bool {
+        !self.undo.undo_stack.is_empty()
+    }
+    pub fn can_redo(&self) -> bool {
+        !self.undo.redo_stack.is_empty()
+    }
 
     pub fn undo(&mut self) {
-        if self.in_composing() { return; }
+        if self.in_composing() {
+            return;
+        }
         let current = TextState {
             text: self.text().to_string(),
             cursor: self.cursor(),
@@ -778,7 +851,9 @@ impl EditCore {
     }
 
     pub fn redo(&mut self) {
-        if self.in_composing() { return; }
+        if self.in_composing() {
+            return;
+        }
         let current = TextState {
             text: self.text().to_string(),
             cursor: self.cursor(),
@@ -801,9 +876,13 @@ impl EditCore {
         !self.composing_text.is_empty()
     }
 
-    pub fn composing_text(&self) -> &str { &self.composing_text }
+    pub fn composing_text(&self) -> &str {
+        &self.composing_text
+    }
 
-    pub fn composing_cursor_pos(&self) -> usize { self.composing_cursor_pos }
+    pub fn composing_cursor_pos(&self) -> usize {
+        self.composing_cursor_pos
+    }
 
     /// 组合区间起点 = compositionBase.0 或当前光标；字符索引。
     pub fn composing_start(&self) -> usize {
@@ -895,11 +974,19 @@ impl EditCore {
         self.text().is_empty() && !self.placeholder.is_empty()
     }
 
-    pub fn placeholder(&self) -> &str { &self.placeholder }
-    pub fn set_placeholder(&mut self, s: impl Into<String>) { self.placeholder = s.into(); }
+    pub fn placeholder(&self) -> &str {
+        &self.placeholder
+    }
+    pub fn set_placeholder(&mut self, s: impl Into<String>) {
+        self.placeholder = s.into();
+    }
 
-    pub fn obscure_text(&self) -> bool { self.obscure_text }
-    pub fn set_obscure_text(&mut self, v: bool) { self.obscure_text = v; }
+    pub fn obscure_text(&self) -> bool {
+        self.obscure_text
+    }
+    pub fn set_obscure_text(&mut self, v: bool) {
+        self.obscure_text = v;
+    }
 
     /// 显示文本：占位 / 掩码 / 普通（tab→4 空格）。
     pub fn display_text(&self) -> String {
@@ -932,11 +1019,17 @@ impl EditCore {
     }
 
     fn obscure_display_spans(&self, base_style: crate::TextStyle) -> Vec<TextSpan> {
-        if self.text().is_empty() { return Vec::new(); }
+        if self.text().is_empty() {
+            return Vec::new();
+        }
         let mut out: Vec<TextSpan> = Vec::new();
         let mut ci = 0;
         while ci < self.text_len() {
-            let st = self.buffer.style_at(ci).cloned().unwrap_or_else(|| base_style.clone());
+            let st = self
+                .buffer
+                .style_at(ci)
+                .cloned()
+                .unwrap_or_else(|| base_style.clone());
             let last = out.last();
             if let Some(last_span) = last {
                 if last_span.style == st {
@@ -1000,7 +1093,9 @@ impl EditCore {
 
     /// 组合区间（显示索引域）：`None` 表示非组合态。
     pub fn composing_display_range(&self) -> Option<(usize, usize)> {
-        if !self.in_composing() { return None; }
+        if !self.in_composing() {
+            return None;
+        }
         let s = self.logic_to_display_index(self.composing_start());
         let e = self.logic_to_display_index(self.composing_start() + self.composing_length());
         Some((s, e))
@@ -1008,7 +1103,9 @@ impl EditCore {
 }
 
 impl Default for EditCore {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1167,8 +1264,8 @@ mod tests {
     fn word_prev_next_basic() {
         // Kotlin Words.prevBoundary: 跳空白后连续吞词簇
         assert_eq!(word_prev("hello world", 6), 0); // 'w' 退到文档首
-        assert_eq!(word_next("hello", 0), 5);       // hello 整词到末尾
-        assert_eq!(word_prev("hello", 5), 0);       // 从末尾退到文档首
+        assert_eq!(word_next("hello", 0), 5); // hello 整词到末尾
+        assert_eq!(word_prev("hello", 5), 0); // 从末尾退到文档首
     }
 
     #[test]

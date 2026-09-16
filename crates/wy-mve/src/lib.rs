@@ -31,8 +31,8 @@ pub use node::{
     children_nodes, flatten, has_handler, layout_offsets, materialize, node_size, ChildSlot,
     ImeEvent, Key, KeyEvent, Layout, Node, PointerEvent,
 };
+pub use rich_text::{rich_editable_opts, rich_text, rich_text_opts, RichTextOpts};
 pub use text_field::{text_field, text_field_opts, TextFieldOpts};
-pub use rich_text::{rich_text, rich_text_opts, rich_editable_opts, RichTextOpts};
 
 #[cfg(test)]
 mod tests;
