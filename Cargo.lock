@@ -3896,6 +3896,7 @@ dependencies = [
  "log",
  "parley",
  "swash",
+ "unicode-segmentation",
 ]
 
 [[package]]

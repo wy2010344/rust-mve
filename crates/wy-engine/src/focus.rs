@@ -61,9 +61,11 @@ impl FocusManager {
     }
 
     /// 从叶子向根冒泡分发键盘事件。返回是否消费。
+    ///
+    /// `locate` 返回叶→根链，`chain.iter()` 即从叶子（聚焦点）开始冒泡。
     pub fn dispatch_key(&self, root_nodes: &[Node], event: &mut wy_mve::KeyEvent) -> bool {
         if let Some(chain) = locate(&self.path, root_nodes) {
-            for node in chain.iter().rev() {
+            for node in chain.iter() {
                 if node.run_key(event) {
                     return true;
                 }
@@ -75,7 +77,7 @@ impl FocusManager {
     /// 从叶子向根冒泡分发 IME 事件。返回是否消费。
     pub fn dispatch_ime(&self, root_nodes: &[Node], event: &mut ImeEvent) -> bool {
         if let Some(chain) = locate(&self.path, root_nodes) {
-            for node in chain.iter().rev() {
+            for node in chain.iter() {
                 if node.run_ime(event) {
                     return true;
                 }
@@ -94,26 +96,34 @@ pub fn locate(path: &[Rc<()>], root_nodes: &[Node]) -> Option<Vec<Node>> {
     }
     let mut matches: Vec<Node> = Vec::new();
     if find_path(root_nodes, path, 0, &mut matches) {
+        matches.reverse();
         Some(matches)
     } else {
         None
     }
 }
 
-/// DFS：匹配 path[index..]，matches = [叶子..根]。
+/// DFS：匹配 path，从当前层（深度 `depth`）匹配的节点身份是 `path[path.len()-1-depth]`。
+///
+/// 契约：`FocusPath` 是**叶→根**（`path[0]` 为叶子身份）。起点在根层匹配
+/// `path[last]`（根身份），逐层下钻匹配 `path[last-1]…path[0]`；
+/// 匹配成功的节点以**根→叶**顺序推入 `matches`，调用方需要时自行反转
+/// （如 `dispatch_key` 需要叶→根冒泡）。
 fn find_path(
     nodes: &[Node],
     path: &[Rc<()>],
-    index: usize,
+    depth: usize,
     matches: &mut Vec<Node>,
 ) -> bool {
-    if index >= path.len() {
+    if depth >= path.len() {
         return true;
     }
+    // path 叶→根：当前深度 depth 应匹配 path[len-1-depth]（depth=0 → 根身份）。
+    let want = &path[path.len() - 1 - depth];
     for node in nodes {
-        if Rc::ptr_eq(&node.identity, &path[index]) {
+        if Rc::ptr_eq(&node.identity, want) {
             matches.push(node.clone());
-            if find_path(&children_nodes(node), path, index + 1, matches) {
+            if find_path(&children_nodes(node), path, depth + 1, matches) {
                 return true;
             }
             matches.pop();
@@ -137,7 +147,9 @@ fn collect_focusable(nodes: &[Node], chain: &mut Vec<Node>, out: &mut Vec<Vec<No
         // 自我（文档序在前）
         chain.push(node.clone());
         if node.focusable && !node.hidden {
-            out.push(chain.clone());
+            // 契约：焦点链为 叶→根（与 find_path/locate/hit_test_node 一致），
+            // 此处收集到的 chain 是 根→叶，反转后再入列。
+            out.push(chain.iter().rev().cloned().collect());
         }
         collect_focusable(&children_nodes(node), chain, out);
         chain.pop();

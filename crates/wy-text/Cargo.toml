@@ -11,3 +11,4 @@ swash = { workspace = true }
 fontique = { workspace = true }
 log = { workspace = true }
 accesskit = { workspace = true }
+unicode-segmentation = { workspace = true }

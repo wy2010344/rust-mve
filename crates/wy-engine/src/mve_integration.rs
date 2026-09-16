@@ -61,8 +61,11 @@ fn hit_test_nodes(nodes: &[Node], x: f32, y: f32) -> bool {
         .any(|node| hit_test_node(node, (0.0, 0.0), x, y).is_some())
 }
 
-/// 返回命中节点的 ID 链（子→根顺序，对应 Kotlin hitTest 的 [NodeWithPosition] 链）。
-fn hit_test_node(node: &Node, origin: (f32, f32), x: f32, y: f32) -> Option<Vec<Node>> {
+/// 返回命中节点的链（子→根，对应 Kotlin hitTest 的 [NodeWithPosition] 链）。
+///
+/// 每项为 `(Node, 绝对坐标)`，其中绝对坐标是该节点在根坐标系下的原点
+/// （Kotlin `NodeWithPosition.position`），供分发时换算局部坐标。
+fn hit_test_node(node: &Node, origin: (f32, f32), x: f32, y: f32) -> Option<Vec<(Node, (f32, f32))>> {
     if node.hidden {
         return None;
     }
@@ -76,28 +79,53 @@ fn hit_test_node(node: &Node, origin: (f32, f32), x: f32, y: f32) -> Option<Vec<
     for (child, ofs) in children.iter().zip(offsets.iter()).rev() {
         let child_origin = (pos.0 + ofs.0, pos.1 + ofs.1);
         if let Some(mut chain) = hit_test_node(child, child_origin, x, y) {
-            chain.push(node.clone());
+            chain.push((node.clone(), pos));
             return Some(chain);
         }
     }
     // 自身：必须有 handler 且命中才算
     if has_handler(node) && node.run_hit_test(x - pos.0, y - pos.1) {
-        return Some(vec![node.clone()]);
+        return Some(vec![(node.clone(), pos)]);
     }
     None
 }
 
-/// 沿命中链冒泡分发点击（子→根，可 stopPropagation，对应 Kotlin 冒泡阶段）。
-fn dispatch_click_nodes(nodes: &[Node], x: f32, y: f32, event: &mut wy_mve::PointerEvent) {
-    if let Some(chain) = nodes
+/// 沿命中链冒泡分发指针事件（叶→根，对应 Kotlin 冒泡阶段，先 onDown 后 onClick）。
+///
+/// 每节点用**局部坐标**（命中链携带的绝对位置换算），复刻 Kotlin
+/// `dispatchClick`/`dispatchPointerEvent`：先 `runOnDown` 再 `runOnClick`，
+/// 任一阶段 stopPropagation 即终止。
+fn dispatch_click_nodes(
+    nodes: &[Node],
+    x: f32,
+    y: f32,
+    event: &mut wy_mve::PointerEvent,
+) {
+    let hit = nodes
         .iter()
-        .find_map(|node| hit_test_node(node, (0.0, 0.0), x, y))
-    {
-        for node in chain {
-            node.run_on_click(event);
-            if event.stopped {
-                return;
-            }
+        .find_map(|node| hit_test_node(node, (0.0, 0.0), x, y));
+    let Some(chain) = hit else {
+        return;
+    };
+    // 链：叶→根（与调度一致）。每项 (node, 绝对位置)，换算局部坐标。
+    for (node, pos) in &chain {
+        // Kotlin 区分 Down/Click 的方式是**调用哪个 handler**（runOnDown vs
+        // runOnClick），不是事件上的字段——本 Rust port 的 `PointerEvent`
+        // 无 `method` 字段（编译器 `available fields` 佐证）。两阶段循环本身
+        // 就已表达阶段：第一轮 = Down，第二轮 = Click。
+        event.x = x - pos.0;
+        event.y = y - pos.1;
+        node.run_on_down(event);
+        if event.stopped {
+            return;
+        }
+    }
+    for (node, pos) in &chain {
+        event.x = x - pos.0;
+        event.y = y - pos.1;
+        node.run_on_click(event);
+        if event.stopped {
+            return;
         }
     }
 }
@@ -254,7 +282,10 @@ fn hit_test_node_chain(
     x: f32,
     y: f32,
 ) -> Option<Vec<Node>> {
-    nodes.iter().find_map(|node| hit_test_node(node, (0.0, 0.0), x, y))
+    nodes
+        .iter()
+        .find_map(|node| hit_test_node(node, (0.0, 0.0), x, y))
+        .map(|chain| chain.into_iter().map(|(n, _)| n).collect())
 }
 
 #[cfg(test)]
@@ -364,8 +395,8 @@ mod tests {
         assert!(chain.is_some());
         let chain = chain.unwrap();
         assert_eq!(chain.len(), 3); // +, row, column
-        assert!(chain[0].on_click_fn.is_some(), "deepest is the + button");
-        assert_eq!(chain[1].layout, Some(wy_mve::Layout::Row { gap: 8.0 }));
+        assert!(chain[0].0.on_click_fn.is_some(), "deepest is the + button");
+        assert_eq!(chain[1].0.layout, Some(wy_mve::Layout::Row { gap: 8.0 }));
 
         // 分发点击 → + 按钮 handler 执行并 stop
         let mut event = PointerEvent::new(click.0, click.1);
@@ -416,7 +447,11 @@ mod tests {
 
         // 点击输入框（默认 200x32 内点 (50,16)）→ 聚焦 → 允许 IME
         let nodes = app.root.nodes();
-        let chain = hit_test_node(&nodes[0], (0.0, 0.0), 50.0, 16.0).unwrap();
+        let chain = hit_test_node(&nodes[0], (0.0, 0.0), 50.0, 16.0)
+            .unwrap()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect::<Vec<_>>();
         app.focus.focus_on_click(&chain);
         assert_eq!(app.ime_allowed(), Some(true), "聚焦输入框允许 IME");
 

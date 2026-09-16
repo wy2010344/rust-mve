@@ -19,6 +19,7 @@ pub mod components;
 mod context;
 mod foreach;
 mod node;
+mod rich_text;
 mod text_field;
 
 pub use components::{
@@ -31,6 +32,7 @@ pub use node::{
     ImeEvent, Key, KeyEvent, Layout, Node, PointerEvent,
 };
 pub use text_field::{text_field, text_field_opts, TextFieldOpts};
+pub use rich_text::{rich_text, rich_text_opts, rich_editable_opts, RichTextOpts};
 
 #[cfg(test)]
 mod tests;
