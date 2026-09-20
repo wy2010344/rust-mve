@@ -489,4 +489,138 @@ mod tests {
         let nodes = app.root.nodes();
         assert_eq!(nodes.len(), 2);
     }
+
+    // -----------------------------------------------------------------------
+    // 回归：RedrawTracker + MveApp 完整路径 → 光标移动触发重绘
+    // -----------------------------------------------------------------------
+
+    /// 模拟 runner 的完整路径：RedrawTracker.draw(|scene| app.draw(scene, ...))
+    /// 验证：方向键移动光标 → RecordMemo 重录 Scene。
+    #[test]
+    fn richtext_cursor_move_via_runner_path() {
+        use crate::focus::FocusPath;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        use wy_mve::RichTextOpts;
+
+        let doc = Rc::new(RefCell::new(String::from("hello")));
+        let d1 = Rc::clone(&doc);
+        let d2 = Rc::clone(&doc);
+        let (editor_node, core) = wy_mve::rich_editable_opts(
+            move || d1.borrow().clone(),
+            move |t| *d2.borrow_mut() = t,
+            RichTextOpts::default(),
+        );
+
+        let mut app = MveApp::new(move |cx| {
+            cx.child(editor_node.clone());
+        });
+
+        // 创建 RedrawTracker（模拟 runner）
+        let tracker = crate::redraw_tracker::RedrawTracker::new(Rc::new(|| {}));
+
+        // 第一帧：tracker.record → app.draw → draw_fn 注册信号依赖
+        tracker.draw(|scene| {
+            app.draw(scene, 400.0, 100.0);
+        });
+        assert_eq!(core.borrow().cursor(), 0);
+
+        // 聚焦到编辑器（模拟 Tab 或点击聚焦）
+        let nodes = app.root.nodes();
+        let mut focus_path = FocusPath::new();
+        // 找到编辑器节点的 identity
+        for node in &nodes {
+            if node.focusable {
+                focus_path.push(Rc::clone(&node.identity));
+                break;
+            }
+        }
+        assert!(!focus_path.is_empty(), "应有 focusable 编辑器节点");
+        app.focus.set_focus(focus_path);
+
+        // 设置光标到位置 2（"he|llo"）
+        core.borrow_mut().set_cursor(2);
+        assert_eq!(core.borrow().cursor(), 2);
+
+        // 第二帧：光标变了 → RecordMemo 应重录
+        tracker.draw(|scene| {
+            app.draw(scene, 400.0, 100.0);
+        });
+
+        // 模拟方向键：通过 handle_key_event 走 runner 完整路径
+        let arrow_right = crate::event::KeyEvent {
+            key: crate::event::Key::ArrowRight,
+            pressed: true,
+            ctrl: false,
+            shift: false,
+            alt: false,
+            meta: false,
+        };
+        app.handle_key_event(&arrow_right);
+        assert_eq!(
+            core.borrow().cursor(),
+            3,
+            "handle_key_event 后光标应右移到 3"
+        );
+
+        // 第三帧：anchor/focus 信号变了 → RecordMemo 应重录
+        tracker.draw(|scene| {
+            app.draw(scene, 400.0, 100.0);
+        });
+        assert_eq!(core.borrow().cursor(), 3, "Scene 重录后光标仍在 3");
+
+        // 连续多次移动：验证响应链不会断裂
+        for expected in 4..=5 {
+            let ev = crate::event::KeyEvent {
+                key: crate::event::Key::ArrowRight,
+                pressed: true,
+                ctrl: false,
+                shift: false,
+                alt: false,
+                meta: false,
+            };
+            app.handle_key_event(&ev);
+            assert_eq!(
+                core.borrow().cursor(),
+                expected,
+                "第 {} 次移动",
+                expected - 3
+            );
+            tracker.draw(|scene| {
+                app.draw(scene, 400.0, 100.0);
+            });
+        }
+
+        // 左箭头
+        let arrow_left = crate::event::KeyEvent {
+            key: crate::event::Key::ArrowLeft,
+            pressed: true,
+            ctrl: false,
+            shift: false,
+            alt: false,
+            meta: false,
+        };
+        app.handle_key_event(&arrow_left);
+        assert_eq!(core.borrow().cursor(), 4, "左箭头后光标应回到 4");
+        tracker.draw(|scene| {
+            app.draw(scene, 400.0, 100.0);
+        });
+
+        // 输入字符
+        let char_a = crate::event::KeyEvent {
+            key: crate::event::Key::Char('x'),
+            pressed: true,
+            ctrl: false,
+            shift: false,
+            alt: false,
+            meta: false,
+        };
+        app.handle_key_event(&char_a);
+        assert_eq!(core.borrow().text(), "hellxo", "字符 x 应插入到位置 4");
+        // 注意：insert_text 内部会 set_cursor(5)
+        assert_eq!(core.borrow().cursor(), 5, "插入后光标在 5");
+        tracker.draw(|scene| {
+            app.draw(scene, 400.0, 100.0);
+        });
+    }
 }
