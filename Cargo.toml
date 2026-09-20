@@ -23,7 +23,7 @@ wgpu = "29"
 winit = "0.30"
 
 # 文本
-parley = { version = "0.11", features = ["accesskit"] }
+parley = { version = "0.11", features = ["accesskit", "complex-scripts"] }
 swash = "0.2"
 fontique = "0.11"
 
