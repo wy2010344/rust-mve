@@ -29,6 +29,7 @@ mod batch;
 mod context;
 mod get_;
 mod memo;
+mod record_memo;
 mod signal;
 mod track;
 
@@ -41,6 +42,7 @@ pub use batch::{batch, flush};
 pub use context::reset_signal_global_state;
 pub use get_::{GetValue, NodeId, SetValue};
 pub use memo::{create_memo, Memo};
+pub use record_memo::RecordMemo;
 pub use signal::{
     create_late_signal, create_signal, create_signal_with_comparator, LateSignal, Signal,
     WriteHandle,

@@ -53,10 +53,27 @@ impl<T: Clone + PartialEq + 'static> ValBox for T {
 /// 依赖再读取器：memo 用它重新读取某个依赖的当前值做快照比对。
 ///
 /// 闭包捕获依赖自身，读取时返回类型擦除的值。
+///
+/// `Rc<dyn Fn>` 可克隆（仅递增引用计数），便于在 `collect` 与 relay map 中复用。
 pub(crate) type ReGet = Rc<dyn Fn() -> Box<dyn ValBox>>;
 
 /// 观察者节点的强引用句柄。
 pub(crate) type TrackRef = Rc<dyn TrackDyn>;
+
+/// 一个依赖的完整描述：再读取器 + 依赖源的监听者集合。
+///
+/// 观察者（memo / draw memo）短路时可以拿着 `listeners` 直接重挂叶子边，
+/// 无需重新执行依赖的 `get()`（复刻 Kotlin memo 短路路径的 `for ((k,_) in relays) k()`）。
+#[derive(Clone)]
+pub struct Dep {
+    /// 依赖源节点 ID。
+    pub dep_id: NodeId,
+    /// 值再读取器：重新读取依赖当前值做快照比对。
+    pub reget: ReGet,
+    /// 依赖源的监听者集合：重挂叶子边时往里面登记当前观察者
+    /// （由 wy-engine 的 draw memo 在每帧短路时消费）。
+    pub listeners: Rc<std::cell::RefCell<Vec<NodeId>>>,
+}
 
 /// 观察者节点（TrackEffect / Memo 共同实现）。
 ///
@@ -66,8 +83,16 @@ pub trait TrackDyn: 'static {
     /// 返回观察者自身的节点 ID。
     fn node_id(&self) -> NodeId;
 
-    /// 收集一个依赖快照与再读取器（memo 用它记录 relay map；普通跟踪忽略）。
-    fn collect(&self, dep_id: NodeId, snapshot: Box<dyn ValBox>, reget: ReGet);
+    /// 收集一个依赖（memo 用它记录 relay map；普通跟踪忽略）。
+    fn collect(&self, dep: Dep, snapshot: Box<dyn ValBox>);
+
+    /// 是否收集依赖快照（memo / draw memo 需要；effect 之类的纯监听者不需要）。
+    ///
+    /// 返回 `false` 时，[`register_dep`](crate::context::register_dep) 只登记监听，
+    /// 不构建快照与再读取器，节省热路径分配。
+    fn wants_dep_snapshot(&self) -> bool {
+        true
+    }
 
     /// 重新评估观察者（批量 flush 时由批次调度器调用）。
     fn add_fun(&self);

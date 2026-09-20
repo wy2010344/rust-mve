@@ -7,15 +7,19 @@
 //! 求值采用 relay map：计算时记录每个依赖的 snapshot + 再读取器，
 //! 校验时逐一重新读取，仅当依赖快照整体相等时返回缓存，否则重算。
 //! 配合全局 `state_version` 做 O(1) 短路。
+//!
+//! 短路路径（复刻 Kotlin `Memo.invoke()`）：当有**新的**观察者读取本 memo 时，
+//! 把该观察者重新登记到所有叶子依赖的监听者集合上（Kotlin：`for ((k,_) in relays) k()`），
+//! 保证叶子信号的 `listeners` 始终反映真实依赖，不积累 stale 边。
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::context::{
     bump_global_version, check_memo_cycle, global_version, pop_eval_stack, push_eval_stack,
-    register_dep, with_global,
+    with_current_track, with_global,
 };
-use crate::get_::{GetValue, NodeId, ReGet, TrackDyn, ValBox};
+use crate::get_::{Dep, GetValue, NodeId, ReGet, TrackDyn, ValBox};
 
 /// 值变化回调类型。
 type AfterCallback<T> = Box<dyn Fn(&T)>;
@@ -26,12 +30,12 @@ struct MemoInner<T> {
     self_cell: RefCell<Option<Rc<MemoInner<T>>>>,
     /// 求值闭包（计算可能读取多个信号）。
     compute: Box<dyn Fn() -> T>,
-    /// 依赖再读取器：dep_id -> reget。
-    relays: RefCell<std::collections::HashMap<NodeId, ReGet>>,
+    /// 依赖：dep_id -> 再读取器 + 依赖源的监听者集合。
+    relays: RefCell<std::collections::HashMap<NodeId, Dep>>,
     /// 最近一次计算时的依赖快照。
     last_snap: RefCell<std::collections::HashMap<NodeId, Box<dyn ValBox>>>,
     /// 监听者（依赖本 memo 的观察者）。
-    listeners: RefCell<Vec<NodeId>>,
+    listeners: Rc<RefCell<Vec<NodeId>>>,
     /// 最近一次计算时的全局版本号（用于短路）。
     version: Cell<u64>,
     /// 最近一次缓存值。
@@ -67,7 +71,7 @@ impl<T: Clone + PartialEq + 'static> Memo<T> {
             compute: Box::new(compute),
             relays: RefCell::new(std::collections::HashMap::new()),
             last_snap: RefCell::new(std::collections::HashMap::new()),
-            listeners: RefCell::new(Vec::new()),
+            listeners: Rc::new(RefCell::new(Vec::new())),
             version: Cell::new(0),
             value: RefCell::new(None),
             inited: Cell::new(false),
@@ -89,16 +93,33 @@ impl<T: Clone + PartialEq + 'static> Memo<T> {
             self.validate(version);
         }
 
-        // 2. 注册当前观察者为本 memo 的监听者（若存在）。
+        // 2. 注册当前观察者为本 memo 的监听者（作为依赖来源）。
+        //    叶子边的重挂无需在这里做：本 memo 在**重算**时会重新读取叶子
+        //    并把自己登记回叶子的监听集合；观察者则在此处登记为本 memo 的
+        //    监听者，叶子变化 → memo 重算 → 通知观察者，链路即可延续。
         let dep_id = self.inner.id;
         let inner_c = Rc::clone(&self.inner);
-        let reget: ReGet = Rc::new(move || {
-            // memo 重新读取：调用自身的缓存逻辑（作为依赖来源）
-            Box::new(inner_c.value.borrow().clone().expect("uninit memo"))
+        let listeners = Rc::clone(&self.inner.listeners);
+        crate::context::register_dep(dep_id, listeners, move || {
+            let reget_inner = Rc::clone(&inner_c);
+            let reget: ReGet = Rc::new(move || {
+                // 重新读取时先保证值新鲜（复刻 Kotlin relay `get()` = 完整 invoke）。
+                let v = global_version();
+                if !reget_inner.inited.get() || reget_inner.version.get() != v {
+                    Memo {
+                        inner: Rc::clone(&reget_inner),
+                    }
+                    .validate(v);
+                }
+                Box::new(reget_inner.value.borrow().clone().expect("uninit memo"))
+            });
+            (
+                Box::new(inner_c.value.borrow().clone().expect("uninit memo")),
+                reget,
+            )
         });
-        register_dep(dep_id, self.peek_snapshot(), reget, &self.inner.listeners);
 
-        // 3. 返回缓存值。
+        // 4. 返回缓存值。
         self.inner.value.borrow().clone().expect("uninit memo")
     }
 
@@ -168,9 +189,7 @@ impl<T: Clone + PartialEq + 'static> Memo<T> {
             prev
         });
         push_eval_stack(self.inner.id);
-        let v = crate::context::with_current_track(self_rc as Rc<dyn TrackDyn>, || {
-            (self.inner.compute)()
-        });
+        let v = with_current_track(self_rc as Rc<dyn TrackDyn>, || (self.inner.compute)());
         pop_eval_stack();
         with_global(|g| g.computing = prev_computing);
         v
@@ -183,7 +202,7 @@ impl<T: Clone + PartialEq + 'static> Memo<T> {
             .relays
             .borrow()
             .iter()
-            .map(|(k, v)| (*k, Rc::clone(v)))
+            .map(|(id, dep)| (*id, dep.reget.clone()))
             .collect();
         for (id, reget) in relays {
             let cur = reget();
@@ -200,22 +219,25 @@ impl<T: Clone + PartialEq + 'static> Memo<T> {
         false
     }
 
-    /// 当前缓存快照（作为依赖来源被外层 memo 收集）。
-    fn peek_snapshot(&self) -> Box<dyn ValBox> {
-        Box::new(self.inner.value.borrow().clone().expect("uninit memo"))
-    }
-
-    /// 通知依赖本 memo 的观察者进入批次。
+    /// 通知依赖本 memo 的观察者进入批次，推送后清空监听者集合。
+    ///
+    /// 依赖关系由每次读取重新登记，避免幽灵通知。
     fn notify_listeners(&self) {
         let ids: Vec<NodeId> = self.inner.listeners.borrow().clone();
         with_global(|g| {
             bump_global_version();
+            let target = if g.flushing {
+                &mut g.next_batch
+            } else {
+                &mut g.batch
+            };
             for id in ids {
-                if !g.batch.contains(&id) {
-                    g.batch.push(id);
+                if !target.contains(&id) {
+                    target.push(id);
                 }
             }
         });
+        self.inner.listeners.borrow_mut().clear();
     }
 }
 
@@ -230,8 +252,9 @@ impl<T: Clone + PartialEq + 'static> TrackDyn for MemoInner<T> {
         self.id
     }
 
-    fn collect(&self, dep_id: NodeId, snapshot: Box<dyn ValBox>, reget: ReGet) {
-        self.relays.borrow_mut().insert(dep_id, reget);
+    fn collect(&self, dep: Dep, snapshot: Box<dyn ValBox>) {
+        let dep_id = dep.dep_id;
+        self.relays.borrow_mut().insert(dep_id, dep);
         self.last_snap.borrow_mut().insert(dep_id, snapshot);
     }
 

@@ -7,7 +7,7 @@ use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::rc::Rc;
 
-use crate::context::{bump_global_version, register_dep, with_global};
+use crate::context::{bump_global_version, with_global};
 use crate::get_::{GetValue, NodeId, SetValue};
 
 /// `should_change` 回调：`(old, new) -> bool`，返回 true 表示值变化。
@@ -18,7 +18,10 @@ struct SignalInner<T> {
     /// 当前存储值。
     value: RefCell<T>,
     /// 监听者（观察者节点 ID），依赖 PN 方向：本信号 → 观察者。
-    listeners: RefCell<Vec<NodeId>>,
+    ///
+    /// 用 `Rc` 包装以便注册依赖时把监听集合交给 memo 的 relay map
+    /// （短路重挂叶子边时直接往集合里登记新观察者）。
+    listeners: Rc<RefCell<Vec<NodeId>>>,
     /// 本信号在注册表中的唯一 ID。
     id: NodeId,
     /// 自定义变化判定（`false` 表示值相同不触发通知）。
@@ -79,7 +82,7 @@ impl<T> Signal<T> {
         Self {
             inner: Rc::new(SignalInner {
                 value: RefCell::new(initial),
-                listeners: RefCell::new(Vec::new()),
+                listeners: Rc::new(RefCell::new(Vec::new())),
                 id,
                 should_change: Box::new(should_change),
             }),
@@ -89,19 +92,28 @@ impl<T> Signal<T> {
     /// 读取当前值。
     ///
     /// 若在 memo / track 闭包内调用，会自动把当前观察者注册为依赖。
+    ///
+    /// 无当前观察者时零分配提前返回；观察者为纯监听（effect）时不构建
+    /// 快照/再读取器，由 `register_dep` 的惰性 `build` 保证。
     pub fn get_clone(&self) -> T
     where
         T: Clone + PartialEq + 'static,
     {
         let snapshot = self.inner.value.borrow().clone();
+        if !crate::context::has_current() {
+            return snapshot;
+        }
         let dep_id = self.inner.id;
-
-        // 再读取器：捕获信号自身，供 memo 重查快照用。
-        let inner_c = Rc::clone(&self.inner);
-        let reget: crate::get_::ReGet = Rc::new(move || Box::new(inner_c.value.borrow().clone()));
-
-        let listeners = &self.inner.listeners;
-        register_dep(dep_id, Box::new(snapshot.clone()), reget, listeners);
+        let inner_for_reget = Rc::clone(&self.inner);
+        let inner_for_build = Rc::clone(&self.inner);
+        let listeners = Rc::clone(&self.inner.listeners);
+        crate::context::register_dep(dep_id, listeners, move || {
+            // 再读取器：捕获信号自身，供 memo 重查快照用。
+            let reget: crate::get_::ReGet =
+                Rc::new(move || Box::new(inner_for_reget.value.borrow().clone()));
+            // 快照只在 memo 需要时才构建，避免热路径重复克隆。
+            (Box::new(inner_for_build.value.borrow().clone()), reget)
+        });
         snapshot
     }
 
@@ -130,19 +142,23 @@ impl<T> Signal<T> {
             bump_global_version();
 
             // 把依赖本信号的观察者推入批次队列。
+            // 推送后清空监听者集合（复刻 Kotlin `didSet`）：依赖关系是**短命**的，
+            // 由每次读取时重新登记，避免 stale listener 造成幽灵通知。
             // flush 期间推入 next_batch，避免修改正在迭代的 batch。
-            let listeners = self.inner.listeners.borrow();
             let target = if g.flushing {
                 &mut g.next_batch
             } else {
                 &mut g.batch
             };
-            for &id in listeners.iter() {
-                if !target.contains(&id) {
-                    target.push(id);
+            {
+                let mut listeners = self.inner.listeners.borrow_mut();
+                for &id in listeners.iter() {
+                    if !target.contains(&id) {
+                        target.push(id);
+                    }
                 }
+                listeners.clear();
             }
-            drop(listeners);
 
             // 批次深度为 0（未在显式 batch 内）时，本批完成后立即 flush。
             if g.batch_depth == 0 && !g.batch.is_empty() && !g.flushing {

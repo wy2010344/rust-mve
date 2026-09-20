@@ -1,42 +1,54 @@
-//! 自动重绘追踪器：框架层自动关联信号 → 重绘。
+//! 自动重绘追踪器：帧级绘制缓存 + 信号驱动重绘。
 //!
-//! 复刻 Kotlin `Renderer.signal.collect { didDraw().draw(canvas) }` 模式：
-//! - `draw(f)` 将闭包 `f` 包裹在 effect 上下文中执行
-//! - `f` 中每个 `Signal.get()` 自动注册此 effect 为依赖
-//! - 信号变化 → effect 重跑 → `request_redraw()` → 触发重绘
-//! - 业务代码零 `create_effect`
+//! 复刻 Kotlin `Renderer.signal.collect { didDraw().draw(canvas) }` 模型：
+//! - 用 [`RecordMemo`] 缓存每一帧的 `Scene`（等价 Kotlin `didDraw` memo）；
+//! - 绘制闭包只在**依赖信号变化**时重新执行，其余帧直接复用缓存 Scene，
+//!   不再每次 redraw 都跑 `draw()` / Parley shaping（WS：管道精确更新）；
+//! - 依赖变化且值确实改变时触发 `on_change` → `request_redraw()`，
+//!   由下一帧 `record()` 消费并重挂叶子边。
 
 use std::rc::Rc;
 
-use wy_signal::TrackEffect;
+use wy_render::Scene;
+use wy_signal::RecordMemo;
 
-/// 自动重绘追踪器。
+/// 帧绘制追踪器。
 ///
-/// 等价于 Kotlin 的 `Renderer.signal`：一个根 effect 包裹整个 draw，
-/// 所有信号读取自动追踪，信号变化自动触发重绘。
-#[derive(Clone)]
+/// 等价于 Kotlin 的 `Renderer.signal` + `didDraw` memo 的组合：
+/// `record()` 只在信号变化时重跑绘制闭包，其余帧复用缓存 Scene。
 pub struct RedrawTracker {
-    /// 根 effect：body 只调用 `request_redraw()`，
-    /// 依赖由 `draw()` 中的 `collect` 在 draw 期间注册。
-    effect: TrackEffect,
+    /// 绘制缓存 memo：依赖信号变化 → 重录 Scene。
+    memo: RecordMemo<Scene>,
 }
 
 impl RedrawTracker {
     /// 创建追踪器。
     ///
-    /// `request_redraw` 会在信号变化时被调用，触发下一帧绘制。
+    /// `request_redraw` 会在依赖信号变化时被调用，触发下一帧绘制。
     pub fn new(request_redraw: Rc<dyn Fn()>) -> Self {
-        let effect = TrackEffect::new(move || {
-            request_redraw();
-        });
-        Self { effect }
+        let memo = RecordMemo::new();
+        memo.on_change(request_redraw);
+        Self { memo }
     }
 
-    /// 在追踪上下文中执行闭包（等价于 Kotlin 的 `signal.collect { draw() }`）。
+    /// 记录一帧：在追踪上下文中执行绘制闭包，缓存/复用 Scene。
     ///
-    /// 闭包 `f` 内的所有 `Signal.get()` 自动注册为根 effect 的依赖。
-    /// 信号变化时 effect 重跑 → `request_redraw()` → 下一帧重绘。
-    pub fn draw<R>(&self, f: impl FnOnce() -> R) -> R {
-        self.effect.collect(f)
+    /// 闭包 `f` 内的所有 `Signal.get()` 自动注册为依赖。
+    /// 依赖变化时 effect 重跑 → `request_redraw()` → 下一帧重绘。
+    pub fn draw(&self, f: impl FnOnce(&mut Scene)) {
+        self.memo.record(f);
+    }
+
+    /// 读取缓存的 Scene 引用（供 Vello 翻译/提交）。
+    pub fn scene(&self) -> std::cell::Ref<'_, Scene> {
+        self.memo.borrow()
+    }
+}
+
+impl Clone for RedrawTracker {
+    fn clone(&self) -> Self {
+        Self {
+            memo: self.memo.clone(),
+        }
     }
 }

@@ -660,3 +660,93 @@ fn reset_clears_global_state() {
     s2.set(1);
     assert_eq!(calls2.get(), 2, "reset 后新 effect 正常工作");
 }
+
+// ═══════════════════════════════════════════════
+// RecordMemo：绘制缓存（复刻 Kotlin didDraw）
+// ═══════════════════════════════════════════════
+
+/// 记录目标模拟：Vec<i32>，记录闭包往里面追加计数。
+#[derive(Default)]
+struct Recorder(Vec<i32>);
+
+#[test]
+fn record_memo_records_only_when_dependency_changes() {
+    let count = create_signal(0);
+    let runs = Rc::new(Cell::new(0));
+    let memo = wy_signal::RecordMemo::<Recorder>::new();
+
+    let count2 = count.clone();
+    let runs2 = runs.clone();
+    memo.record(move |r: &mut Recorder| {
+        runs2.set(runs2.get() + 1);
+        let v = count2.get();
+        r.0.clear();
+        r.0.push(v);
+    });
+
+    // 首次 record 记录
+    assert_eq!(runs.get(), 1);
+    assert_eq!(memo.borrow().0, vec![0]);
+
+    // 同版本再 record：短路径复用，不重跑闭包
+    memo.record(|_| {});
+    assert_eq!(runs.get(), 1, "无依赖变化不应重跑");
+    assert_eq!(memo.borrow().0, vec![0]);
+
+    // 依赖变化后 record：重跑
+    count.set(5);
+    let count2 = count.clone();
+    let runs2 = runs.clone();
+    memo.record(move |r: &mut Recorder| {
+        runs2.set(runs2.get() + 1);
+        let v = count2.get();
+        r.0.clear();
+        r.0.push(v);
+    });
+    assert_eq!(runs.get(), 2);
+    assert_eq!(memo.borrow().0, vec![5]);
+}
+
+#[test]
+fn record_memo_on_change_fires_when_dep_pushed() {
+    let count = create_signal(1);
+    let memo = wy_signal::RecordMemo::<Recorder>::new();
+
+    let count2 = count.clone();
+    memo.record(move |r: &mut Recorder| {
+        let v = count2.get();
+        r.0.clear();
+        r.0.push(v);
+    });
+
+    let redraws = Rc::new(Cell::new(0));
+    memo.on_change(Rc::new({
+        let redraws = redraws.clone();
+        move || {
+            redraws.set(redraws.get() + 1);
+        }
+    }));
+
+    // 无关信号变化不触发（本 memo 只挂在自身依赖叶子上）
+    let unrelated = create_signal(false);
+    unrelated.set(true);
+    assert_eq!(redraws.get(), 0, "无关信号不应触发 on_change");
+
+    // 依赖信号变化 → 推入批次 → add_fun → on_change
+    count.set(10);
+    assert_eq!(redraws.get(), 1, "依赖变化应触发 on_change");
+
+    // 再次 record 消费变化并把边重挂回叶子
+    let count2 = count.clone();
+    memo.record(move |r: &mut Recorder| {
+        let v = count2.get();
+        r.0.clear();
+        r.0.push(v);
+    });
+    assert_eq!(memo.borrow().0, vec![10]);
+    assert_eq!(redraws.get(), 1);
+
+    // 重挂后下一次变化依旧能触发（多轮循环不断链）
+    count.set(20);
+    assert_eq!(redraws.get(), 2, "重挂后依赖变化仍应触发");
+}

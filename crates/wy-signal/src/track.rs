@@ -7,7 +7,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::context::with_global;
-use crate::get_::{GetValue, NodeId, ReGet, TrackDyn, ValBox};
+use crate::get_::{Dep, GetValue, NodeId, TrackDyn, ValBox};
 
 // ═══════════════════════════════════════════════
 // TrackEffect：副作用观察者
@@ -105,8 +105,13 @@ impl TrackDyn for TrackEffectInner {
         self.id
     }
 
-    fn collect(&self, _dep_id: NodeId, _snapshot: Box<dyn ValBox>, _reget: ReGet) {
+    fn collect(&self, _dep: Dep, _snapshot: Box<dyn ValBox>) {
         // TrackEffect 通过"成为信号监听者"来响应，无需 relay map。
+    }
+
+    fn wants_dep_snapshot(&self) -> bool {
+        // 副作用观察者不比对快照，省掉热路径的 `Rc`/`Box` 分配。
+        false
     }
 
     fn add_fun(&self) {
@@ -219,7 +224,11 @@ impl<T: Clone + PartialEq + 'static> TrackDyn for TrackInner<T> {
         self.id
     }
 
-    fn collect(&self, _dep_id: NodeId, _snapshot: Box<dyn ValBox>, _reget: ReGet) {}
+    fn collect(&self, _dep: Dep, _snapshot: Box<dyn ValBox>) {}
+
+    fn wants_dep_snapshot(&self) -> bool {
+        false
+    }
 
     fn add_fun(&self) {
         if self.disposed.get() {

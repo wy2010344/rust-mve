@@ -454,6 +454,12 @@ impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
                 {
                     self.app.handle_key_event(&key_event);
                 }
+                // 方向键/全选/撤销等可能只改光标、选区（不触发文本 on_change），
+                // 必须无条件重绘，否则视图停留在旧帧（光标/高亮不更新）。
+                if let Some(window) = &self.window {
+                    self.needs_redraw.set(true);
+                    window.request_redraw();
+                }
             }
             WindowEvent::Ime(ime) => {
                 // 输入法事件 → 统一 ImeEvent 转发给应用（聚焦节点消费）
@@ -545,27 +551,39 @@ impl<A: WyApp> AppState<A> {
             return;
         }
 
-        // 1. 调用应用绘制，生成高层 Scene（通过 RedrawTracker 自动追踪信号依赖）
-        let mut scene = Scene::new();
-        if let Some(tracker) = &self.redraw_tracker {
-            let tracker = tracker.clone();
-            tracker.draw(|| {
-                self.app.draw(&mut scene, width as f32, height as f32);
-            });
-            if let Some(tree) = self.app.widget_tree() {
-                tree.draw_scene(&mut scene);
+        // 1. 生成高层 Scene（通过 RedrawTracker 的绘制 memo 缓存 + 信号追踪）。
+        //    有 tracker 时：绘制闭包在依赖变化时才会重跑，其余帧复用缓存 Scene；
+        //    无 tracker 时：每次直接重建（兼容无追踪的简单绘制路径）。
+        let tracker_guard = self.redraw_tracker.clone();
+        let (w, h) = (width as f32, height as f32);
+        let mut owned_scene = Scene::new();
+        let tracked: Option<std::cell::Ref<'_, Scene>> = match &tracker_guard {
+            Some(tracker) => {
+                let app = &mut self.app;
+                tracker.draw(|scene_out: &mut Scene| {
+                    app.draw(scene_out, w, h);
+                    if let Some(tree) = app.widget_tree() {
+                        tree.draw_scene(scene_out);
+                    }
+                });
+                Some(tracker.scene())
             }
-        } else if let Some(tree) = self.app.widget_tree() {
-            tree.draw_scene(&mut scene);
-        } else {
-            self.app.draw(&mut scene, width as f32, height as f32);
-        }
+            None => {
+                if let Some(tree) = self.app.widget_tree() {
+                    tree.draw_scene(&mut owned_scene);
+                } else {
+                    self.app.draw(&mut owned_scene, w, h);
+                }
+                None
+            }
+        };
+        let scene_ref: &Scene = tracked.as_deref().unwrap_or(&owned_scene);
 
         // 2. 翻译到 Vello Scene（scale = 设备像素比，坐标统一放大到物理像素）
         let mut vello_scene = vello::Scene::new();
         let scale = window.scale_factor() as f32;
         vello_executor::execute_scene(
-            &scene,
+            scene_ref,
             &mut vello_scene,
             &mut self.font_cx,
             &mut self.layout_cx,
