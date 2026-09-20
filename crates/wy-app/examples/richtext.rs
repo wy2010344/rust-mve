@@ -74,7 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let mut core = c.borrow_mut();
                             let (s, e) = (core.sel_start(), core.sel_end());
                             if s < e {
-                                core.buffer_mut().style_range(
+                                core.style_range(
                                     s,
                                     e,
                                     Some(TextStyle::normal().with_color(0xFFFF0000)),
@@ -93,7 +93,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let mut core = c.borrow_mut();
                         let (s, e) = (core.sel_start(), core.sel_end());
                         if s < e {
-                            core.buffer_mut().style_range(
+                            core.style_range(
                                 s,
                                 e,
                                 Some(TextStyle::normal().with_color(0xFF0000FF)),
@@ -110,7 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let mut core = c.borrow_mut();
                         let (s, e) = (core.sel_start(), core.sel_end());
                         if s < e {
-                            core.buffer_mut().style_range(s, e, None);
+                            core.style_range(s, e, None);
                         }
                     },
                 ));

@@ -482,6 +482,12 @@ impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
                             .handle_ime_event(&wy_mve::ImeEvent::Commit(text.clone()));
                     }
                 }
+                // 组合态/提交可能只改光标/选区（不触发文本 on_change），
+                // 必须无条件重绘，否则光标/下划线不更新。
+                if let Some(window) = &self.window {
+                    self.needs_redraw.set(true);
+                    window.request_redraw();
+                }
             }
             _ => {}
         }

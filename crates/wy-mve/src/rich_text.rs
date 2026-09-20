@@ -7,12 +7,14 @@
 //! - **值同步**：编辑后写回外部 `on_change`；外部 `value` 变化时重灌编辑器
 //!
 //! 与 Kotlin 相同，编辑内核对外暴露：`rich_editable_opts` 返回共享 `Rc<RefCell<EditCore>>`，
-//! 可在组件外直接调用 `core.borrow_mut().buffer_mut().style_range(start, end, style)` 设置样式。
+//! 可在组件外直接调用 `core.borrow_mut().style_range(start, end, style)` 设置样式
+//! （样式、光标、选区、组合态变化都会触发局部重绘）。
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use wy_render::{Color, Point, Rect, Scene};
+use wy_signal::{GetValue, SetValue, Signal};
 use wy_text::EditCore;
 
 use crate::node::{ImeEvent, Key, KeyEvent, Node, PointerEvent};
@@ -81,8 +83,8 @@ impl Default for RichTextOpts {
 
 /// 组件共享运行时状态。
 struct SharedState {
-    /// 是否聚焦。
-    focused: bool,
+    /// 是否聚焦（信号承载：绘制依赖它，点击聚焦才会触发重绘）。
+    focused: Signal<bool>,
     /// 上次已同步的外部文本（防回环与重复重灌）。
     last_synced: String,
 }
@@ -105,7 +107,7 @@ pub fn rich_text_opts(
 ///
 /// ```ignore
 /// let (node, core) = rich_editable_opts(move || doc.get(), move |t| doc.set(t), opts);
-/// core.borrow_mut().buffer_mut().style_range(0, 5, Some(bold_style));
+/// core.borrow_mut().style_range(0, 5, Some(bold_style));
 /// ```
 pub fn rich_editable_opts(
     value: impl Fn() -> String + 'static,
@@ -116,7 +118,7 @@ pub fn rich_editable_opts(
     let initial = value();
     let core: Rc<RefCell<EditCore>> = Rc::new(RefCell::new(EditCore::with_text(&initial)));
     let shared: Shared = Rc::new(RefCell::new(SharedState {
-        focused: false,
+        focused: Signal::new(false),
         last_synced: initial.clone(),
     }));
     {
@@ -139,7 +141,7 @@ pub fn rich_editable_opts(
             let ext = value();
             if ext != s.last_synced {
                 let mut c = core.borrow_mut();
-                c.buffer_mut().write_text(ext.clone());
+                c.replace_text(ext.clone());
                 let new_len = c.text_len();
                 c.set_cursor(new_len);
                 s.last_synced = ext;
@@ -158,8 +160,10 @@ pub fn rich_editable_opts(
                 return;
             };
             sync();
-            let focused = shared.borrow().focused;
+            let focused = shared.borrow().focused.get();
             let core = core.borrow();
+            // 追踪缓冲内容变化（文本/样式段直接写 buffer 时通过 revision 感知）
+            let _revision = core.revision();
             let border = if focused {
                 opts.focus_border_color
             } else {
@@ -266,7 +270,7 @@ pub fn rich_editable_opts(
         let shared = Rc::clone(&shared);
         let opts = Rc::clone(&opts);
         Rc::new(move |event: &mut PointerEvent| {
-            shared.borrow_mut().focused = true;
+            shared.borrow_mut().focused.set(true);
             let mut core = core.borrow_mut();
             let display_text = core.display_text();
             let display_idx = cursor_pos_from_x(&display_text, opts.font_size, event.x - PAD_X);
@@ -673,10 +677,25 @@ mod tests {
         let mut c = core("hello");
         c.set_cursor(5);
         let bold = wy_text::TextStyle::normal().with_font_weight(700);
-        c.buffer_mut().style_range(0, 5, Some(bold));
+        c.style_range(0, 5, Some(bold));
         assert_eq!(c.buffer().style_at(2).unwrap().font_weight, 700);
         // Kotlin coerceIn(0, len-1)：style_at(5) → index 4，仍是粗体
         assert_eq!(c.buffer().style_at(5).unwrap().font_weight, 700);
+    }
+
+    #[test]
+    fn style_range_bumps_revision() {
+        let mut c = core("hello");
+        let before = c.revision();
+        c.style_range(
+            0,
+            5,
+            Some(wy_text::TextStyle::normal().with_color(0xFFFF0000)),
+        );
+        assert!(
+            c.revision() > before,
+            "样式写入必须递增 revision 以触发重绘"
+        );
     }
 
     #[test]
@@ -694,7 +713,7 @@ mod tests {
             RichTextOpts::default(),
         );
         // 组件外直接操作样式段
-        core.borrow_mut().buffer_mut().style_range(
+        core.borrow_mut().style_range(
             0,
             5,
             Some(wy_text::TextStyle::normal().with_color(0xFFFF0000)),
@@ -706,5 +725,122 @@ mod tests {
         assert!(node.focusable);
         assert!(node.ime_fn.is_some());
         assert!(node.on_down_fn.is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // 回归：绘制 memo（RedrawTracker = RecordMemo<Scene>）必须感知编辑器状态
+    // -----------------------------------------------------------------------
+
+    /// 在 `RecordMemo<Scene>` 追踪上下文中重录一帧，返回本次是否真正重跑 compute。
+    fn record_frame(
+        tracker: &wy_signal::RecordMemo<Scene>,
+        node: &Node,
+        draws: &std::cell::Cell<usize>,
+    ) {
+        tracker.record(|scene: &mut Scene| {
+            draws.set(draws.get() + 1);
+            node.run_draw(scene);
+        });
+    }
+
+    #[test]
+    fn cursor_move_retriggers_draw_memo() {
+        // 用户报告的核心 bug：方向键只改光标、不改文本 → 不触发 on_change，
+        // 旧实现短路复用缓存 Scene，光标不动。信号化后必须重录。
+        use std::cell::Cell;
+        use wy_signal::RecordMemo;
+
+        let doc = Rc::new(RefCell::new(String::from("hello")));
+        let (node, core) = rich_editable_opts(
+            {
+                let d = Rc::clone(&doc);
+                move || d.borrow().clone()
+            },
+            {
+                let d = Rc::clone(&doc);
+                move |t| *d.borrow_mut() = t
+            },
+            RichTextOpts::default(),
+        );
+        let tracker = RecordMemo::<Scene>::new();
+        let draws = Cell::new(0);
+
+        record_frame(&tracker, &node, &draws);
+        assert_eq!(draws.get(), 1, "首次录制");
+        assert_eq!(core.borrow().cursor(), 0);
+
+        // 右箭头：仅移动光标（anchor/focus 信号变化），文本不变
+        let mut ev = KeyEvent {
+            key: Key::ArrowRight,
+            ctrl: false,
+            shift: false,
+            alt: false,
+            meta: false,
+        };
+        assert!(node.key_fn.as_ref().unwrap()(&mut ev));
+        assert_eq!(core.borrow().cursor(), 1);
+
+        record_frame(&tracker, &node, &draws);
+        assert_eq!(draws.get(), 2, "光标移动必须触发绘制 memo 重录");
+    }
+
+    #[test]
+    fn click_focus_retriggers_draw_memo() {
+        // 点击聚焦只改 focused 信号 → 边框/光标应重绘。
+        use std::cell::Cell;
+        use wy_signal::RecordMemo;
+
+        let doc = Rc::new(RefCell::new(String::from("hi")));
+        let (node, _core) = rich_editable_opts(
+            {
+                let d = Rc::clone(&doc);
+                move || d.borrow().clone()
+            },
+            {
+                let d = Rc::clone(&doc);
+                move |t| *d.borrow_mut() = t
+            },
+            RichTextOpts::default(),
+        );
+        let tracker = RecordMemo::<Scene>::new();
+        let draws = Cell::new(0);
+
+        record_frame(&tracker, &node, &draws);
+        assert_eq!(draws.get(), 1);
+
+        let mut pe = PointerEvent::new(20.0, 20.0);
+        node.on_down_fn.as_ref().unwrap()(&mut pe);
+
+        record_frame(&tracker, &node, &draws);
+        assert_eq!(draws.get(), 2, "点击聚焦必须触发绘制 memo 重录");
+    }
+
+    #[test]
+    fn external_signal_text_change_retriggers_and_rehydrates() {
+        // 外部值信号变化 → memo 依赖失效 → 重录时 sync 重灌内核文本。
+        // 该路径在 compute 内写信号（revision/anchor），须无 panic。
+        use std::cell::Cell;
+        use wy_signal::{RecordMemo, Signal};
+
+        let doc = Signal::new(String::from("a"));
+        let d1 = doc.clone();
+        let d2 = doc.clone();
+        let (node, core) = rich_editable_opts(
+            move || d1.get(),
+            move |t| d2.set(t),
+            RichTextOpts::default(),
+        );
+        let tracker = RecordMemo::<Scene>::new();
+        let draws = Cell::new(0);
+
+        record_frame(&tracker, &node, &draws);
+        assert_eq!(draws.get(), 1);
+        assert_eq!(core.borrow().text(), "a");
+
+        doc.set(String::from("hello"));
+
+        record_frame(&tracker, &node, &draws);
+        assert_eq!(draws.get(), 2, "外部信号文本变化必须触发重录");
+        assert_eq!(core.borrow().text(), "hello", "sync 重灌内核文本");
     }
 }

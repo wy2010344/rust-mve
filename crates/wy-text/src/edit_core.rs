@@ -9,8 +9,9 @@
 //!   由组件层在绘制时调用，保证纯逻辑可测。
 
 use crate::editing::TextBuffer;
-use crate::TextSpan;
+use crate::{TextSpan, TextStyle};
 use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
+use wy_signal::{GetValue, SetValue, Signal};
 
 // ---------------------------------------------------------------------------
 // 字符索引 ↔ 字节索引
@@ -367,17 +368,18 @@ impl UndoRedo {
 pub struct EditCore {
     buffer: TextBuffer,
 
-    // 本地光标/选区：caretPair, (anchor, focus)，None = 未定位
-    anchor: Option<usize>,
-    focus: Option<usize>,
+    // 本地光标/选区：caretPair, (anchor, focus)，None = 未定位。
+    // 用信号承载，绘制 memo 读取时被追踪为依赖（复刻 Kotlin `caretPair`）。
+    anchor: Signal<Option<usize>>,
+    focus: Signal<Option<usize>>,
 
     // 显示
     placeholder: String,
     obscure_text: bool,
 
-    // IME 组合态
-    composing_text: String,
-    composing_cursor_pos: usize,
+    // IME 组合态（信号承载，绘制依赖追踪）
+    composing_text: Signal<String>,
+    composing_cursor_pos: Signal<usize>,
     composition_base: Option<(usize, String)>,
 
     // 垂直导航保持列
@@ -385,6 +387,11 @@ pub struct EditCore {
 
     // 撤销栈
     undo: UndoRedo,
+
+    // 修订号：一切影响**绘制内容**的变更（文本写入、样式段、占位/掩码开关）
+    // 都递增它。`buffer` 本身不是信号，绘制 memo 通过读取 `revision()` 感知
+    // 其内容变化（覆盖外部 `buffer_mut()`/`style_range` 等直接写）。
+    revision: Signal<u64>,
 
     // 行为标志
     pub single_line: bool,
@@ -403,15 +410,16 @@ impl EditCore {
     pub fn with_text(text: impl Into<String>) -> Self {
         Self {
             buffer: TextBuffer::from_plain(text),
-            anchor: None,
-            focus: None,
+            anchor: Signal::new(None),
+            focus: Signal::new(None),
             placeholder: String::new(),
             obscure_text: false,
-            composing_text: String::new(),
-            composing_cursor_pos: 0,
+            composing_text: Signal::new(String::new()),
+            composing_cursor_pos: Signal::new(0),
             composition_base: None,
             preferred_x: f32::NAN,
             undo: UndoRedo::new(100),
+            revision: Signal::new(0),
             single_line: false,
             max_history_size: 100,
         }
@@ -421,8 +429,41 @@ impl EditCore {
         &self.buffer
     }
 
+    /// 直接访问文本/样式缓冲。
+    ///
+    /// 注意：此通道绕过修订号递增，**直接写不会触发绘制**。若确实需要绕过
+    /// [`EditCore::style_range`] 直接改缓冲，请在写完后调用 [`EditCore::notify_dirty`]，
+    /// 否则绘制 memo 复用旧场景，画面不更新。
     pub fn buffer_mut(&mut self) -> &mut TextBuffer {
         &mut self.buffer
+    }
+
+    /// 设置样式段，并递增修订号触发重绘（Kotlin `styleRange` 的推荐入口）。
+    ///
+    /// 这是写样式的首选路径：替代 `buffer_mut().style_range(...) + notify_dirty()`。
+    pub fn style_range(&mut self, start: usize, end: usize, style: Option<TextStyle>) {
+        self.buffer.style_range(start, end, style);
+        self.bump_revision();
+    }
+
+    /// 整体替换文本（Kotlin `rawText` 重灌路径），并递增修订号。
+    pub fn replace_text(&mut self, text: impl Into<String>) {
+        self.buffer.write_text(text.into());
+        self.bump_revision();
+    }
+
+    /// 手动通知"缓冲已被外部直接修改"，使绘制 memo 失效并重录。
+    pub fn notify_dirty(&mut self) {
+        self.bump_revision();
+    }
+
+    /// 当前修订号。绘制期读取它以把缓冲内容变化登记为依赖。
+    pub fn revision(&self) -> u64 {
+        self.revision.get()
+    }
+
+    fn bump_revision(&mut self) {
+        self.revision.set(self.revision.get().wrapping_add(1));
     }
 
     // -----------------------------------------------------------------------
@@ -442,37 +483,42 @@ impl EditCore {
     // -----------------------------------------------------------------------
 
     pub fn anchor(&self) -> Option<usize> {
-        self.anchor
+        self.anchor.get()
     }
 
     pub fn focus(&self) -> Option<usize> {
-        self.focus
+        self.focus.get()
     }
 
     /// 当前插入点位置（字符索引）；未定位返回 0。
     pub fn cursor(&self) -> usize {
-        self.anchor.unwrap_or(0).min(self.text_len())
+        self.anchor.get().unwrap_or(0).min(self.text_len())
     }
 
     pub fn has_selection(&self) -> bool {
-        self.anchor.zip(self.focus).is_some_and(|(a, f)| a != f)
+        self.anchor
+            .get()
+            .zip(self.focus.get())
+            .is_some_and(|(a, f)| a != f)
     }
 
     pub fn sel_start(&self) -> usize {
         self.anchor
-            .zip(self.focus)
+            .get()
+            .zip(self.focus.get())
             .map_or(0, |(a, f)| a.min(f).min(self.text_len()))
     }
 
     pub fn sel_end(&self) -> usize {
         self.anchor
-            .zip(self.focus)
+            .get()
+            .zip(self.focus.get())
             .map_or(0, |(a, f)| a.max(f).min(self.text_len()))
     }
 
     /// 扩选起点：已定位用 anchor，否则塌缩为光标。
     fn sel_anchor(&self) -> usize {
-        self.anchor.unwrap_or_else(|| self.cursor())
+        self.anchor.get().unwrap_or_else(|| self.cursor())
     }
 
     // -----------------------------------------------------------------------
@@ -481,15 +527,15 @@ impl EditCore {
 
     pub fn set_cursor(&mut self, idx: usize) {
         let c = idx.min(self.text_len());
-        self.anchor = Some(c);
-        self.focus = Some(c);
+        self.anchor.set(Some(c));
+        self.focus.set(Some(c));
     }
 
     pub fn extend_to(&mut self, pos: usize) {
         let p = pos.min(self.text_len());
         let a = self.sel_anchor();
-        self.anchor = Some(a);
-        self.focus = Some(p);
+        self.anchor.set(Some(a));
+        self.focus.set(Some(p));
     }
 
     pub fn move_to(&mut self, pos: usize, extend: bool) {
@@ -502,8 +548,8 @@ impl EditCore {
 
     pub fn collapse_selection(&mut self) {
         if self.has_selection() {
-            let a = self.anchor.unwrap_or(0);
-            self.focus = Some(a);
+            let a = self.anchor.get().unwrap_or(0);
+            self.focus.set(Some(a));
         }
     }
 
@@ -513,6 +559,7 @@ impl EditCore {
 
     fn apply_text(&mut self, new_text: String) {
         self.buffer.write_text(new_text);
+        self.bump_revision();
     }
 
     // -----------------------------------------------------------------------
@@ -703,31 +750,31 @@ impl EditCore {
     }
 
     pub fn select_left(&mut self) {
-        let f = self.focus.unwrap_or(0).min(self.text_len());
+        let f = self.focus.get().unwrap_or(0).min(self.text_len());
         if f > 0 {
             let a = self.sel_anchor();
-            self.anchor = Some(a);
-            self.focus = Some(grapheme_prev(self.text(), f));
+            self.anchor.set(Some(a));
+            self.focus.set(Some(grapheme_prev(self.text(), f)));
         }
     }
 
     pub fn select_right(&mut self) {
-        let f = self.focus.unwrap_or(0).min(self.text_len());
+        let f = self.focus.get().unwrap_or(0).min(self.text_len());
         if f < self.text_len() {
             let a = self.sel_anchor();
-            self.anchor = Some(a);
-            self.focus = Some(grapheme_next(self.text(), f));
+            self.anchor.set(Some(a));
+            self.focus.set(Some(grapheme_next(self.text(), f)));
         }
     }
 
     pub fn select_all(&mut self) {
-        self.anchor = Some(0);
-        self.focus = Some(self.text_len());
+        self.anchor.set(Some(0));
+        self.focus.set(Some(self.text_len()));
     }
 
     pub fn select_range(&mut self, start: usize, end: usize) {
-        self.anchor = Some(start.min(self.text_len()));
-        self.focus = Some(end.min(self.text_len()));
+        self.anchor.set(Some(start.min(self.text_len())));
+        self.focus.set(Some(end.min(self.text_len())));
     }
 
     pub fn move_prev_word(&mut self) {
@@ -742,18 +789,18 @@ impl EditCore {
 
     pub fn select_prev_word(&mut self) {
         self.preferred_x = f32::NAN;
-        let f = self.focus.unwrap_or(0).min(self.text_len());
+        let f = self.focus.get().unwrap_or(0).min(self.text_len());
         let a = self.sel_anchor();
-        self.anchor = Some(a);
-        self.focus = Some(word_prev(self.text(), f));
+        self.anchor.set(Some(a));
+        self.focus.set(Some(word_prev(self.text(), f)));
     }
 
     pub fn select_next_word(&mut self) {
         self.preferred_x = f32::NAN;
-        let f = self.focus.unwrap_or(0).min(self.text_len());
+        let f = self.focus.get().unwrap_or(0).min(self.text_len());
         let a = self.sel_anchor();
-        self.anchor = Some(a);
-        self.focus = Some(word_next(self.text(), f));
+        self.anchor.set(Some(a));
+        self.focus.set(Some(word_next(self.text(), f)));
     }
 
     // ---------- 行/文档级导航（需 layout 回调） ----------
@@ -774,22 +821,22 @@ impl EditCore {
 
     pub fn select_home(&mut self, line_range: Option<&dyn Fn(usize) -> Option<(usize, usize)>>) {
         self.preferred_x = f32::NAN;
-        let f = self.focus.unwrap_or(0).min(self.text_len());
+        let f = self.focus.get().unwrap_or(0).min(self.text_len());
         let lr = line_range.and_then(|func| func(f));
         let target = lr.map_or(0, |(s, _)| s);
         let a = self.sel_anchor();
-        self.anchor = Some(a);
-        self.focus = Some(target);
+        self.anchor.set(Some(a));
+        self.focus.set(Some(target));
     }
 
     pub fn select_end(&mut self, line_range: Option<&dyn Fn(usize) -> Option<(usize, usize)>>) {
         self.preferred_x = f32::NAN;
-        let f = self.focus.unwrap_or(0).min(self.text_len());
+        let f = self.focus.get().unwrap_or(0).min(self.text_len());
         let lr = line_range.and_then(|func| func(f));
         let target = lr.map_or(self.text_len(), |(_, e)| e);
         let a = self.sel_anchor();
-        self.anchor = Some(a);
-        self.focus = Some(target);
+        self.anchor.set(Some(a));
+        self.focus.set(Some(target));
     }
 
     pub fn move_doc_start(&mut self) {
@@ -873,15 +920,15 @@ impl EditCore {
     // -----------------------------------------------------------------------
 
     pub fn in_composing(&self) -> bool {
-        !self.composing_text.is_empty()
+        !self.composing_text.get().is_empty()
     }
 
-    pub fn composing_text(&self) -> &str {
-        &self.composing_text
+    pub fn composing_text(&self) -> String {
+        self.composing_text.get()
     }
 
     pub fn composing_cursor_pos(&self) -> usize {
-        self.composing_cursor_pos
+        self.composing_cursor_pos.get()
     }
 
     /// 组合区间起点 = compositionBase.0 或当前光标；字符索引。
@@ -894,7 +941,7 @@ impl EditCore {
 
     /// 组合区间长度 = composing_text 长度。
     pub fn composing_length(&self) -> usize {
-        self.composing_text.chars().count()
+        self.composing_text.get().chars().count()
     }
 
     /// 平台上报组合文本（复刻 `onComposing`）。
@@ -904,14 +951,14 @@ impl EditCore {
             return;
         }
         // absorbGlobalSelection：纯逻辑层无全局会话，未定位则从 0 开始
-        if self.anchor.is_none() {
-            self.anchor = Some(0);
-            self.focus = Some(0);
+        if self.anchor.get().is_none() {
+            self.anchor.set(Some(0));
+            self.focus.set(Some(0));
         }
         let cur = self.text().to_string();
         let cur_len = cur.chars().count();
         let (start, win_len) = if let Some((ref base, ref _orig)) = self.composition_base {
-            (*base, self.composing_text.chars().count())
+            (*base, self.composing_text.get().chars().count())
         } else {
             let (s, e) = if self.has_selection() {
                 (self.sel_start(), self.sel_end())
@@ -933,16 +980,17 @@ impl EditCore {
         );
         self.apply_text(new_text);
         self.set_cursor(start + text.chars().count());
-        self.composing_text = text.to_string();
-        self.composing_cursor_pos = cursor_pos.min(text.chars().count());
+        self.composing_text.set(text.to_string());
+        self.composing_cursor_pos
+            .set(cursor_pos.min(text.chars().count()));
     }
 
     /// 结束组合态。[restore]=true 还原被替换原文（取消语义）；false 仅清标记保留文本。
     pub fn end_composition(&mut self, restore: bool) {
         let base = self.composition_base.take();
-        let win_len = self.composing_length();
-        self.composing_text.clear();
-        self.composing_cursor_pos = 0;
+        let win_len = self.composing_text.get().chars().count();
+        self.composing_text.set(String::new());
+        self.composing_cursor_pos.set(0);
         self.preferred_x = f32::NAN;
         if !restore {
             return;
@@ -979,6 +1027,7 @@ impl EditCore {
     }
     pub fn set_placeholder(&mut self, s: impl Into<String>) {
         self.placeholder = s.into();
+        self.bump_revision();
     }
 
     pub fn obscure_text(&self) -> bool {
@@ -986,6 +1035,7 @@ impl EditCore {
     }
     pub fn set_obscure_text(&mut self, v: bool) {
         self.obscure_text = v;
+        self.bump_revision();
     }
 
     /// 显示文本：占位 / 掩码 / 普通（tab→4 空格）。

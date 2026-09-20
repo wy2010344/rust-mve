@@ -13,6 +13,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use wy_render::{Color, Point, Rect, Scene};
+use wy_signal::{GetValue, SetValue, Signal};
 use wy_text::EditableParagraph;
 
 use crate::node::{ImeEvent, Key, KeyEvent, Node, PointerEvent};
@@ -79,10 +80,20 @@ impl Default for TextFieldOpts {
 struct SharedState {
     /// 编辑内核（真源）。
     editable: EditableParagraph,
-    /// 是否聚焦。
-    focused: bool,
+    /// 是否聚焦（信号承载：绘制依赖它，点击聚焦才会触发重绘）。
+    focused: Signal<bool>,
+    /// 状态修订号：Parley 内核（光标/选区/组合态）不是信号，本组件在每次
+    /// 事件处理后递增它，供绘制 memo 感知内核状态变化（否则复用缓存 Scene）。
+    state_rev: Signal<u64>,
     /// 上次已同步的外部文本（防回环与重复重灌）。
     last_synced: String,
+}
+
+impl SharedState {
+    /// 标记内核状态已变化，使绘制 memo 失效并重录。
+    fn mark_dirty(&mut self) {
+        self.state_rev.set(self.state_rev.get().wrapping_add(1));
+    }
 }
 
 type Shared = Rc<RefCell<SharedState>>;
@@ -110,7 +121,8 @@ pub fn text_field_opts(
     let font_size = opts.font_size;
     let shared: Shared = Rc::new(RefCell::new(SharedState {
         editable: EditableParagraph::new(font_size),
-        focused: false,
+        focused: Signal::new(false),
+        state_rev: Signal::new(0),
         last_synced: initial.clone(),
     }));
     {
@@ -132,6 +144,7 @@ pub fn text_field_opts(
             if ext != s.last_synced {
                 s.editable.replace_with(&ext);
                 s.last_synced = ext;
+                s.mark_dirty();
             }
         })
     };
@@ -147,7 +160,9 @@ pub fn text_field_opts(
             };
             sync();
             let s = shared.borrow();
-            let border = if s.focused {
+            // 追踪内核状态变化（Parley 光标/选区/组合态非信号，经 state_rev 桥接）
+            let _state_rev = s.state_rev.get();
+            let border = if s.focused.get() {
                 opts.focus_border_color
             } else {
                 opts.border_color
@@ -197,7 +212,7 @@ pub fn text_field_opts(
             }
 
             // 光标（聚焦 + 未组合时显示）
-            if s.focused && !s.editable.is_composing() {
+            if s.focused.get() && !s.editable.is_composing() {
                 let cx = PAD_X + cursor_x(&display, opts.font_size, cursor);
                 scene.fill_rect(Rect::new(cx, top, 1.0, opts.font_size), opts.text_color);
             }
@@ -220,7 +235,8 @@ pub fn text_field_opts(
         let opts = Rc::clone(&opts);
         Rc::new(move |event: &mut PointerEvent| {
             let mut s = shared.borrow_mut();
-            s.focused = true;
+            s.focused.set(true);
+            s.mark_dirty();
             s.editable
                 .move_to_point(event.x - PAD_X, text_top(&opts), false);
         })
@@ -236,6 +252,7 @@ pub fn text_field_opts(
             let mut s = shared.borrow_mut();
             let handled = editable_handle_key(&mut s, &opts, event);
             if handled {
+                s.mark_dirty();
                 push_change(&mut s, &*value, &*on_change);
             }
             handled
@@ -251,6 +268,7 @@ pub fn text_field_opts(
             let mut s = shared.borrow_mut();
             let handled = editable_handle_ime(&mut s, event);
             if handled {
+                s.mark_dirty();
                 push_change(&mut s, &*value, &*on_change);
             }
             handled
@@ -422,7 +440,8 @@ mod tests {
         e.replace_with(text);
         SharedState {
             editable: e,
-            focused: true,
+            focused: Signal::new(true),
+            state_rev: Signal::new(0),
             last_synced: text.to_string(),
         }
     }
