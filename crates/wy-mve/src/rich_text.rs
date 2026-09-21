@@ -307,7 +307,6 @@ pub fn rich_editable_opts(
         let opts = Rc::clone(&opts);
         Rc::new(move |event: &mut KeyEvent| -> bool {
             let mut core = core.borrow_mut();
-            let ctrl_or_meta = event.ctrl || event.meta;
             let shift = event.shift;
 
             // 多行导航键需要布局信息，在此处理
@@ -376,10 +375,10 @@ pub fn rich_editable_opts(
                 Key::Home => {
                     let display_text = core.display_text();
                     let display_idx = core.logic_to_display_index(core.cursor());
-                    let line_start_char = display_text
-                        .chars()
-                        .take(display_idx)
-                        .rposition(|ch| ch == '\n')
+                    let chars: Vec<char> = display_text.chars().collect();
+                    let line_start_char = chars[..display_idx.min(chars.len())]
+                        .iter()
+                        .rposition(|&ch| ch == '\n')
                         .map(|p| p + 1)
                         .unwrap_or(0);
                     let logic_target = core.display_to_logic_index(line_start_char);
@@ -394,11 +393,10 @@ pub fn rich_editable_opts(
                 Key::End => {
                     let display_text = core.display_text();
                     let display_idx = core.logic_to_display_index(core.cursor());
-                    let line_end_char = display_text[display_idx..]
-                        .chars()
-                        .position(|ch| ch == '\n')
-                        .map(|p| display_idx + p)
-                        .unwrap_or_else(|| display_text.chars().count());
+                    let chars: Vec<char> = display_text.chars().collect();
+                    let remaining = &chars[display_idx.min(chars.len())..];
+                    let line_end_char = display_idx
+                        + remaining.iter().position(|&ch| ch == '\n').unwrap_or(remaining.len());
                     let logic_target = core.display_to_logic_index(line_end_char);
                     if shift {
                         core.move_to_position(logic_target, true);

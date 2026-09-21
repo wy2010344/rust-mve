@@ -127,12 +127,15 @@ impl Measure {
         let mut layout: parley::Layout<[u8; 4]> = builder.build(test_text);
         layout.break_all_lines(None);
 
-        if let Some(line) = layout.lines().next() {
-            let m = line.metrics();
-            (m.block_max_coord - m.block_min_coord).max(font_size * 1.2)
-        } else {
-            font_size * 1.2
-        }
+        let lh = layout
+            .lines()
+            .next()
+            .map(|line| {
+                let m = line.metrics();
+                (m.block_max_coord - m.block_min_coord).max(font_size * 1.2)
+            })
+            .unwrap_or(font_size * 1.2);
+        lh
     }
 }
 
