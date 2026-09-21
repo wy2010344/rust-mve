@@ -30,6 +30,23 @@ pub fn measure_text(text: &str, font_size: f32) -> (f32, f32) {
     })
 }
 
+/// 测量字体的实际行高（像素）。
+///
+/// 用 Parley 排版一个测试字符串，取首行度量返回。
+/// 空文本或排版失败时回退到 `font_size * 1.2`。
+pub fn line_height(font_size: f32) -> f32 {
+    let key = ("\n", font_size.to_bits());
+    MEASURE.with(|m| {
+        let mut m = m.borrow_mut();
+        if let Some(size) = m.line_height_cache.get(&key) {
+            return *size;
+        }
+        let lh = m.measure_line_height(font_size);
+        m.line_height_cache.insert(key, lh);
+        lh
+    })
+}
+
 /// 光标在第 [text_idx] 个 UTF-8 字节处的 X 坐标（已排版文本前缀宽度）。
 pub fn cursor_x(text: &str, font_size: f32, text_idx: usize) -> f32 {
     let mut idx = text_idx.min(text.len());
@@ -63,6 +80,7 @@ thread_local! {
         font_cx: FontContext::new(),
         layout_cx: LayoutContext::new(),
         cache: HashMap::new(),
+        line_height_cache: HashMap::new(),
     });
 }
 
@@ -70,6 +88,7 @@ struct Measure {
     font_cx: FontContext,
     layout_cx: LayoutContext,
     cache: HashMap<(String, u32), (f32, f32)>,
+    line_height_cache: HashMap<(&'static str, u32), f32>,
 }
 
 impl Measure {
@@ -92,6 +111,28 @@ impl Measure {
         let width = layout.width();
         let height = layout.height().max(font_size * 1.2);
         (width, height)
+    }
+
+    /// 用 Parley 排版一个测试行，取首行度量得到实际行高。
+    fn measure_line_height(&mut self, font_size: f32) -> f32 {
+        let brush = [0u8, 0, 0, 255];
+        let display_scale = 1.0;
+        let test_text = "Xj";
+        let mut builder =
+            self.layout_cx
+                .ranged_builder(&mut self.font_cx, test_text, display_scale, false);
+        builder.push_default(parley::StyleProperty::FontSize(font_size));
+        builder.push_default(parley::StyleProperty::Brush(brush));
+
+        let mut layout: parley::Layout<[u8; 4]> = builder.build(test_text);
+        layout.break_all_lines(None);
+
+        if let Some(line) = layout.lines().next() {
+            let m = line.metrics();
+            (m.block_max_coord - m.block_min_coord).max(font_size * 1.2)
+        } else {
+            font_size * 1.2
+        }
     }
 }
 

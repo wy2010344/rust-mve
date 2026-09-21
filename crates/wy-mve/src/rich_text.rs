@@ -211,7 +211,7 @@ pub fn rich_editable_opts(
                 }
             }
 
-            // 选区高亮
+            // 选区高亮（逐行绘制）
             if core.has_selection() && focused {
                 let sel_s = core.logic_to_display_index(core.sel_start());
                 let sel_e = core.logic_to_display_index(core.sel_end());
@@ -220,11 +220,19 @@ pub fn rich_editable_opts(
                 } else {
                     &core.display_text()
                 };
-                let ax = PAD_X + cursor_x_from_display(text_for_x, opts.font_size, sel_s);
-                let bx = PAD_X + cursor_x_from_display(text_for_x, opts.font_size, sel_e);
-                if bx > ax {
+                let line_height = wy_render::text_measure::line_height(opts.font_size);
+                for &(ls, le) in &display_line_ranges(text_for_x) {
+                    let vis_s = sel_s.max(ls);
+                    let vis_e = sel_e.min(le);
+                    if vis_s >= vis_e {
+                        continue;
+                    }
+                    let line_idx = line_index_for_offset(text_for_x, vis_s);
+                    let ly = top + cursor_y(opts.font_size, line_idx);
+                    let ax = PAD_X + cursor_x_on_line(text_for_x, opts.font_size, vis_s);
+                    let bx = PAD_X + cursor_x_on_line(text_for_x, opts.font_size, vis_e);
                     scene.fill_rect(
-                        Rect::new(ax, top, bx - ax, opts.font_size),
+                        Rect::new(ax, ly, bx - ax, line_height),
                         Color::rgba(0, 120, 212, 70),
                     );
                 }
@@ -238,8 +246,10 @@ pub fn rich_editable_opts(
                     &core.display_text()
                 };
                 let disp_idx = core.logic_to_display_index(core.cursor());
-                let cx = PAD_X + cursor_x_from_display(text_for_x, opts.font_size, disp_idx);
-                scene.fill_rect(Rect::new(cx, top, 1.0, opts.font_size), opts.text_color);
+                let line_idx = line_index_for_offset(text_for_x, disp_idx);
+                let cx = PAD_X + cursor_x_on_line(text_for_x, opts.font_size, disp_idx);
+                let cy = top + cursor_y(opts.font_size, line_idx);
+                scene.fill_rect(Rect::new(cx, cy, 1.0, opts.font_size), opts.text_color);
             }
 
             // IME 组合带下划线
@@ -249,9 +259,11 @@ pub fn rich_editable_opts(
                 } else {
                     &core.display_text()
                 };
-                let ax = PAD_X + cursor_x_from_display(text_for_x, opts.font_size, cs);
-                let bx = PAD_X + cursor_x_from_display(text_for_x, opts.font_size, ce);
-                let y = top + opts.font_size + 1.0;
+                let line_idx = line_index_for_offset(text_for_x, cs);
+                let ly = top + cursor_y(opts.font_size, line_idx);
+                let ax = PAD_X + cursor_x_on_line(text_for_x, opts.font_size, cs);
+                let bx = PAD_X + cursor_x_on_line(text_for_x, opts.font_size, ce);
+                let y = ly + opts.font_size + 1.0;
                 scene.fill_rect(Rect::new(ax, y, bx - ax, 1.0), opts.text_color);
             }
         })
@@ -264,7 +276,7 @@ pub fn rich_editable_opts(
         })
     };
 
-    // --- 点击：聚焦 + 定位光标 ---
+    // --- 点击：聚焦 + 定位光标（多行感知） ---
     let on_down_fn = {
         let core = Rc::clone(&core);
         let shared = Rc::clone(&shared);
@@ -273,7 +285,14 @@ pub fn rich_editable_opts(
             shared.borrow_mut().focused.set(true);
             let mut core = core.borrow_mut();
             let display_text = core.display_text();
-            let display_idx = cursor_pos_from_x(&display_text, opts.font_size, event.x - PAD_X);
+            let line_height = wy_render::text_measure::line_height(opts.font_size);
+            let text_y = event.y - text_top(&opts);
+            let click_line = (text_y / line_height).floor().max(0.0) as usize;
+            let line_ranges = display_line_ranges(&display_text);
+            let line_idx = click_line.min(line_ranges.len().saturating_sub(1));
+            let (line_start, line_end) = line_ranges[line_idx];
+            let display_idx =
+                offset_from_x_on_line(&display_text, opts.font_size, line_start, line_end, event.x - PAD_X);
             let logic_idx = core.display_to_logic_index(display_idx);
             core.set_cursor(logic_idx);
         })
@@ -285,9 +304,113 @@ pub fn rich_editable_opts(
         let shared = Rc::clone(&shared);
         let value = Rc::clone(&value);
         let on_change = Rc::clone(&on_change);
+        let opts = Rc::clone(&opts);
         Rc::new(move |event: &mut KeyEvent| -> bool {
             let mut core = core.borrow_mut();
-            let handled = editable_handle_key(&mut core, event);
+            let ctrl_or_meta = event.ctrl || event.meta;
+            let shift = event.shift;
+
+            // 多行导航键需要布局信息，在此处理
+            let handled = match event.key {
+                Key::ArrowUp => {
+                    let display_text = core.display_text();
+                    let display_idx = core.logic_to_display_index(core.cursor());
+                    let line_ranges = display_line_ranges(&display_text);
+                    let current_line = line_index_for_offset(&display_text, display_idx);
+
+                    if current_line == 0 {
+                        core.set_cursor(0);
+                        core.set_preferred_x(f32::NAN);
+                    } else {
+                        let current_x = if !core.preferred_x().is_nan() {
+                            core.preferred_x()
+                        } else {
+                            let x = cursor_x_on_line(&display_text, opts.font_size, display_idx);
+                            core.set_preferred_x(x);
+                            x
+                        };
+                        let target_line = current_line - 1;
+                        let (target_start, target_end) = line_ranges[target_line];
+                        let target_display =
+                            offset_from_x_on_line(&display_text, opts.font_size, target_start, target_end, current_x);
+                        let logic_target = core.display_to_logic_index(target_display);
+                        if shift {
+                            core.move_to_position(logic_target, true);
+                        } else {
+                            core.move_to_position(logic_target, false);
+                        }
+                    }
+                    true
+                }
+                Key::ArrowDown => {
+                    let display_text = core.display_text();
+                    let display_idx = core.logic_to_display_index(core.cursor());
+                    let line_ranges = display_line_ranges(&display_text);
+                    let current_line = line_index_for_offset(&display_text, display_idx);
+
+                    if current_line >= line_ranges.len().saturating_sub(1) {
+                        let end = core.text_len();
+                        core.set_cursor(end);
+                        core.set_preferred_x(f32::NAN);
+                    } else {
+                        let current_x = if !core.preferred_x().is_nan() {
+                            core.preferred_x()
+                        } else {
+                            let x = cursor_x_on_line(&display_text, opts.font_size, display_idx);
+                            core.set_preferred_x(x);
+                            x
+                        };
+                        let target_line = current_line + 1;
+                        let (target_start, target_end) = line_ranges[target_line];
+                        let target_display =
+                            offset_from_x_on_line(&display_text, opts.font_size, target_start, target_end, current_x);
+                        let logic_target = core.display_to_logic_index(target_display);
+                        if shift {
+                            core.move_to_position(logic_target, true);
+                        } else {
+                            core.move_to_position(logic_target, false);
+                        }
+                    }
+                    true
+                }
+                Key::Home => {
+                    let display_text = core.display_text();
+                    let display_idx = core.logic_to_display_index(core.cursor());
+                    let line_start_char = display_text
+                        .chars()
+                        .take(display_idx)
+                        .rposition(|ch| ch == '\n')
+                        .map(|p| p + 1)
+                        .unwrap_or(0);
+                    let logic_target = core.display_to_logic_index(line_start_char);
+                    if shift {
+                        core.move_to_position(logic_target, true);
+                    } else {
+                        core.set_cursor(logic_target);
+                    }
+                    core.set_preferred_x(f32::NAN);
+                    true
+                }
+                Key::End => {
+                    let display_text = core.display_text();
+                    let display_idx = core.logic_to_display_index(core.cursor());
+                    let line_end_char = display_text[display_idx..]
+                        .chars()
+                        .position(|ch| ch == '\n')
+                        .map(|p| display_idx + p)
+                        .unwrap_or_else(|| display_text.chars().count());
+                    let logic_target = core.display_to_logic_index(line_end_char);
+                    if shift {
+                        core.move_to_position(logic_target, true);
+                    } else {
+                        core.set_cursor(logic_target);
+                    }
+                    core.set_preferred_x(f32::NAN);
+                    true
+                }
+                _ => editable_handle_key(&mut core, event),
+            };
+
             if handled {
                 let mut s = shared.borrow_mut();
                 push_change(&core, &mut s.last_synced, &*value, &*on_change);
@@ -346,6 +469,8 @@ fn push_change(
 ///
 /// 多行行为：`Enter` 插入 `\n`（`single_line = false`）。
 /// `Ctrl+Z/Y`（撤销/重做）由 EditCore 内置支持。
+/// `Home/End` 此处为文档首尾（单行回退）；多行场景由组件层 key_fn 闭包覆盖为行首尾。
+/// `ArrowUp/Down` 由组件层 key_fn 闭包处理（需要行度量），此处不匹配。
 fn editable_handle_key(core: &mut EditCore, event: &KeyEvent) -> bool {
     let ctrl_or_meta = event.ctrl || event.meta;
     let shift = event.shift;
@@ -470,15 +595,66 @@ fn editable_handle_ime(core: &mut EditCore, event: &ImeEvent) -> bool {
     }
 }
 
-/// 从显示文本的显示索引（字符数）计算 X 坐标。
-fn cursor_x_from_display(display_text: &str, font_size: f32, display_idx: usize) -> f32 {
-    let prefix: String = display_text.chars().take(display_idx).collect();
-    wy_render::text_measure::measure_text(&prefix, font_size).0
+/// 显示文本按 `\n` 切分为行，返回每行的 (字符起始, 字符结束) 半开区间。
+fn display_line_ranges(text: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    for (i, ch) in text.chars().enumerate() {
+        if ch == '\n' {
+            ranges.push((start, i));
+            start = i + 1;
+        }
+    }
+    ranges.push((start, text.chars().count()));
+    ranges
 }
 
-/// 从本地 X 坐标映射到显示索引（点击定位）。
-fn cursor_pos_from_x(display_text: &str, font_size: f32, x: f32) -> usize {
-    wy_render::text_measure::index_at_x(display_text, font_size, x.max(0.0))
+/// 字符偏移所在的行号（0-based）。
+fn line_index_for_offset(text: &str, offset: usize) -> usize {
+    let mut line = 0;
+    for (i, ch) in text.chars().enumerate() {
+        if i >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+        }
+    }
+    line
+}
+
+/// 光标在当前行内的 X 坐标（相对于行首）。
+fn cursor_x_on_line(display_text: &str, font_size: f32, display_idx: usize) -> f32 {
+    let chars: Vec<char> = display_text.chars().collect();
+    let line_start = chars[..display_idx.min(chars.len())]
+        .iter()
+        .rposition(|&ch| ch == '\n')
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    let line_prefix: String = chars[line_start..display_idx.min(chars.len())].iter().collect();
+    wy_render::text_measure::measure_text(&line_prefix, font_size).0
+}
+
+/// 从行内 X 坐标映射到显示索引。
+fn offset_from_x_on_line(
+    display_text: &str,
+    font_size: f32,
+    line_start: usize,
+    line_end: usize,
+    x: f32,
+) -> usize {
+    let line_text: String = display_text
+        .chars()
+        .skip(line_start)
+        .take(line_end - line_start)
+        .collect();
+    line_start + wy_render::text_measure::index_at_x(&line_text, font_size, x.max(0.0))
+}
+
+/// 光标的 Y 坐标（基于 Parley 实际行高）。
+fn cursor_y(font_size: f32, line_idx: usize) -> f32 {
+    let lh = wy_render::text_measure::line_height(font_size);
+    line_idx as f32 * lh
 }
 
 // ---------------------------------------------------------------------------
