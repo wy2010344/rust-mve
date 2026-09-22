@@ -465,19 +465,23 @@ impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
                 // 输入法事件 → 统一 ImeEvent 转发给应用（聚焦节点消费）
                 match ime {
                     winit::event::Ime::Enabled => {
+                        eprintln!("[IME] Enabled");
                         self.app.handle_ime_event(&wy_mve::ImeEvent::Enabled);
                     }
                     winit::event::Ime::Disabled => {
+                        eprintln!("[IME] Disabled");
                         self.app.handle_ime_event(&wy_mve::ImeEvent::Disabled);
                     }
                     // winit Preedit 的 (usize,usize) 即组合带内光标区间，直接透传
                     winit::event::Ime::Preedit(text, sel) => {
+                        eprintln!("[IME] Preedit: {:?} sel={:?}", text, sel);
                         self.app.handle_ime_event(&wy_mve::ImeEvent::Preedit {
                             text: text.clone(),
                             cursor: *sel,
                         });
                     }
                     winit::event::Ime::Commit(text) => {
+                        eprintln!("[IME] Commit: {:?}", text);
                         self.app
                             .handle_ime_event(&wy_mve::ImeEvent::Commit(text.clone()));
                     }

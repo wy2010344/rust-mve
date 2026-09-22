@@ -424,8 +424,10 @@ pub fn rich_editable_opts(
         let value = Rc::clone(&value);
         let on_change = Rc::clone(&on_change);
         Rc::new(move |event: &mut ImeEvent| -> bool {
+            eprintln!("[IME] rich_text ime_fn: event={:?}", event);
             let mut core = core.borrow_mut();
             let handled = editable_handle_ime(&mut core, event);
+            eprintln!("[IME] rich_text handled={}, text={:?}", handled, core.text());
             if handled {
                 let mut s = shared.borrow_mut();
                 push_change(&core, &mut s.last_synced, &*value, &*on_change);

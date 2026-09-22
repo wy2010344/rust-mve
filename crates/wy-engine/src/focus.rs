@@ -79,11 +79,26 @@ impl FocusManager {
 
     /// 从叶子向根冒泡分发 IME 事件。返回是否消费。
     pub fn dispatch_ime(&self, root_nodes: &[Node], event: &mut ImeEvent) -> bool {
-        if let Some(chain) = locate(&self.path, root_nodes) {
-            for node in chain.iter() {
-                if node.run_ime(event) {
-                    return true;
+        if self.path.is_empty() {
+            eprintln!("[IME] dispatch: no focus path, event dropped");
+            return false;
+        }
+        match locate(&self.path, root_nodes) {
+            Some(chain) => {
+                eprintln!("[IME] dispatch: chain len={}, event={:?}", chain.len(), event);
+                for (i, node) in chain.iter().enumerate() {
+                    if node.ime_fn.is_some() {
+                        eprintln!("[IME] dispatch: node[{}] has ime_fn, calling", i);
+                    }
+                    if node.run_ime(event) {
+                        eprintln!("[IME] dispatch: consumed by node[{}]", i);
+                        return true;
+                    }
                 }
+                eprintln!("[IME] dispatch: not consumed by any node");
+            }
+            None => {
+                eprintln!("[IME] dispatch: locate returned None");
             }
         }
         false
