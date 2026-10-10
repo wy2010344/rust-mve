@@ -31,7 +31,7 @@ fn byte_to_char(text: &str, bi: usize) -> usize {
 // ---------------------------------------------------------------------------
 
 /// `ci` 所在簇的下一簇起点（结束偏移）；越界钳制到 text.length。
-fn grapheme_next(text: &str, ci: usize) -> usize {
+pub fn grapheme_next(text: &str, ci: usize) -> usize {
     let n = text.len();
     if n == 0 || ci >= text.chars().count() {
         return text.chars().count();
@@ -48,7 +48,7 @@ fn grapheme_next(text: &str, ci: usize) -> usize {
 }
 
 /// `ci` 所在簇的前一簇起点；`ci == 0` 时返回 0。
-fn grapheme_prev(text: &str, ci: usize) -> usize {
+pub fn grapheme_prev(text: &str, ci: usize) -> usize {
     let bi = char_to_byte(text, ci);
     if bi == 0 {
         return 0;
@@ -78,7 +78,7 @@ fn is_word_char(text: &str, byte_pos: usize) -> bool {
 }
 
 /// 前一个词边界（字符索引域，复刻 `Words.prevBoundary`）。
-fn word_prev(text: &str, ci: usize) -> usize {
+pub fn word_prev(text: &str, ci: usize) -> usize {
     let n_chars = text.chars().count();
     let mut i = ci.min(n_chars);
 
@@ -114,7 +114,7 @@ fn word_prev(text: &str, ci: usize) -> usize {
 }
 
 /// 后一个词边界（字符索引域，复刻 `Words.nextBoundary`）。
-fn word_next(text: &str, ci: usize) -> usize {
+pub fn word_next(text: &str, ci: usize) -> usize {
     let n_chars = text.chars().count();
     let mut i = ci.min(n_chars);
 
@@ -1473,5 +1473,175 @@ mod tests {
             c.undo();
         }
         assert!(!c.can_undo());
+    }
+
+    // ===== 对齐 Kotlin GraphemesTest =====
+
+    /// 辅助：从头遍历收集所有 grapheme 边界偏移列表。
+    fn boundaries(text: &str) -> Vec<usize> {
+        let n = text.chars().count();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < n {
+            out.push(i);
+            i = grapheme_next(text, i);
+        }
+        if n > 0 {
+            out.push(n);
+        }
+        out
+    }
+
+    #[test]
+    fn grapheme_ascii_each_char() {
+        // 对齐 Kotlin GraphemesTest.asciiEachCharIsCluster
+        let bs = boundaries("abc");
+        assert_eq!(bs, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn grapheme_surrogate_pair() {
+        // 对齐 Kotlin GraphemesTest.surrogatePairIsOneCluster
+        // U+1F600 (😀) 在 Rust str 中是 4 字节，1 个 char
+        let bs = boundaries("a😀b");
+        assert_eq!(bs, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn grapheme_zwj_family() {
+        // 对齐 Kotlin GraphemesTest.zwjFamilyIsOneCluster
+        // 👨‍👩‍👧‍👦 = 7 个 codepoint（4 emoji + 3 ZWJ），整体 1 簇
+        let family = "👨\u{200D}👩\u{200D}👧\u{200D}👦";
+        assert_eq!(family.chars().count(), 7);
+        let bs = boundaries(format!("a{}b", family).as_str());
+        assert_eq!(bs, vec![0, 1, 8, 9]); // a=0, family=1..8, b=8
+    }
+
+    #[test]
+    fn grapheme_combining_accent() {
+        // 对齐 Kotlin GraphemesTest.combiningAccentStaysWithBase
+        // e + U+0301 (组合尖音符) = 1 簇
+        let text = "e\u{301}x";
+        let bs = boundaries(text);
+        assert_eq!(bs, vec![0, 2, 3]); // é=2 chars, x=1 char
+    }
+
+    #[test]
+    fn grapheme_crlf() {
+        // 对齐 Kotlin GraphemesTest.crlfIsOneCluster
+        // \r\n 整体 1 簇
+        let text = "a\r\nb";
+        let bs = boundaries(text);
+        assert_eq!(bs, vec![0, 1, 3, 4]);
+    }
+
+    #[test]
+    fn grapheme_flag_pair() {
+        // 对齐 Kotlin GraphemesTest.flagPairIsOneClusterAndAdjacentFlagsSplit
+        // 🇺🇸 = 两个 Regional Indicator = 1 簇
+        // 🇺🇸🇻🇬 = 4 个 RI，按对拆分 = 2 簇
+        let bs = boundaries("🇺🇸");
+        assert_eq!(bs.len(), 2); // 1 簇
+        let bs2 = boundaries("🇺🇸🇻🇬");
+        assert_eq!(bs2.len(), 3); // 2 簇
+    }
+
+    #[test]
+    fn grapheme_variation_selector() {
+        // 对齐 Kotlin GraphemesTest.variationSelectorStaysWithBase
+        // ☀ + U+FE0F (emoji 变体选择符) = 1 簇
+        let text = "☀\u{FE0F}x";
+        let bs = boundaries(text);
+        assert_eq!(bs, vec![0, 2, 3]);
+    }
+
+    #[test]
+    fn grapheme_skin_tone() {
+        // 对齐 Kotlin GraphemesTest.skinToneModifierStaysWithBase
+        // 👋 + U+1F3FD (肤色修饰符) = 1 簇
+        let text = "👋\u{1F3FD}x";
+        let bs = boundaries(text);
+        assert_eq!(bs, vec![0, 2, 3]);
+    }
+
+    #[test]
+    fn grapheme_prev_boundary_roundtrip() {
+        // 对齐 Kotlin GraphemesTest.prevBoundaryRoundTripsThroughNext
+        let samples = [
+            "hello",
+            "a😀b",
+            "e\u{301}x",
+            "a\r\nb",
+            "👨\u{200D}👩\u{200D}👧\u{200D}👦",
+        ];
+        for s in samples {
+            let n = s.chars().count();
+            // 从 0 开始 next 往返
+            let mut pos = 0;
+            while pos < n {
+                let next = grapheme_next(s, pos);
+                if next <= pos || next > n {
+                    break;
+                }
+                let back = grapheme_prev(s, next);
+                assert_eq!(back, pos, "roundtrip failed for '{}' at {}", s, pos);
+                pos = next;
+            }
+        }
+    }
+
+    #[test]
+    fn grapheme_cluster_count() {
+        // 对齐 Kotlin GraphemesTest.clusterCount
+        assert_eq!(grapheme_count(""), 0);
+        assert_eq!(grapheme_count("abc"), 3);
+        assert_eq!(grapheme_count("a😀b"), 3);
+        assert_eq!(grapheme_count("e\u{301}x"), 2);
+        assert_eq!(grapheme_count("a\r\nb"), 3); // a / \r\n / b
+    }
+
+    // ===== 对齐 Kotlin WordsTest =====
+
+    #[test]
+    fn word_prev_from_word_end() {
+        // 对齐 Kotlin WordsTest.prevFromWordEndGoesToWordStart
+        assert_eq!(word_prev("hello world", 11), 6);
+    }
+
+    #[test]
+    fn word_prev_across_space() {
+        // 对齐 Kotlin WordsTest.prevAcrossSpaceGoesToPreviousWordStart
+        assert_eq!(word_prev("hello world", 6), 0);
+    }
+
+    #[test]
+    fn word_next_from_word_start() {
+        // 对齐 Kotlin WordsTest.nextFromWordStartGoesToWordEnd
+        assert_eq!(word_next("hello", 0), 5);
+    }
+
+    #[test]
+    fn word_next_across_space() {
+        // 对齐 Kotlin WordsTest.nextAcrossSpaceSkipsToNextWordEnd
+        assert_eq!(word_next("hello world", 5), 11);
+    }
+
+    #[test]
+    fn word_punctuation_step() {
+        // 对齐 Kotlin WordsTest.punctuationStepsOneCluster
+        // 标点字符非词字符，逐步跳过
+        let text = "foo.bar";
+        // "foo." 的词边界: next(0)=3("foo"), next(3)=4("."), next(4)=7("bar")
+        assert_eq!(word_next(text, 0), 3);
+        assert_eq!(word_next(text, 3), 4);
+        assert_eq!(word_next(text, 4), 7);
+    }
+
+    #[test]
+    fn word_clamps_out_of_range() {
+        // 对齐 Kotlin WordsTest.clampsOutOfRange
+        let text = "hello";
+        assert_eq!(word_prev(text, 0), 0);
+        assert_eq!(word_next(text, 5), 5);
     }
 }

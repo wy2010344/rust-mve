@@ -291,8 +291,13 @@ pub fn rich_editable_opts(
             let line_ranges = display_line_ranges(&display_text);
             let line_idx = click_line.min(line_ranges.len().saturating_sub(1));
             let (line_start, line_end) = line_ranges[line_idx];
-            let display_idx =
-                offset_from_x_on_line(&display_text, opts.font_size, line_start, line_end, event.x - PAD_X);
+            let display_idx = offset_from_x_on_line(
+                &display_text,
+                opts.font_size,
+                line_start,
+                line_end,
+                event.x - PAD_X,
+            );
             let logic_idx = core.display_to_logic_index(display_idx);
             core.set_cursor(logic_idx);
         })
@@ -330,8 +335,13 @@ pub fn rich_editable_opts(
                         };
                         let target_line = current_line - 1;
                         let (target_start, target_end) = line_ranges[target_line];
-                        let target_display =
-                            offset_from_x_on_line(&display_text, opts.font_size, target_start, target_end, current_x);
+                        let target_display = offset_from_x_on_line(
+                            &display_text,
+                            opts.font_size,
+                            target_start,
+                            target_end,
+                            current_x,
+                        );
                         let logic_target = core.display_to_logic_index(target_display);
                         if shift {
                             core.move_to_position(logic_target, true);
@@ -361,8 +371,13 @@ pub fn rich_editable_opts(
                         };
                         let target_line = current_line + 1;
                         let (target_start, target_end) = line_ranges[target_line];
-                        let target_display =
-                            offset_from_x_on_line(&display_text, opts.font_size, target_start, target_end, current_x);
+                        let target_display = offset_from_x_on_line(
+                            &display_text,
+                            opts.font_size,
+                            target_start,
+                            target_end,
+                            current_x,
+                        );
                         let logic_target = core.display_to_logic_index(target_display);
                         if shift {
                             core.move_to_position(logic_target, true);
@@ -396,7 +411,10 @@ pub fn rich_editable_opts(
                     let chars: Vec<char> = display_text.chars().collect();
                     let remaining = &chars[display_idx.min(chars.len())..];
                     let line_end_char = display_idx
-                        + remaining.iter().position(|&ch| ch == '\n').unwrap_or(remaining.len());
+                        + remaining
+                            .iter()
+                            .position(|&ch| ch == '\n')
+                            .unwrap_or(remaining.len());
                     let logic_target = core.display_to_logic_index(line_end_char);
                     if shift {
                         core.move_to_position(logic_target, true);
@@ -427,7 +445,11 @@ pub fn rich_editable_opts(
             eprintln!("[IME] rich_text ime_fn: event={:?}", event);
             let mut core = core.borrow_mut();
             let handled = editable_handle_ime(&mut core, event);
-            eprintln!("[IME] rich_text handled={}, text={:?}", handled, core.text());
+            eprintln!(
+                "[IME] rich_text handled={}, text={:?}",
+                handled,
+                core.text()
+            );
             if handled {
                 let mut s = shared.borrow_mut();
                 push_change(&core, &mut s.last_synced, &*value, &*on_change);
@@ -631,7 +653,9 @@ fn cursor_x_on_line(display_text: &str, font_size: f32, display_idx: usize) -> f
         .rposition(|&ch| ch == '\n')
         .map(|p| p + 1)
         .unwrap_or(0);
-    let line_prefix: String = chars[line_start..display_idx.min(chars.len())].iter().collect();
+    let line_prefix: String = chars[line_start..display_idx.min(chars.len())]
+        .iter()
+        .collect();
     wy_render::text_measure::measure_text(&line_prefix, font_size).0
 }
 

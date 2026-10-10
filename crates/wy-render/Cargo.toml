@@ -14,3 +14,6 @@ parley = { workspace = true }
 fontique = { workspace = true }
 unicode-segmentation = { workspace = true }
 log = { workspace = true }
+
+[dev-dependencies]
+wy-text = { workspace = true }

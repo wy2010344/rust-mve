@@ -16,7 +16,7 @@ mod text_paragraph;
 mod text_style;
 
 pub use build_paragraph::{build_paragraph, TextError};
-pub use edit_core::EditCore;
+pub use edit_core::{grapheme_next, grapheme_prev, word_next, word_prev, EditCore};
 pub use editable::{EditSnapshot, EditableParagraph, Rect4};
 pub use editing::{TextBuffer, TextSegment};
 pub use font_cache::FontContext;

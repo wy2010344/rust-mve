@@ -391,7 +391,7 @@ pub fn expand_word_selection(
     expand_right: bool,
 ) -> Option<SelPair> {
     let anchor_node = selectables.iter().find(|n| n.id() == anchor_node_id)?;
-    let (word_start, word_end) = anchor_node.word_range_at(anchor_offset)?;
+    let (word_start, _) = anchor_node.word_range_at(anchor_offset)?;
 
     if expand_right {
         // 焦点在锚点右侧，焦点扩展到焦点节点的词尾
@@ -416,12 +416,12 @@ pub fn expand_word_selection(
         if let Some((f_start, _)) = focus_node.word_range_at(focus_offset) {
             Some(SelPair::new(
                 SelPoint {
-                    node_id: focus_node_id,
-                    offset: f_start,
+                    node_id: anchor_node_id,
+                    offset: word_start,
                 },
                 SelPoint {
-                    node_id: anchor_node_id,
-                    offset: word_end,
+                    node_id: focus_node_id,
+                    offset: f_start,
                 },
             ))
         } else {
@@ -440,11 +440,23 @@ pub fn compare_document_order(x_id: usize, y_id: usize) -> std::cmp::Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wy_text::{word_next, word_prev};
 
-    /// 测试用的 Mock 可选择节点。
+    /// 测试用的 Mock 可选择节点（使用真实 word boundary 算法）。
     struct MockSelectable {
         id: usize,
         text: String,
+    }
+
+    /// 字节偏移 → 字符索引。
+    fn byte_to_char(text: &str, bi: usize) -> usize {
+        let clamped = bi.min(text.len());
+        text[..clamped].chars().count()
+    }
+
+    /// 字符索引 → 字节偏移。
+    fn char_to_byte(text: &str, ci: usize) -> usize {
+        text.chars().take(ci).map(|c| c.len_utf8()).sum()
     }
 
     impl Selectable for MockSelectable {
@@ -478,28 +490,25 @@ mod tests {
             self.text[s..e].to_string()
         }
 
+        /// 对齐 Kotlin Words.wordRangeAt：使用真实的 word_prev/word_next 算法。
         fn word_range_at(&self, offset: usize) -> Option<(usize, usize)> {
-            if offset >= self.text.len() {
+            let char_count = self.text.chars().count();
+            if char_count == 0 {
                 return None;
             }
-            // 简单的空格分词
-            let bytes = self.text.as_bytes();
-            let mut start = offset;
-            while start > 0 && bytes[start - 1] != b' ' {
-                start -= 1;
-            }
-            let mut end = offset;
-            while end < self.text.len() && bytes[end] != b' ' {
-                end += 1;
-            }
-            Some((start, end))
+            let ci = byte_to_char(&self.text, offset.min(self.text.len()));
+            let start_ci = word_prev(&self.text, ci);
+            let end_ci = word_next(&self.text, start_ci);
+            let byte_start = char_to_byte(&self.text, start_ci);
+            let byte_end = char_to_byte(&self.text, end_ci);
+            Some((byte_start, byte_end))
         }
 
+        /// 对齐 Kotlin 段落边界：按 \n 分段。
         fn paragraph_range_at(&self, offset: usize) -> Option<(usize, usize)> {
             if offset >= self.text.len() {
                 return None;
             }
-            // 简单的换行分段
             let bytes = self.text.as_bytes();
             let mut start = offset;
             while start > 0 && bytes[start - 1] != b'\n' {
@@ -816,8 +825,109 @@ mod tests {
             text: "hello world".into(),
         };
         let selectables: Vec<&dyn Selectable> = vec![&n1];
+        // 锚点 "world"(offset 8)，焦点 "hello"(offset 2)，向左扩展
         let pair = expand_word_selection(&selectables, 1, 8, 1, 2, false).unwrap();
-        assert_eq!(pair.anchor.offset, 0);
-        assert_eq!(pair.focus.offset, 11);
+        // anchor = 锚点词首(6)，focus = 焦点词首(0)
+        assert_eq!(pair.anchor.offset, 6);
+        assert_eq!(pair.focus.offset, 0);
+    }
+
+    // ===== 对齐 Kotlin MultiClickSelectionTest =====
+
+    #[test]
+    fn paragraph_range_by_newline() {
+        // 对齐 Kotlin MultiClickSelectionTest.paragraphRangeSplitsByNewline
+        let node = MockSelectable {
+            id: 1,
+            text: "line one\nline two\nline three".into(),
+        };
+        // "line one" = [0,8), "line two" = [9,17), "line three" = [18,28)
+        let (s, e) = node.paragraph_range_at(5).unwrap(); // 点在第一行
+        assert_eq!(s, 0);
+        assert_eq!(e, 8);
+
+        let (s, e) = node.paragraph_range_at(13).unwrap(); // 点在第二行
+        assert_eq!(s, 9);
+        assert_eq!(e, 17);
+    }
+
+    #[test]
+    fn paragraph_range_single() {
+        // 对齐 Kotlin MultiClickSelectionTest.paragraphRangeSingleParagraphAndEmpty
+        let node = MockSelectable {
+            id: 1,
+            text: "no newlines here".into(),
+        };
+        let (s, e) = node.paragraph_range_at(5).unwrap();
+        assert_eq!(s, 0);
+        assert_eq!(e, 16); // 全文
+    }
+
+    #[test]
+    fn triple_click_selects_paragraph_content() {
+        // 对齐 Kotlin MultiClickSelectionTest.tripleClickEquivalentSelectCoversParagraph
+        let sm = SelectionManager::new();
+        sm.register(mock(1, "first\nsecond\nthird"));
+        sm.on_triple_click(1, 3); // 点在第一行
+        let text = sm.selected_text();
+        assert_eq!(text, "first");
+    }
+
+    // ===== 对齐 Kotlin CrossNodeSelectionTest =====
+
+    #[test]
+    fn expand_word_cross_node_right() {
+        // 对齐 Kotlin MultiClickSelectionTest.expandRightReachesWholeWord
+        // 两个节点: "Hello " (id=1) + "world foo" (id=2)
+        // 锚点在节点2的 "world"，拖到 "foo" 中间
+        let n1 = MockSelectable {
+            id: 1,
+            text: "Hello ".into(),
+        };
+        let n2 = MockSelectable {
+            id: 2,
+            text: "world foo".into(),
+        };
+        let selectables: Vec<&dyn Selectable> = vec![&n1, &n2];
+        // 锚点: node2 offset=2 ("world" 内), 焦点: node2 offset=7 ("foo" 内)
+        let pair = expand_word_selection(&selectables, 2, 2, 2, 7, true).unwrap();
+        assert_eq!(pair.anchor.node_id, 2);
+        assert_eq!(pair.anchor.offset, 0); // "world" 词首
+        assert_eq!(pair.focus.node_id, 2);
+        assert_eq!(pair.focus.offset, 9); // "foo" 词尾
+    }
+
+    #[test]
+    fn expand_word_cross_node_left() {
+        // 对齐 Kotlin MultiClickSelectionTest.expandLeftReachesWholeWord
+        let n1 = MockSelectable {
+            id: 1,
+            text: "Hello ".into(),
+        };
+        let n2 = MockSelectable {
+            id: 2,
+            text: "world foo".into(),
+        };
+        let selectables: Vec<&dyn Selectable> = vec![&n1, &n2];
+        // 锚点: node2 offset=7 ("foo" 内), 焦点: node2 offset=2 ("world" 内)
+        let pair = expand_word_selection(&selectables, 2, 7, 2, 2, false).unwrap();
+        assert_eq!(pair.anchor.node_id, 2);
+        assert_eq!(pair.anchor.offset, 6); // 锚点 "foo" 词首
+        assert_eq!(pair.focus.node_id, 2);
+        assert_eq!(pair.focus.offset, 0); // 焦点 "world" 词首
+    }
+
+    #[test]
+    fn expand_word_inside_anchor_unchanged() {
+        // 对齐 Kotlin MultiClickSelectionTest.expandInsideAnchorUnchanged
+        let n1 = MockSelectable {
+            id: 1,
+            text: "hello world".into(),
+        };
+        let selectables: Vec<&dyn Selectable> = vec![&n1];
+        // 锚点和焦点都在 "world" 内 (offset 6..11)
+        let pair = expand_word_selection(&selectables, 1, 8, 1, 9, true).unwrap();
+        assert_eq!(pair.anchor.offset, 6); // "world" 词首
+        assert_eq!(pair.focus.offset, 11); // "world" 词尾
     }
 }

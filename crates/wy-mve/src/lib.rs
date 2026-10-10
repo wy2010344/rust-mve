@@ -14,9 +14,18 @@
 //! - [`components::button`] — 按钮
 //! - [`components::row`] / [`components::column`] — 布局容器
 //! - [`text_field`] / [`text_field_opts`] — 单行文本输入
+//!
+//! FC 风格 DSL（子节点作剩余参数，取代嵌套闭包与 `cx` 样板）：
+//! - [`vbox`] / [`hbox`] — 竖排 / 横排容器
+//! - [`group`] / [`focusable`] / [`focus_trap`] — 分组与焦点容器
+//! - [`for_each`] — keyed 列表
+//! - [`ChildArg`] — 需要 `cx` 的子节点写法
+//! - [`collect`] — 摊平子节点参数
+//! - [`text`] / [`button`] — 同名于 `components`，此处语义等价
 
 pub mod components;
 mod context;
+mod fc;
 mod foreach;
 mod node;
 mod rich_text;
@@ -26,6 +35,10 @@ pub use components::{
     button, column, column_at, row, row_at, spacer, text, text_signal, text_styled,
 };
 pub use context::{render_root, NodeContext, Root};
+pub use fc::{
+    collect, focus_trap, focusable, for_each, group, hbox, hbox_gap, hidden, vbox, vbox_gap,
+    ChildArg, Children,
+};
 pub use foreach::render_for_each;
 pub use node::{
     children_nodes, flatten, has_handler, layout_offsets, materialize, node_size, ChildSlot,
