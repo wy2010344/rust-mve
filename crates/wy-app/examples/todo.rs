@@ -7,8 +7,12 @@
 //! - 每项在 creater 里 `create_signal` 自己的状态，draw / 事件只读写项信号 →
 //!   增删不改项信号，改项不重列列表，天然局部重绘；
 //! - 删除写回主列表，holder 随 key 移除而销毁。
+//!
+//! 组件写法用 FC 风格 DSL（`vbox`/`hbox`，子节点作剩余参数），
+//! 省掉层层 `move |cx|` 嵌套；`render_for_each` 的 `item_cx` 仍需显式传入，
+//! 因为它是 `creater` 签名的一部分。
 
-use wy_mve::{button, column_at, row, text_signal};
+use wy_mve::{button, for_each, hbox, text_signal, vbox_at};
 use wy_signal::{create_signal, GetValue, SetValue, Signal};
 
 #[derive(Clone, PartialEq, Debug)]
@@ -27,83 +31,76 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let candidates = todos.clone();
         let todos_for_del = todos.clone();
 
-        cx.child(column_at(300.0, 50.0, move |cx| {
-            let add_todos = add_todos.clone();
-            let candidates = candidates.clone();
-            let todos_for_del = todos_for_del.clone();
+        cx.child(vbox_at(
+            300.0,
+            50.0,
+            [
+                // 添加按钮：写主列表
+                button(
+                    move || "+ Add".into(),
+                    move || {
+                        let mut list = add_todos.get();
+                        let id = list.len();
+                        list.push(Todo {
+                            id,
+                            text: format!("Item {}", id + 1),
+                            done: false,
+                        });
+                        add_todos.set(list);
+                    },
+                ),
+                // 列表：按 key（=id）复用 holder
+                for_each(
+                    move |emit| {
+                        for todo in candidates.get() {
+                            emit(todo.id, todo);
+                        }
+                    },
+                    move |id, value, item_cx| {
+                        // 每项一个信号：项的 draw / 事件都读它 → 该项局部重绘
+                        let item = create_signal(value.borrow().clone());
 
-            // 添加按钮：写主列表
-            cx.child(button(
-                move || "+ Add".into(),
-                move || {
-                    let mut list = add_todos.get();
-                    let id = list.len();
-                    list.push(Todo {
-                        id,
-                        text: format!("Item {}", id + 1),
-                        done: false,
-                    });
-                    add_todos.set(list);
-                },
-            ));
+                        let label = item.clone();
+                        let toggle = item.clone();
+                        let text_item = item.clone();
+                        let del_todos = todos_for_del.clone();
 
-            // 列表：按 key（=id）复用 holder
-            cx.render_for_each(
-                move |emit| {
-                    for todo in candidates.get() {
-                        emit(todo.id, todo);
-                    }
-                },
-                move |id, value, item_cx| {
-                    // 每项一个信号：项的 draw / 事件都读它 → 该项局部重绘
-                    let item = create_signal(value.borrow().clone());
-
-                    let label = item.clone();
-                    let toggle = item.clone();
-                    let text_item = item.clone();
-                    let del_todos = todos_for_del.clone();
-                    item_cx.child(row(move |cx| {
-                        let label = label.clone();
-                        let toggle = toggle.clone();
-                        let text_item = text_item.clone();
-                        let del_todos = del_todos.clone();
-
-                        // 切换完成：写项信号（不触碰主列表）
-                        cx.child(button(
-                            move || {
-                                if label.get().done {
-                                    "[x]".into()
-                                } else {
-                                    "[ ]".into()
-                                }
-                            },
-                            move || {
-                                let mut t = toggle.get();
-                                t.done = !t.done;
-                                toggle.set(t);
-                            },
-                        ));
-
-                        // 文本：draw 期读项信号
-                        cx.child(text_signal(move || {
-                            let t = text_item.get();
-                            let prefix = if t.done { "✓ " } else { "" };
-                            Box::new(format!("{prefix}{}", t.text))
-                        }));
-
-                        // 删除：写主列表 → 该项 holder 被销毁
-                        cx.child(button(
-                            move || "×".into(),
-                            move || {
-                                let mut list = del_todos.get();
-                                list.retain(|t| t.id != id);
-                                del_todos.set(list);
-                            },
-                        ));
-                    }));
-                },
-            );
-        }));
+                        item_cx.child(hbox([
+                            // 切换完成：写项信号（不触碰主列表）
+                            button(
+                                move || {
+                                    if label.get().done {
+                                        "[x]".into()
+                                    } else {
+                                        "[ ]".into()
+                                    }
+                                },
+                                move || {
+                                    let mut t = toggle.get();
+                                    t.done = !t.done;
+                                    toggle.set(t);
+                                },
+                            ),
+                            // 文本：draw 期读项信号
+                            text_signal(move || {
+                                let t = text_item.get();
+                                let prefix = if t.done { "✓ " } else { "" };
+                                Box::new(format!("{prefix}{}", t.text))
+                            }),
+                            // 删除：写主列表 → 该项 holder 被销毁
+                            button(
+                                move || "×".into(),
+                                move || {
+                                    let mut list = del_todos.get();
+                                    list.retain(|t| t.id != id);
+                                    del_todos.set(list);
+                                },
+                            ),
+                        ]));
+                    },
+                ),
+            ],
+        ));
     });
 
     wy_engine::runner::run(app)

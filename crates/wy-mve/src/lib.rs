@@ -36,8 +36,8 @@ pub use components::{
 };
 pub use context::{render_root, NodeContext, Root};
 pub use fc::{
-    collect, focus_trap, focusable, for_each, group, hbox, hbox_gap, hidden, vbox, vbox_gap,
-    ChildArg, Children,
+    collect, focus_trap, focusable, for_each, group, hbox, hbox_at, hbox_gap, hidden, vbox,
+    vbox_at, vbox_gap, ChildArg, Children,
 };
 pub use foreach::render_for_each;
 pub use node::{

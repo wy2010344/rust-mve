@@ -190,6 +190,24 @@ pub fn hbox_gap(gap: f32, children: impl Children) -> Node {
     box_with(Some(Layout::Row { gap }), children)
 }
 
+/// 带绝对定位的竖排容器。
+#[must_use]
+pub fn vbox_at(x: f32, y: f32, children: impl Children) -> Node {
+    let mut n = vbox(children);
+    n.x = x;
+    n.y = y;
+    n
+}
+
+/// 带绝对定位的横排容器。
+#[must_use]
+pub fn hbox_at(x: f32, y: f32, children: impl Children) -> Node {
+    let mut n = hbox(children);
+    n.x = x;
+    n.y = y;
+    n
+}
+
 /// 无布局的透明分组：只把子节点平铺进父级。
 #[must_use]
 pub fn group(children: impl Children) -> Node {
