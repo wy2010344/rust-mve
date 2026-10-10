@@ -70,6 +70,25 @@ pub enum Slot {
     Many(ChildArg),
 }
 
+impl Slot {
+    /// 取回节点（惰性子节点先物化）。
+    ///
+    /// `rsx!` 返回 [`Slot`]，作为顶层节点时用 `.into_node()` 转回 [`Node`]。
+    #[must_use]
+    pub fn into_node(self) -> Node {
+        match self {
+            Slot::One(n) => n,
+            Slot::Many(c) => {
+                let mut inner = NodeContext::new();
+                c.push_slots(&mut inner);
+                let mut nodes = Vec::new();
+                flatten(&inner.into_slots(), &mut nodes);
+                nodes.pop().unwrap_or_default()
+            }
+        }
+    }
+}
+
 impl From<Node> for Slot {
     fn from(n: Node) -> Self {
         Slot::One(n)
@@ -107,21 +126,18 @@ impl<T: Into<Slot>> Children for Vec<T> {
     }
 }
 
-impl Children for Option<Slot> {
+impl<T: Into<Slot>> Children for Option<T> {
     fn push_slots(self, cx: &mut NodeContext) {
         if let Some(v) = self {
-            v.push_slots(cx);
+            v.into().push_slots(cx);
         }
     }
 }
 
-impl<T: Into<Slot>> From<Option<T>> for Slot {
-    fn from(v: Option<T>) -> Self {
-        // None → 空节点（无子节点），条件渲染用 Option<Slot> 时跳过即可
-        match v {
-            Some(x) => x.into(),
-            None => Slot::Many(ChildArg::new(|_| {})),
-        }
+/// 把一批 slot 注入 `cx`（宏内部用）。
+pub fn push_all(slots: impl IntoIterator<Item = Slot>, cx: &mut NodeContext) {
+    for s in slots {
+        s.push_slots(cx);
     }
 }
 
@@ -266,9 +282,98 @@ pub fn btn(label: impl Fn() -> String + 'static, on_click: impl Fn() + 'static) 
     Slot::One(crate::button(label, on_click))
 }
 
-/// 按 `render_for_each` 展开列表子节点（keyed diff）。
+/// 供 `rsx!` 宏使用：列表展开为 [`Slot`]。
+///
+/// 与 [`for_each`] 同语义，但 creater 接收 `Rc<RefCell<T>>` 值 + `cx`，
+/// 返回的 [`Slot`] 直接注入父容器（保留 `GetNodes` 动态区域）。
+pub fn for_each_slots<K, T>(
+    each: impl Fn(&mut dyn FnMut(K, T)) + 'static,
+    creater: impl Fn(Rc<std::cell::RefCell<T>>, &mut NodeContext) + 'static,
+) -> Slot
+where
+    K: Eq + std::hash::Hash + Clone + 'static,
+    T: Clone + PartialEq + 'static,
+{
+    Slot::Many(ChildArg::new(move |cx| {
+        cx.render_for_each(each, move |_k, v, cx| creater(v, cx));
+    }))
+}
+
+// ============================================================================
+// rsx! 宏内部别名（由 wy-mve-macros 生成代码调用）
+// ============================================================================
+
+// 别名保持 rsx! 里的标签原样（`fc__btn` 等），非 snake_case 是刻意为之。
+#[allow(non_snake_case)]
+mod macro_alias {
+    use super::{Children, Node, Slot};
+
+    /// `rsx! { hbox { .. } }` → `fc::hbox`。
+    pub use super::hbox as fc__hbox;
+    /// `rsx! { vbox { .. } }` → `fc::vbox`。
+    pub use super::vbox as fc__vbox;
+
+    /// `rsx! { hbox_gap(n) { .. } }`。
+    #[must_use]
+    pub fn fc__hbox_gap(gap: f32, children: impl Children + 'static) -> Node {
+        super::hbox_gap(gap, children)
+    }
+    /// `rsx! { vbox_gap(n) { .. } }`。
+    #[must_use]
+    pub fn fc__vbox_gap(gap: f32, children: impl Children + 'static) -> Node {
+        super::vbox_gap(gap, children)
+    }
+    /// `rsx! { vbox_at(x, y) { .. } }`。
+    #[must_use]
+    pub fn fc__vbox_at(x: f32, y: f32, children: impl Children + 'static) -> Node {
+        super::vbox_at(x, y, children)
+    }
+    /// `rsx! { hbox_at(x, y) { .. } }`。
+    #[must_use]
+    pub fn fc__hbox_at(x: f32, y: f32, children: impl Children + 'static) -> Node {
+        super::hbox_at(x, y, children)
+    }
+    /// `rsx! { group { .. } }`。
+    #[must_use]
+    pub fn fc__group(children: impl Children + 'static) -> Node {
+        super::group(children)
+    }
+    /// `rsx! { focusable { .. } }`。
+    #[must_use]
+    pub fn fc__focusable(children: impl Children + 'static) -> Node {
+        super::focusable(children)
+    }
+    /// `rsx! { focus_trap { .. } }`。
+    #[must_use]
+    pub fn fc__focus_trap(children: impl Children + 'static) -> Node {
+        super::focus_trap(children)
+    }
+    /// `rsx! { btn { .. } }` → `fc::btn`。
+    #[must_use]
+    pub fn fc__btn(label: impl Fn() -> String + 'static, on_click: impl Fn() + 'static) -> Slot {
+        super::btn(label, on_click)
+    }
+    /// `rsx! { label(expr) }` → `fc::label`。
+    #[must_use]
+    pub fn fc__label(content: impl Fn() -> String + 'static) -> Slot {
+        super::label(content)
+    }
+}
+
+pub use macro_alias::*;
 ///
 /// 返回 [`ChildArg`] 而非 `Node`：动态区域（`GetNodes` slot）**直接注入父容器**。
+/// 若包成中间 `Node`，`flatten` 不递归进它的子节点，列表项会脱离父容器布局
+/// （高度塌成 0、所有项重叠在一行）。
+///
+/// # Examples
+///
+/// ```
+/// use wy_mve::{vbox, label, for_each};
+/// let node = vbox([
+/// 按 `render_for_each` 展开列表子节点（keyed diff）。
+///
+/// 返回 [`Slot`]：动态区域（`GetNodes` slot）**直接注入父容器**。
 /// 若包成中间 `Node`，`flatten` 不递归进它的子节点，列表项会脱离父容器布局
 /// （高度塌成 0、所有项重叠在一行）。
 ///
@@ -306,6 +411,138 @@ mod tests {
     use super::*;
     use crate::node::{children_nodes, materialize};
     use crate::{button, render_root, text};
+    use wy_signal::{GetValue, Signal};
+
+    // ===== rsx! 宏行为测试 =====
+
+    #[test]
+    fn rsx_vbox_with_text_and_button() {
+        use crate::rsx;
+        let slot = rsx! {
+            vbox {
+                label("head")
+                btn { label: "go", on_click: || {} }
+            }
+        };
+        let node = slot.into_node();
+        let kids = collect([node]);
+        assert_eq!(children_nodes(&kids[0]).len(), 2);
+        assert!(
+            children_nodes(&kids[0])[1].on_click_fn.is_some(),
+            "btn 应有 on_click"
+        );
+    }
+
+    #[test]
+    fn rsx_dynamic_label_wraps_closure() {
+        use crate::rsx;
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let n = Rc::new(Cell::new(7));
+        let slot = rsx! {
+            label(n.get())
+        };
+        let kids = collect([slot]);
+        assert_eq!(kids.len(), 1);
+    }
+
+    #[test]
+    fn rsx_nested_containers() {
+        use crate::rsx;
+        let slot = rsx! {
+            vbox {
+                hbox {
+                    label("a")
+                    label("b")
+                }
+                label("c")
+            }
+        };
+        let node = slot.into_node();
+        let kids = collect([node]);
+        let inner = children_nodes(&kids[0]);
+        assert_eq!(inner.len(), 2, "hbox + label");
+        assert_eq!(children_nodes(&inner[0]).len(), 2, "hbox 内 2 项");
+    }
+
+    #[test]
+    fn rsx_conditional_none_skipped() {
+        use crate::rsx;
+        let show = false;
+        let slot = rsx! {
+            vbox {
+                label("always")
+                if show {
+                    label("hidden")
+                }
+            }
+        };
+        let node = slot.into_node();
+        let kids = collect([node]);
+        assert_eq!(children_nodes(&kids[0]).len(), 1, "false 分支不产出节点");
+    }
+
+    #[test]
+    fn rsx_conditional_true_present() {
+        use crate::rsx;
+        let show = true;
+        let slot = rsx! {
+            vbox {
+                label("always")
+                if show {
+                    label("shown")
+                }
+            }
+        };
+        let node = slot.into_node();
+        let kids = collect([node]);
+        assert_eq!(children_nodes(&kids[0]).len(), 2);
+    }
+
+    #[test]
+    fn rsx_for_each_injects_into_parent() {
+        use crate::rsx;
+        let list = Signal::new(vec![1i32, 2, 3]);
+        let slot = rsx! {
+            vbox {
+                for_each(list, |i: &i32| i.to_string()) { |item, _cx| {
+                    label(item.borrow().to_string())
+                }}
+            }
+        };
+        let node = slot.into_node();
+        let kids = collect([node]);
+        let inner = children_nodes(&kids[0]);
+        assert_eq!(inner.len(), 3, "3 个列表项直接进 vbox");
+    }
+
+    #[test]
+    fn rsx_for_each_height_accounts_items() {
+        use crate::rsx;
+        let list = Signal::new(vec![1i32, 2, 3]);
+        let slot = rsx! {
+            vbox {
+                for_each(list, |i: &i32| i.to_string()) { |_item, _cx| {
+                    btn { label: "row", on_click: || {} }
+                }}
+            }
+        };
+        let node = slot.into_node();
+        let kids = collect([node]);
+        // btn 固定 90x32，3 项 + 2 个 8 gap
+        let (_, h) = crate::node::node_size(&kids[0]);
+        assert_eq!(h, 3.0 * 32.0 + 2.0 * 8.0, "父容器高度含全部列表项");
+    }
+
+    #[test]
+    fn rsx_focus_flags() {
+        use crate::rsx;
+        let a = rsx! { focusable { label("x") } };
+        let b = rsx! { focus_trap { label("y") } };
+        let kids = collect([a, b]);
+        assert!(kids[0].focusable);
+        assert!(kids[1].focus_trap);
+    }
 
     #[test]
     fn vbox_children_materialize() {
@@ -446,9 +683,11 @@ mod tests {
 
     #[test]
     fn option_child_skipped_when_none() {
+        // Option 作为数组元素：None 跳过
         let some: Option<Slot> = Some(label(|| "a".into()));
         let none: Option<Slot> = None;
-        let n = vbox([some, none]);
+        let slots: Vec<Slot> = [some, none].into_iter().flatten().collect();
+        let n = vbox(slots);
         assert_eq!(children_nodes(&n).len(), 1);
     }
 

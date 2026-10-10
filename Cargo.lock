@@ -3864,9 +3864,20 @@ version = "0.1.0"
 dependencies = [
  "unicode-segmentation",
  "wy-layout",
+ "wy-mve-macros",
  "wy-render",
  "wy-signal",
  "wy-text",
+]
+
+[[package]]
+name = "wy-mve-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

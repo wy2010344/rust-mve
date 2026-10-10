@@ -12,6 +12,7 @@ repository = "https://github.com/your-name/wy-ui"
 # 内部 crate
 wy-signal = { path = "crates/wy-signal" }
 wy-mve = { path = "crates/wy-mve" }
+wy-mve-macros = { path = "crates/wy-mve-macros" }
 wy-layout = { path = "crates/wy-layout" }
 wy-render = { path = "crates/wy-render" }
 wy-text = { path = "crates/wy-text" }

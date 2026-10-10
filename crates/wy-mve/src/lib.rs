@@ -25,7 +25,7 @@
 
 pub mod components;
 mod context;
-mod fc;
+pub mod fc;
 mod foreach;
 mod node;
 mod rich_text;
@@ -46,6 +46,9 @@ pub use node::{
 };
 pub use rich_text::{rich_editable_opts, rich_text, rich_text_opts, RichTextOpts};
 pub use text_field::{text_field, text_field_opts, TextFieldOpts};
+
+/// `rsx!` 声明式 UI 宏（见 `wy-mve-macros`）。
+pub use wy_mve_macros::rsx;
 
 #[cfg(test)]
 mod tests;

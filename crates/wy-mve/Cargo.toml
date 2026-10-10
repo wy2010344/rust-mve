@@ -9,4 +9,5 @@ wy-signal = { workspace = true }
 wy-layout = { workspace = true }
 wy-render = { workspace = true }
 wy-text = { workspace = true }
+wy-mve-macros = { workspace = true }
 unicode-segmentation = { workspace = true }
