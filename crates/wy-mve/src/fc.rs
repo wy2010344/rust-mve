@@ -41,22 +41,9 @@ type ChildBody = Box<dyn FnOnce(&mut NodeContext)>;
 /// 在**不手写 `&mut NodeContext` 参数**的前提下，让需要 `cx` 的场景
 /// （`render_for_each` / `provide` / `consume`）依然可写。
 ///
-/// # Examples
-///
-/// ```
-/// use wy_mve::{vbox, text, ChildArg};
-/// let list: &'static [i32] = &[1, 2, 3];
-/// let node = vbox([ChildArg::new(|cx| {
-///     cx.render_for_each(
-///         |f| list.iter().for_each(|i| f(i.to_string(), *i)),
-///         |k, _v, cx| {
-///             let k2 = k.clone();
-///             cx.child(text(move || k2.clone()))
-///         },
-///     );
-/// })]);
-/// # let _ = node;
-/// ```
+/// 构造出的 slot（含 `GetNodes` 动态区域）**直接注入父容器**，
+/// 不会被包成中间 `Node` —— 否则 `flatten` 不递归进中间节点，
+/// 动态区域会脱离父容器的一维布局。
 pub struct ChildArg(ChildBody);
 
 impl ChildArg {
@@ -65,91 +52,119 @@ impl ChildArg {
         Self(Box::new(f))
     }
 
-    fn into_nodes(self) -> Vec<Node> {
-        // 与 `arg_children_fn` 同一时机求值。
-        let mut cx = NodeContext::new();
-        (self.0)(&mut cx);
-        let slots = cx.into_slots();
-        let mut out = Vec::new();
-        flatten(&slots, &mut out);
-        out
+    /// 在父上下文中就地展开 slot。
+    fn push_slots(self, cx: &mut NodeContext) {
+        (self.0)(cx);
     }
 }
 
-/// 一组子节点参数：摊平为 `Node` 列表。
+/// DSL 子节点统一类型：容器参数数组的元素类型。
 ///
-/// 接受 `Node`、`ChildArg`、`Vec<T>`、`[T; N]`（可嵌套），以及它们的组合。
-pub trait Children {
-    /// 摊平追加到 `out`。
-    fn push_into(self, out: &mut Vec<Node>);
+/// Rust 数组要求元素同类型，所以 `[text(..), for_each(..)]` 里的
+/// `Node` 与 `ChildArg` 需要统一到 `Slot` 才能放进同一个数组。
+/// `vbox` / `hbox` 等通过 [`Slot::from`] 自动转换（`Into<Slot>`）。
+pub enum Slot {
+    /// 单个已构造节点。
+    One(Node),
+    /// 惰性子节点（`for_each` 等动态区域）。
+    Many(ChildArg),
 }
 
-impl Children for Node {
-    fn push_into(self, out: &mut Vec<Node>) {
-        out.push(self);
+impl From<Node> for Slot {
+    fn from(n: Node) -> Self {
+        Slot::One(n)
     }
 }
 
-impl Children for ChildArg {
-    fn push_into(self, out: &mut Vec<Node>) {
-        out.extend(self.into_nodes());
+impl From<ChildArg> for Slot {
+    fn from(c: ChildArg) -> Self {
+        Slot::Many(c)
     }
 }
 
-impl Children for Vec<Node> {
-    fn push_into(self, out: &mut Vec<Node>) {
-        out.extend(self);
-    }
-}
-
-impl Children for Vec<ChildArg> {
-    fn push_into(self, out: &mut Vec<Node>) {
-        for c in self {
-            c.push_into(out);
+impl Children for Slot {
+    fn push_slots(self, cx: &mut NodeContext) {
+        match self {
+            Slot::One(n) => cx.child(n),
+            Slot::Many(c) => c.push_slots(cx),
         }
     }
+}
+
+impl<T: Into<Slot>, const N: usize> Children for [T; N] {
+    fn push_slots(self, cx: &mut NodeContext) {
+        for c in self {
+            c.into().push_slots(cx);
+        }
+    }
+}
+
+impl<T: Into<Slot>> Children for Vec<T> {
+    fn push_slots(self, cx: &mut NodeContext) {
+        for c in self {
+            c.into().push_slots(cx);
+        }
+    }
+}
+
+impl Children for Option<Slot> {
+    fn push_slots(self, cx: &mut NodeContext) {
+        if let Some(v) = self {
+            v.push_slots(cx);
+        }
+    }
+}
+
+impl<T: Into<Slot>> From<Option<T>> for Slot {
+    fn from(v: Option<T>) -> Self {
+        // None → 空节点（无子节点），条件渲染用 Option<Slot> 时跳过即可
+        match v {
+            Some(x) => x.into(),
+            None => Slot::Many(ChildArg::new(|_| {})),
+        }
+    }
+}
+
+/// 一组子节点参数：注入父容器的 slots。
+///
+/// 接受 [`Slot`]（`Node`/`ChildArg` 经 `Into` 自动转换）、`Option`、`Vec`、数组。
+///
+/// 关键：保留 `ChildSlot` 而非压平成 `Node`，否则 `render_for_each`
+/// 的动态区域会被包进中间节点，脱离父容器布局。
+pub trait Children {
+    /// 把子节点注入 `cx`。
+    fn push_slots(self, cx: &mut NodeContext);
 }
 
 impl Children for ChildSlot {
-    fn push_into(self, out: &mut Vec<Node>) {
-        let slots = [self];
-        flatten(&slots, out);
+    fn push_slots(self, cx: &mut NodeContext) {
+        cx.push_slot(self);
     }
 }
 
-impl<T: Children> Children for Option<T> {
-    fn push_into(self, out: &mut Vec<Node>) {
-        if let Some(v) = self {
-            v.push_into(out);
-        }
-    }
-}
-
-impl<T: Children, const N: usize> Children for [T; N] {
-    fn push_into(self, out: &mut Vec<Node>) {
-        for c in self {
-            c.push_into(out);
-        }
-    }
-}
-
-/// 收集子节点参数为 `Node` 列表。
+/// 收集子节点为 `Node` 列表（已展平动态区域）。
 #[must_use]
 pub fn collect(children: impl Children) -> Vec<Node> {
+    let mut cx = NodeContext::new();
+    children.push_slots(&mut cx);
     let mut out = Vec::new();
-    children.push_into(&mut out);
+    flatten(&cx.into_slots(), &mut out);
     out
 }
 
-/// 把子节点列表包进布局容器。
-fn box_with(layout: Option<Layout>, children: impl Children) -> Node {
-    let nodes = Rc::new(collect(children));
+/// 把子节点参数包进布局容器。
+fn box_with(layout: Option<Layout>, children: impl Children + 'static) -> Node {
+    // `arg_children_fn` 是 `Fn`（可能被多次调用），而 `Children` 是一次性的。
+    // 用 `RefCell<Option<..>>` 延迟消费；Node 惰性 memo 保证只 materialize 一次，
+    // 所以正常路径下 `take()` 必定成功（重复调用是防御性兜底）。
+    let children = std::cell::RefCell::new(Some(children));
     Node {
         layout,
         arg_children_fn: Rc::new(move |cx: &mut NodeContext| {
-            for c in nodes.iter() {
-                cx.child(c.clone());
-            }
+            let Some(children) = children.borrow_mut().take() else {
+                return;
+            };
+            children.push_slots(cx);
         }),
         ..Node::default()
     }
@@ -168,31 +183,31 @@ fn box_with(layout: Option<Layout>, children: impl Children) -> Node {
 /// # let _ = node;
 /// ```
 #[must_use]
-pub fn vbox(children: impl Children) -> Node {
+pub fn vbox(children: impl Children + 'static) -> Node {
     box_with(Some(Layout::Column { gap: 8.0 }), children)
 }
 
 /// 横排容器（主轴 X，间距 8）。
 #[must_use]
-pub fn hbox(children: impl Children) -> Node {
+pub fn hbox(children: impl Children + 'static) -> Node {
     box_with(Some(Layout::Row { gap: 8.0 }), children)
 }
 
 /// 自定义间距的竖排容器。
 #[must_use]
-pub fn vbox_gap(gap: f32, children: impl Children) -> Node {
+pub fn vbox_gap(gap: f32, children: impl Children + 'static) -> Node {
     box_with(Some(Layout::Column { gap }), children)
 }
 
 /// 自定义间距的横排容器。
 #[must_use]
-pub fn hbox_gap(gap: f32, children: impl Children) -> Node {
+pub fn hbox_gap(gap: f32, children: impl Children + 'static) -> Node {
     box_with(Some(Layout::Row { gap }), children)
 }
 
 /// 带绝对定位的竖排容器。
 #[must_use]
-pub fn vbox_at(x: f32, y: f32, children: impl Children) -> Node {
+pub fn vbox_at(x: f32, y: f32, children: impl Children + 'static) -> Node {
     let mut n = vbox(children);
     n.x = x;
     n.y = y;
@@ -201,7 +216,7 @@ pub fn vbox_at(x: f32, y: f32, children: impl Children) -> Node {
 
 /// 带绝对定位的横排容器。
 #[must_use]
-pub fn hbox_at(x: f32, y: f32, children: impl Children) -> Node {
+pub fn hbox_at(x: f32, y: f32, children: impl Children + 'static) -> Node {
     let mut n = hbox(children);
     n.x = x;
     n.y = y;
@@ -210,13 +225,13 @@ pub fn hbox_at(x: f32, y: f32, children: impl Children) -> Node {
 
 /// 无布局的透明分组：只把子节点平铺进父级。
 #[must_use]
-pub fn group(children: impl Children) -> Node {
+pub fn group(children: impl Children + 'static) -> Node {
     box_with(None, children)
 }
 
 /// 可聚焦容器（进 Tab 序）。
 #[must_use]
-pub fn focusable(children: impl Children) -> Node {
+pub fn focusable(children: impl Children + 'static) -> Node {
     let mut n = group(children);
     n.focusable = true;
     n
@@ -224,7 +239,7 @@ pub fn focusable(children: impl Children) -> Node {
 
 /// 焦点陷阱容器：Tab 焦点不逃逸此子树。
 #[must_use]
-pub fn focus_trap(children: impl Children) -> Node {
+pub fn focus_trap(children: impl Children + 'static) -> Node {
     let mut n = group(children);
     n.focus_trap = true;
     n
@@ -237,47 +252,53 @@ pub fn hidden(mut node: Node) -> Node {
     node
 }
 
+/// 文本子节点（[`Slot`] 版）：值是闭包，draw 期求值并自动追踪信号。
+///
+/// 与 [`crate::text`] 等价，返回 [`Slot`] 以便和 [`for_each`] 混在同一数组。
+#[must_use]
+pub fn label(content: impl Fn() -> String + 'static) -> Slot {
+    Slot::One(crate::text(content))
+}
+
+/// 按钮子节点（[`Slot`] 版）：标签闭包 + 点击回调。
+#[must_use]
+pub fn btn(label: impl Fn() -> String + 'static, on_click: impl Fn() + 'static) -> Slot {
+    Slot::One(crate::button(label, on_click))
+}
+
 /// 按 `render_for_each` 展开列表子节点（keyed diff）。
 ///
-/// `for_each` 提供 `(key, value)`，`creater` 为每项构造节点。
+/// 返回 [`ChildArg`] 而非 `Node`：动态区域（`GetNodes` slot）**直接注入父容器**。
+/// 若包成中间 `Node`，`flatten` 不递归进它的子节点，列表项会脱离父容器布局
+/// （高度塌成 0、所有项重叠在一行）。
 ///
 /// # Examples
 ///
 /// ```
-/// use wy_mve::{vbox, text, for_each};
-/// let node = for_each(
-///     |f| (0..3).for_each(|i| f(i.to_string(), i)),
-///     |k, _v, cx| {
-///         let k2 = k.clone();
-///         cx.child(text(move || k2.clone()))
-///     },
-/// );
+/// use wy_mve::{vbox, label, for_each};
+/// let node = vbox([
+///     label(|| "head".into()),
+///     for_each(
+///         |f| (0..3).for_each(|i| f(i.to_string(), i)),
+///         |_k, _v, cx| {
+///             cx.child(label(|| "item".into()))
+///         },
+///     ),
+/// ]);
 /// # let _ = node;
 /// ```
 #[must_use]
 pub fn for_each<K, T>(
     each: impl Fn(&mut dyn FnMut(K, T)) + 'static,
     creater: impl Fn(K, Rc<std::cell::RefCell<T>>, &mut NodeContext) + 'static,
-) -> Node
+) -> Slot
 where
     K: Eq + std::hash::Hash + Clone + 'static,
     T: Clone + PartialEq + 'static,
 {
-    // `render_for_each` 是 FnOnce 语义，而 `arg_children_fn` 是 Fn：
-    // 用 `Option` 延迟消费，且构建期只会跑一次（Node 惰性 memo 保证）。
-    let each = std::cell::RefCell::new(Some(each));
-    let creater = std::cell::RefCell::new(Some(creater));
-    Node {
-        arg_children_fn: Rc::new(move |cx: &mut NodeContext| {
-            let (Some(each), Some(creater)) =
-                (each.borrow_mut().take(), creater.borrow_mut().take())
-            else {
-                return;
-            };
-            cx.render_for_each(each, creater);
-        }),
-        ..Node::default()
-    }
+    Slot::Many(ChildArg::new(move |cx| {
+        cx.render_for_each(each, creater);
+    }))
 }
 
 #[cfg(test)]
@@ -357,17 +378,54 @@ mod tests {
     }
 
     #[test]
-    fn for_each_expands_list() {
-        let n = for_each(
-            |f| (0..3).for_each(|i| f(i.to_string(), i)),
+    fn for_each_expands_list_into_parent() {
+        // 回归：`for_each` 必须把 GetNodes 直接注入父容器，
+        // 否则 flatten 不递归进中间节点，列表项脱离父容器布局（重叠在一行）。
+        let n = vbox([
+            label(|| "head".into()),
+            for_each(
+                |f| (0..3).for_each(|i| f(i.to_string(), i)),
+                |k, _v, cx| {
+                    let k2 = k.clone();
+                    cx.child(text(move || k2.clone()))
+                },
+            ),
+        ]);
+        let kids = children_nodes(&n);
+        // head + 3 个列表项，全部作为 vbox 的直接子节点参与布局
+        assert_eq!(kids.len(), 4);
+        assert!(kids[0].on_click_fn.is_none(), "第 1 项是 head");
+    }
+
+    #[test]
+    fn for_each_standalone_collects() {
+        let list: Vec<Slot> = vec![for_each(
+            |f| (0..2).for_each(|i| f(i.to_string(), i)),
             |k, _v, cx| {
                 let k2 = k.clone();
                 cx.child(text(move || k2.clone()))
             },
-        );
-        let kids = children_nodes(&n);
-        // 动态区域在 children_nodes 中按当前态展开
-        assert_eq!(kids.len(), 3);
+        )];
+        assert_eq!(collect(list).len(), 2);
+    }
+
+    #[test]
+    fn for_each_layout_height_accounts_items() {
+        // 关键回归：vbox 的自然高度必须包含 for_each 的所有列表项。
+        // 修复前 for_each 是中间 Node，高度塌成 0 → 所有项 y 重叠。
+        let n = vbox([for_each(
+            |f| (0..3).for_each(|i| f(i.to_string(), i)),
+            |_k, _v, cx| {
+                cx.child(Node {
+                    width: 90.0,
+                    height: 32.0,
+                    ..Node::default()
+                })
+            },
+        )]);
+        // node_size 递归 children_nodes，3 项各 32 高 + 2 个 8 gap = 112
+        let (_, h) = crate::node::node_size(&n);
+        assert_eq!(h, 3.0 * 32.0 + 2.0 * 8.0);
     }
 
     #[test]
@@ -388,8 +446,8 @@ mod tests {
 
     #[test]
     fn option_child_skipped_when_none() {
-        let some: Option<Node> = Some(text(|| "a".into()));
-        let none: Option<Node> = None;
+        let some: Option<Slot> = Some(label(|| "a".into()));
+        let none: Option<Slot> = None;
         let n = vbox([some, none]);
         assert_eq!(children_nodes(&n).len(), 1);
     }

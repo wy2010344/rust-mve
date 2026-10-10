@@ -7,11 +7,12 @@
 //! - 每项在 creater 里持有自己的信号（文本 / 折叠开关），
 //!   显示/隐藏明细只写项信号，不触碰主列表 → 该项局部重绘。
 //!
-//! 组件写法用 FC 风格 DSL（`vbox_at`/`hbox`，子节点作剩余参数）。
+//! 组件写法用 FC 风格 DSL：`vbox_at`/`hbox` 子节点作剩余参数，
+//! 原子组件用 `btn`/`label`（返回 `Slot`），可与 `for_each` 混在同一数组。
 
 use std::rc::Rc;
 
-use wy_mve::{button, for_each, hbox, text_signal, vbox_at, Node};
+use wy_mve::{btn, for_each, hbox, label, vbox_at, Node, Slot};
 use wy_render::{Color, Rect, Scene};
 use wy_signal::{create_signal, GetValue, SetValue, Signal};
 
@@ -50,7 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             50.0,
             30.0,
             [
-                button(
+                btn(
                     move || format!("共有{}条 +", count_list.get().len()),
                     move || {
                         let id = next.get();
@@ -80,11 +81,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let del_src = state_list.clone();
 
                         item_cx.child(hbox([
-                            text_signal(move || {
+                            label(move || {
                                 let i = item_text.get();
-                                Box::new(format!("#{} {}", i.id, i.label))
+                                format!("#{} {}", i.id, i.label)
                             }),
-                            button(
+                            btn(
                                 move || {
                                     if toggle_lbl.get() {
                                         "hide".into()
@@ -94,7 +95,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 },
                                 move || toggle_set.set(!toggle_set.get()),
                             ),
-                            Node {
+                            // 明细条：条件显示，直接用 Node 字面量包成 Slot
+                            Slot::One(Node {
                                 draw_fn: Rc::new(move |scene| {
                                     if !detail_show.get() {
                                         return;
@@ -108,9 +110,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }),
                                 ..Node::default()
-                            },
-                            button(
-                                move || "×".into(),
+                            }),
+                            btn(
+                                || "×".into(),
                                 move || {
                                     let mut v = del_src.get();
                                     v.retain(|i| i.id != id);

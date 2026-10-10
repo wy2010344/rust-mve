@@ -40,6 +40,15 @@ impl NodeContext {
         self.child(node);
     }
 
+    /// 追加一个原始 slot（保留 `GetNodes` 动态区域语义）。
+    ///
+    /// 供 DSL 层把 `render_for_each` 的动态区域直接注入父容器 ——
+    /// 若把动态区域包成中间 `Node`，`flatten` 不会递归进它的子节点，
+    /// 该区域将脱离父容器的一维布局（高度塌成 0、子项重叠）。
+    pub fn push_slot(&mut self, slot: ChildSlot) {
+        self.slots.push(slot);
+    }
+
     /// 追加动态区域：按 key 复用的列表渲染。
     ///
     /// 对应 Kotlin `StateHolderI.renderForEach`。见 [`render_for_each`]。
