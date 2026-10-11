@@ -24,53 +24,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let todos = Signal::new(Vec::<Todo>::new());
 
     let app = wy_engine::mve_integration::MveApp::new(move |cx| {
-        let todos = todos.clone();
-        let add_todos = todos.clone();
-        let candidates = todos.clone();
-        let todos_for_del = todos.clone();
-
         let node = rsx! {
             vbox_at(300.0, 50.0) {
                 btn {
                     label: "+ Add",
                     on_click: move || {
-                        let mut list = add_todos.get();
+                        let mut list = todos.get();
                         let id = list.len();
                         list.push(Todo {
                             id,
                             text: format!("Item {}", id + 1),
                             done: false,
                         });
-                        add_todos.set(list);
+                        todos.set(list);
                     }
                 }
 
-                for_each(candidates, |t: &Todo| t.id) { |todo_ref, item_cx| {
+                for_each(todos, |t: &Todo| t.id) { |todo_ref, _cx| {
                     // 每项一个信号：项的 draw / 事件都读它 → 该项局部重绘
+                    // Signal 是 Copy，下面多处闭包可直接共用，无需 clone。
                     let item = create_signal(todo_ref.borrow().clone());
-
-                    let done_sig = item.clone();
-                    let toggle = item.clone();
-                    let text_item = item.clone();
-                    let del_todos = todos_for_del.clone();
 
                     hbox {
                         btn {
-                            label: if done_sig.get().done { "[x]" } else { "[ ]" },
+                            label: if item.get().done { "[x]" } else { "[ ]" },
                             on_click: move || {
-                                let mut t = toggle.get();
+                                let mut t = item.get();
                                 t.done = !t.done;
-                                toggle.set(t);
+                                item.set(t);
                             }
                         }
-                        label(format!("{}{}", if text_item.get().done { "✓ " } else { "" },
-                                     text_item.get().text))
+                        label(format!("{}{}", if item.get().done { "✓ " } else { "" },
+                                     item.get().text))
                         btn {
                             label: "×",
                             on_click: move || {
-                                let mut list = del_todos.get();
+                                let mut list = todos.get();
                                 list.retain(|t| t.id != todo_ref.borrow().id);
-                                del_todos.set(list);
+                                todos.set(list);
                             }
                         }
                     }

@@ -21,7 +21,6 @@ fn set_same_value_does_not_notify() {
     let s = create_signal(5);
     let calls = Rc::new(Cell::new(0));
     create_effect({
-        let s = s.clone();
         let calls = calls.clone();
         move || {
             let _ = s.get();
@@ -44,8 +43,6 @@ fn effect_dependency_collection() {
     let sum = Rc::new(Cell::new(0));
 
     create_effect({
-        let a = a.clone();
-        let b = b.clone();
         let sum = sum.clone();
         move || {
             sum.set(a.get() + b.get());
@@ -68,8 +65,6 @@ fn batch_merges_multiple_writes() {
     let runs = Rc::new(Cell::new(0));
 
     create_effect({
-        let a = a.clone();
-        let b = b.clone();
         let runs = runs.clone();
         move || {
             let _ = a.get();
@@ -98,8 +93,6 @@ fn memo_cache_and_invalidation() {
     let compute_calls = Rc::new(Cell::new(0));
 
     let doubled = create_memo({
-        let base = base.clone();
-        let factor = factor.clone();
         let compute_calls = compute_calls.clone();
         move || {
             compute_calls.set(compute_calls.get() + 1);
@@ -133,7 +126,6 @@ fn memo_no_recompute_when_unrelated_signal_changes() {
     let compute_calls = Rc::new(Cell::new(0));
 
     let tracked = create_memo({
-        let base = base.clone();
         let compute_calls = compute_calls.clone();
         move || {
             compute_calls.set(compute_calls.get() + 1);
@@ -154,10 +146,7 @@ fn memo_no_recompute_when_unrelated_signal_changes() {
 #[test]
 fn memo_invalidates_dependent_effect() {
     let base = create_signal(5);
-    let doubled = create_memo({
-        let base = base.clone();
-        move || base.get() * 2
-    });
+    let doubled = create_memo(move || base.get() * 2);
 
     let seen = Rc::new(Cell::new(0));
     create_effect({
@@ -182,11 +171,7 @@ fn memo_invalidates_dependent_effect() {
 fn nested_memo() {
     let a = create_signal(2);
     let b = create_signal(3);
-    let inner = create_memo({
-        let a = a.clone();
-        let b = b.clone();
-        move || a.get() + b.get()
-    });
+    let inner = create_memo(move || a.get() + b.get());
     let outer = create_memo({
         let inner = inner.clone();
         move || inner.get() * 10
@@ -207,7 +192,6 @@ fn memo_idempotent_within_same_state_version() {
     let base = create_signal(2);
     let recompute = Rc::new(Cell::new(0));
     let doubled = create_memo({
-        let base = base.clone();
         let recompute = recompute.clone();
         move || {
             recompute.set(recompute.get() + 1);
@@ -234,10 +218,7 @@ fn memo_idempotent_within_same_state_version() {
 #[test]
 fn memo_chains_through_another_memo() {
     let a = create_signal(1);
-    let b = create_memo({
-        let a = a.clone();
-        move || a.get() + 10
-    });
+    let b = create_memo(move || a.get() + 10);
     let c = create_memo({
         let b = b.clone();
         move || b.get() * 2
@@ -265,7 +246,6 @@ fn memo_new_observer_does_not_rerun_process() {
     let base = create_signal(5);
     let recompute = Rc::new(Cell::new(0));
     let squared = create_memo({
-        let base = base.clone();
         let recompute = recompute.clone();
         move || {
             recompute.set(recompute.get() + 1);
@@ -315,7 +295,6 @@ fn custom_should_change_accepts_equal_values() {
     let s = create_signal_with_comparator(0, |_, _| true);
     let calls = Rc::new(Cell::new(0));
     create_effect({
-        let s = s.clone();
         let calls = calls.clone();
         move || {
             let _ = s.get();
@@ -337,7 +316,6 @@ fn custom_should_change_rejects_different_values() {
     let s = create_signal_with_comparator(0, |_, _| false);
     let calls = Rc::new(Cell::new(0));
     create_effect({
-        let s = s.clone();
         let calls = calls.clone();
         move || {
             let _ = s.get();
@@ -420,7 +398,6 @@ fn circular_memo_chains_panic() {
 fn collect_works_when_no_current_observer() {
     let s = create_signal(10);
     let eff = create_effect({
-        let s = s.clone();
         move || {
             let _ = s.get();
         }
@@ -439,7 +416,6 @@ fn disposed_track_effect_stops_responding() {
     let s = create_signal(0);
     let calls = Rc::new(Cell::new(0));
     let eff = create_effect({
-        let s = s.clone();
         let calls = calls.clone();
         move || {
             let _ = s.get();
@@ -461,10 +437,7 @@ fn disposed_track_effect_stops_responding() {
 fn track_on_change_called_when_value_changes() {
     let s = create_signal(1);
     let last_seen = Rc::new(Cell::new(0));
-    let t = wy_signal::track({
-        let s = s.clone();
-        move || s.get() * 10
-    });
+    let t = wy_signal::track(move || s.get() * 10);
     // on_change 在 new() 之后设置，首次 compute 已执行
     assert_eq!(t.get_value(), 10, "首次 compute 已完成");
 
@@ -492,7 +465,6 @@ fn effects_run_in_registration_order() {
     let s = create_signal(0);
 
     create_effect({
-        let s = s.clone();
         let order = order.clone();
         move || {
             let _ = s.get();
@@ -500,7 +472,6 @@ fn effects_run_in_registration_order() {
         }
     });
     create_effect({
-        let s = s.clone();
         let order = order.clone();
         move || {
             let _ = s.get();
@@ -508,7 +479,6 @@ fn effects_run_in_registration_order() {
         }
     });
     create_effect({
-        let s = s.clone();
         let order = order.clone();
         move || {
             let _ = s.get();
@@ -532,7 +502,6 @@ fn nested_batch_does_not_panic() {
     let s = create_signal(0);
     let calls = Rc::new(Cell::new(0));
     create_effect({
-        let s = s.clone();
         let calls = calls.clone();
         move || {
             let _ = s.get();
@@ -557,10 +526,7 @@ fn nested_batch_does_not_panic() {
 fn memo_afters_fire_on_value_change() {
     let base = create_signal(1);
     let after_values = Rc::new(std::cell::RefCell::new(Vec::new()));
-    let memo = create_memo({
-        let base = base.clone();
-        move || base.get() * 10
-    });
+    let memo = create_memo(move || base.get() * 10);
     memo.after({
         let after_values = after_values.clone();
         move |v| after_values.borrow_mut().push(*v)
@@ -630,7 +596,6 @@ fn reset_clears_global_state() {
     let s = create_signal(1);
     let calls = Rc::new(Cell::new(0));
     create_effect({
-        let s = s.clone();
         let calls = calls.clone();
         move || {
             let _ = s.get();
@@ -649,7 +614,6 @@ fn reset_clears_global_state() {
     let s2 = create_signal(0);
     let calls2 = Rc::new(Cell::new(0));
     create_effect({
-        let s2 = s2.clone();
         let calls2 = calls2.clone();
         move || {
             let _ = s2.get();
@@ -675,7 +639,7 @@ fn record_memo_records_only_when_dependency_changes() {
     let runs = Rc::new(Cell::new(0));
     let memo = wy_signal::RecordMemo::<Recorder>::new();
 
-    let count2 = count.clone();
+    let count2 = count;
     let runs2 = runs.clone();
     memo.record(move |r: &mut Recorder| {
         runs2.set(runs2.get() + 1);
@@ -695,7 +659,7 @@ fn record_memo_records_only_when_dependency_changes() {
 
     // 依赖变化后 record：重跑
     count.set(5);
-    let count2 = count.clone();
+    let count2 = count;
     let runs2 = runs.clone();
     memo.record(move |r: &mut Recorder| {
         runs2.set(runs2.get() + 1);
@@ -712,7 +676,7 @@ fn record_memo_on_change_fires_when_dep_pushed() {
     let count = create_signal(1);
     let memo = wy_signal::RecordMemo::<Recorder>::new();
 
-    let count2 = count.clone();
+    let count2 = count;
     memo.record(move |r: &mut Recorder| {
         let v = count2.get();
         r.0.clear();
@@ -737,7 +701,7 @@ fn record_memo_on_change_fires_when_dep_pushed() {
     assert_eq!(redraws.get(), 1, "依赖变化应触发 on_change");
 
     // 再次 record 消费变化并把边重挂回叶子
-    let count2 = count.clone();
+    let count2 = count;
     memo.record(move |r: &mut Recorder| {
         let v = count2.get();
         r.0.clear();

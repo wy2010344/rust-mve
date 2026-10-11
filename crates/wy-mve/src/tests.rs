@@ -183,9 +183,7 @@ fn layout_offsets_row_and_column() {
 fn render_for_each_tracks_signal_changes() {
     let items = create_signal(vec![1, 2, 3]);
     let root = render_root({
-        let items = items.clone();
         move |cx| {
-            let items = items.clone();
             cx.render_for_each(
                 move |emit| {
                     for v in items.get() {
@@ -216,10 +214,8 @@ fn render_for_each_reuses_holders_by_key() {
     let items = create_signal(vec![1, 2, 3]);
     let built = Rc::new(Cell::new(0));
     let root = render_root({
-        let items = items.clone();
         let built = built.clone();
         move |cx| {
-            let items = items.clone();
             let built = built.clone();
             cx.render_for_each(
                 move |emit| {

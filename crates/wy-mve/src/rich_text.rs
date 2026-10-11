@@ -1023,8 +1023,8 @@ mod tests {
         use wy_signal::{RecordMemo, Signal};
 
         let doc = Signal::new(String::from("a"));
-        let d1 = doc.clone();
-        let d2 = doc.clone();
+        let d1 = doc;
+        let d2 = doc;
         let (node, core) = rich_editable_opts(
             move || d1.get(),
             move |t| d2.set(t),

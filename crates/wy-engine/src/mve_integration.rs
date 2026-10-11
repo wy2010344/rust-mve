@@ -295,19 +295,19 @@ mod tests {
     /// 构建 counter 结构：column > (text + row(button-, button+))
     fn counter_app(count: Signal<i32>) -> MveApp {
         MveApp::new(move |cx| {
-            let column_count = count.clone();
+            let column_count = count;
             cx.child(column(move |cx| {
-                let c = column_count.clone();
+                let c = column_count;
                 cx.child(text(move || format!("Count: {}", c.get())));
 
-                let row_count = column_count.clone();
+                let row_count = column_count;
                 cx.child(row(move |cx| {
                     cx.child(button(move || "−".into(), {
-                        let s = row_count.clone();
+                        let s = row_count;
                         move || s.set(s.get() - 1)
                     }));
                     cx.child(button(move || "+".into(), {
-                        let s = row_count.clone();
+                        let s = row_count;
                         move || s.set(s.get() + 1)
                     }));
                 }));
@@ -318,7 +318,7 @@ mod tests {
     #[test]
     fn draw_builds_tree_once() {
         let count = Signal::new(0);
-        let app = counter_app(count.clone());
+        let app = counter_app(count);
 
         let mut scene = Scene::new();
         app.draw(&mut scene, 100.0, 100.0);
@@ -365,7 +365,7 @@ mod tests {
     #[test]
     fn counter_click_dispatches_to_button() {
         let count = Signal::new(0);
-        let app = counter_app(count.clone());
+        let app = counter_app(count);
 
         let mut scene = Scene::new();
         app.draw(&mut scene, 100.0, 100.0);
@@ -404,7 +404,7 @@ mod tests {
     #[test]
     fn hit_test_misses_outside_column() {
         let count = Signal::new(0);
-        let app = counter_app(count.clone());
+        let app = counter_app(count);
         let _ = app;
 
         let mut scene = Scene::new();
@@ -417,7 +417,7 @@ mod tests {
     #[test]
     fn text_reads_signal_at_draw() {
         let count = Signal::new(0);
-        let count2 = count.clone();
+        let count2 = count;
         let text_node = text(move || format!("Count: {}", count2.get()));
         assert!(text_node.on_click_fn.is_none());
 
@@ -429,11 +429,11 @@ mod tests {
     #[test]
     fn ime_allowed_after_click_focus() {
         let text = Signal::new(String::new());
-        let t1 = text.clone();
-        let t2 = text.clone();
+        let t1 = text;
+        let t2 = text;
         let mut app = MveApp::new(move |cx| {
-            let v = t1.clone();
-            let s = t2.clone();
+            let v = t1;
+            let s = t2;
             cx.child(wy_mve::text_field(move || v.get(), move |t| s.set(t)));
         });
         assert_eq!(app.ime_allowed(), None, "无焦点不干预");
@@ -460,9 +460,9 @@ mod tests {
     fn render_for_each_builds_list_once() {
         use wy_mve::NodeContext;
         let items = Signal::new(vec![1, 2, 3]);
-        let items2 = items.clone();
+        let items2 = items;
         let app = MveApp::new(move |cx: &mut NodeContext| {
-            let list = items2.clone();
+            let list = items2;
             cx.render_for_each(
                 move |emit| {
                     let snapshot = list.get();

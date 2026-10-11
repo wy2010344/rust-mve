@@ -1,4 +1,4 @@
-//! DemoList 复刻：`renderForEach` + 每项独立信号 + 局部重绘。
+//! DemoList 复刻：`rsx!` 声明式写法 + 每项独立信号 + 局部重绘。
 //!
 //! 运行：`cargo run -p wy-app --example demo`
 //!
@@ -7,12 +7,12 @@
 //! - 每项在 creater 里持有自己的信号（文本 / 折叠开关），
 //!   显示/隐藏明细只写项信号，不触碰主列表 → 该项局部重绘。
 //!
-//! 组件写法用 FC 风格 DSL：`vbox_at`/`hbox` 子节点作剩余参数，
-//! 原子组件用 `btn`/`label`（返回 `Slot`），可与 `for_each` 混在同一数组。
+//! 写法与 `todo.rs` 一致的 `rsx!` 宏；自定义绘制（明细条）以普通函数
+//! 返回 `Slot`，宏按普通组件调用处理。
 
 use std::rc::Rc;
 
-use wy_mve::{btn, for_each, hbox, label, vbox_at, Node, Slot};
+use wy_mve::rsx;
 use wy_render::{Color, Rect, Scene};
 use wy_signal::{create_signal, GetValue, SetValue, Signal};
 
@@ -20,6 +20,28 @@ use wy_signal::{create_signal, GetValue, SetValue, Signal};
 struct Item {
     id: u64,
     label: String,
+}
+
+/// 明细条：`show` 为真时绘制一条灰色提示带。
+///
+/// 抽成函数而非内联 `Node { .. }`，是为了让 rsx! 能把它当普通组件调用
+/// （返回 `Node`，宏会包成 `Slot`）。
+fn detail_bar(show: impl Fn() -> bool + 'static) -> wy_mve::Node {
+    wy_mve::Node {
+        draw_fn: Rc::new(move |scene| {
+            if !show() {
+                return;
+            }
+            if let Some(scene) = scene.downcast_mut::<Scene>() {
+                scene.fill_round_rect(
+                    Rect::new(0.0, 40.0, 140.0, 20.0),
+                    4.0,
+                    Color::from_u32(0xFF_F0F0F0),
+                );
+            }
+        }),
+        ..wy_mve::Node::default()
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -40,90 +62,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let next_id = Signal::new(3u64);
 
     let app = wy_engine::mve_integration::MveApp::new(move |cx| {
-        let state_list = state_list.clone();
-        let next_id = next_id.clone();
-        let push_list = state_list.clone();
-        let next = next_id.clone();
-        let count_list = state_list.clone();
-        let each_list = state_list.clone();
-
-        cx.child(vbox_at(
-            50.0,
-            30.0,
-            [
-                btn(
-                    move || format!("共有{}条 +", count_list.get().len()),
-                    move || {
-                        let id = next.get();
-                        next.set(id + 1);
-                        let mut v = push_list.get();
+        let node = rsx! {
+            vbox_at(50.0, 30.0) {
+                btn {
+                    label: format!("共有{}条 +", state_list.get().len()),
+                    on_click: move || {
+                        let id = next_id.get();
+                        next_id.set(id + 1);
+                        let mut v = state_list.get();
                         v.push(Item {
                             id,
                             label: format!("row {id}"),
                         });
-                        push_list.set(v);
-                    },
-                ),
-                for_each(
-                    move |emit| {
-                        for it in each_list.get() {
-                            emit(it.id, it);
+                        state_list.set(v);
+                    }
+                }
+
+                for_each(state_list, |it: &Item| it.id) { |row, _cx| {
+                    // 每项自己的信号：改它不影响其它项，也不重列列表
+                    let item = create_signal(row.borrow().clone());
+                    let detail = create_signal(false);
+
+                    hbox {
+                        label(format!("#{} {}", item.get().id, item.get().label))
+                        btn {
+                            label: if detail.get() { "hide" } else { "show" },
+                            on_click: move || detail.set(!detail.get())
                         }
-                    },
-                    move |id, value, item_cx| {
-                        let item = create_signal(value.borrow().clone());
-                        let detail = create_signal(false);
-
-                        let item_text = item.clone();
-                        let toggle_lbl = detail.clone();
-                        let toggle_set = detail.clone();
-                        let detail_show = detail.clone();
-                        let del_src = state_list.clone();
-
-                        item_cx.child(hbox([
-                            label(move || {
-                                let i = item_text.get();
-                                format!("#{} {}", i.id, i.label)
-                            }),
-                            btn(
-                                move || {
-                                    if toggle_lbl.get() {
-                                        "hide".into()
-                                    } else {
-                                        "show".into()
-                                    }
-                                },
-                                move || toggle_set.set(!toggle_set.get()),
-                            ),
-                            // 明细条：条件显示，直接用 Node 字面量包成 Slot
-                            Slot::One(Node {
-                                draw_fn: Rc::new(move |scene| {
-                                    if !detail_show.get() {
-                                        return;
-                                    }
-                                    if let Some(scene) = scene.downcast_mut::<Scene>() {
-                                        scene.fill_round_rect(
-                                            Rect::new(0.0, 40.0, 140.0, 20.0),
-                                            4.0,
-                                            Color::from_u32(0xFF_F0F0F0),
-                                        );
-                                    }
-                                }),
-                                ..Node::default()
-                            }),
-                            btn(
-                                || "×".into(),
-                                move || {
-                                    let mut v = del_src.get();
-                                    v.retain(|i| i.id != id);
-                                    del_src.set(v);
-                                },
-                            ),
-                        ]));
-                    },
-                ),
-            ],
-        ));
+                        detail_bar(move || detail.get())
+                        btn {
+                            label: "×",
+                            on_click: move || {
+                                let mut v = state_list.get();
+                                let id = row.borrow().id;
+                                v.retain(|i| i.id != id);
+                                state_list.set(v);
+                            }
+                        }
+                    }
+                }}
+            }
+        };
+        cx.child(node.into_node());
     });
 
     wy_engine::runner::run(app)

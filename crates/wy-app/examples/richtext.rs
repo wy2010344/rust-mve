@@ -25,9 +25,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pass = Signal::new(String::from("secret123"));
 
     let app = wy_engine::mve_integration::MveApp::new(move |cx| {
-        let doc = doc.clone();
-        let log = log.clone();
-        let pass = pass.clone();
         cx.child(column_at(30.0, 30.0, move |cx| {
             // ---- 标题 ----
             cx.child(Node {
@@ -54,19 +51,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 placeholder: "点击此处输入...".into(),
                 ..Default::default()
             };
-            let d1 = doc.clone();
-            let d2 = doc.clone();
+            let d1 = doc;
+            let d2 = doc;
             let (editor_node, core_rc) =
                 rich_editable_opts(move || d1.get(), move |t| d2.set(t), editor_opts);
             cx.child(editor_node);
 
             // ---- 样式按钮行 ----
             let c1 = core_rc.clone();
-            let d_log = log.clone();
+            let d_log = log;
             cx.child(row(move |cx| {
                 // 红色：把选区样式设为红色
                 let c = Rc::clone(&c1);
-                let lg = d_log.clone();
+                let lg = d_log;
                 cx.child(button(
                     move || "红色".into(),
                     move || {
@@ -138,8 +135,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             cx.child(text(|| "密码框:".into()));
 
             // ---- 密码输入 ----
-            let p1 = pass.clone();
-            let p2 = pass.clone();
+            let p1 = pass;
+            let p2 = pass;
             cx.child(rich_text_opts(
                 move || p1.get(),
                 move |t| p2.set(t),
@@ -153,7 +150,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
 
             // ---- 日志 ----
-            let log_sig = log.clone();
+            let log_sig = log;
             cx.child(text(move || log_sig.get()));
         }));
     });

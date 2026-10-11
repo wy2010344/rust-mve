@@ -30,20 +30,45 @@ struct SignalInner<T> {
 
 /// 叶子信号：持有值 + 订阅集合。
 ///
-/// `Signal<T>` 是 `Rc` 包装的共享句柄，可被克隆并作为 Widget 字段持有。
+/// `Signal<T>` 是**共享句柄**，语义上等价于一个共享引用，因此实现 `Copy`：
+/// 多个闭包可各自持有一份副本而无需显式 `.clone()`。这让 `rsx!` 里的信号
+/// 捕获不再需要样板：
+///
+/// ```ignore
+/// let count = Signal::new(0);
+/// btn {
+///     label: format!("{n}"),
+///     on_click: move || count.set(1),   // 直接用，无需 clone
+/// }
+/// ```
+///
+/// # 生命周期
+///
+/// `new` 用 [`Rc::leak`] 把 `SignalInner` 转为 `&'static`，句柄本身不拥有数据，
+/// 因此 `Signal` 可 `Copy` 而不会重复释放。代价：信号的值与订阅集在
+/// `Signal` 全部消失后仍不回收。对 UI 而言信号数量约等于组件实例数，
+/// 这个量级可以忽略；若将来需要精确回收，需改回 `Rc` 并放弃 `Copy`。
+///
 /// 泛型 `T` 需实现 `Clone`（`get()` 返回克隆值）即可，无需 `PartialEq`
-/// 之外约束——默认用 `PartialEq` 做变化比对。
-pub struct Signal<T> {
-    inner: Rc<SignalInner<T>>,
+/// 之外约束——默认用 `PartialEq` 做变化比对。`T: 'static` 是 `&'static`
+/// 存储的必要条件，信号本就应持有拥有生命周期的值。
+pub struct Signal<T: 'static> {
+    inner: &'static SignalInner<T>,
 }
+
+/// `Signal` 是共享句柄，复制即共享同一份值与订阅集。
+impl<T> Copy for Signal<T> {}
 
 impl<T> Clone for Signal<T> {
     fn clone(&self) -> Self {
-        Self {
-            inner: Rc::clone(&self.inner),
-        }
+        *self
     }
 }
+
+// `inner` 是 `&'static`，指向由 `Rc::into_raw` 交出所有权的内存。
+// 该内存在 `Signal` 全部消失后仍不回收，`&'static` 因此永远有效。
+// SAFETY: 内存由 `Rc::into_raw` 产生且永不释放；`Signal` 只能复制不能移动
+// 所有权（无 `Drop`），故不存在双重释放或悬垂。
 
 impl<T: fmt::Debug> fmt::Debug for Signal<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -80,12 +105,16 @@ impl<T> Signal<T> {
     ) -> Self {
         let id = with_global(|g| g.alloc_id());
         Self {
-            inner: Rc::new(SignalInner {
-                value: RefCell::new(initial),
-                listeners: Rc::new(RefCell::new(Vec::new())),
-                id,
-                should_change: Box::new(should_change),
-            }),
+            // `Rc::into_raw` + 重新借用为 `&'static`：句柄不拥有数据，故 `Signal` 可 `Copy`。
+            // 内存不回收（见类型文档的"生命周期"说明）。
+            inner: unsafe {
+                &*Rc::into_raw(Rc::new(SignalInner {
+                    value: RefCell::new(initial),
+                    listeners: Rc::new(RefCell::new(Vec::new())),
+                    id,
+                    should_change: Box::new(should_change),
+                }))
+            },
         }
     }
 
@@ -104,15 +133,13 @@ impl<T> Signal<T> {
             return snapshot;
         }
         let dep_id = self.inner.id;
-        let inner_for_reget = Rc::clone(&self.inner);
-        let inner_for_build = Rc::clone(&self.inner);
-        let listeners = Rc::clone(&self.inner.listeners);
+        let inner = self.inner;
+        let listeners = Rc::clone(&inner.listeners);
         crate::context::register_dep(dep_id, listeners, move || {
             // 再读取器：捕获信号自身，供 memo 重查快照用。
-            let reget: crate::get_::ReGet =
-                Rc::new(move || Box::new(inner_for_reget.value.borrow().clone()));
+            let reget: crate::get_::ReGet = Rc::new(move || Box::new(inner.value.borrow().clone()));
             // 快照只在 memo 需要时才构建，避免热路径重复克隆。
-            (Box::new(inner_for_build.value.borrow().clone()), reget)
+            (Box::new(inner.value.borrow().clone()), reget)
         });
         snapshot
     }
@@ -212,7 +239,7 @@ pub fn create_signal_with_comparator<T>(
 ///
 /// 通过 [`LateSignal::get_only_set`] 获取，只能获取一次。
 /// 后续调用返回 `None`，确保写权限唯一。
-pub struct WriteHandle<T> {
+pub struct WriteHandle<T: 'static> {
     signal: Signal<T>,
 }
 
@@ -243,22 +270,22 @@ impl<T: Clone + fmt::Debug + 'static> fmt::Debug for WriteHandle<T> {
 /// writer.set(42);
 /// assert_eq!(late.get(), 42);
 /// ```
-pub struct LateSignal<T> {
+pub struct LateSignal<T: 'static> {
     signal: Signal<T>,
     /// 写句柄是否已被获取。
     taken: Cell<bool>,
 }
 
-impl<T> Clone for LateSignal<T> {
+impl<T: 'static> Clone for LateSignal<T> {
     fn clone(&self) -> Self {
         Self {
-            signal: self.signal.clone(),
+            signal: self.signal,
             taken: Cell::new(self.taken.get()),
         }
     }
 }
 
-impl<T: PartialEq> LateSignal<T> {
+impl<T: PartialEq + 'static> LateSignal<T> {
     /// 创建延迟信号，初始值为 `initial`。
     pub fn new(initial: T) -> Self {
         Self {
@@ -268,7 +295,7 @@ impl<T: PartialEq> LateSignal<T> {
     }
 }
 
-impl<T> LateSignal<T> {
+impl<T: 'static> LateSignal<T> {
     /// 创建带自定义比较器的延迟信号。
     pub fn new_with_comparator(
         initial: T,
@@ -287,7 +314,7 @@ impl<T> LateSignal<T> {
         } else {
             self.taken.set(true);
             Some(WriteHandle {
-                signal: self.signal.clone(),
+                signal: self.signal,
             })
         }
     }
@@ -308,6 +335,6 @@ impl<T: Clone + fmt::Debug + 'static> fmt::Debug for LateSignal<T> {
 }
 
 /// 便捷构造延迟信号。
-pub fn create_late_signal<T: PartialEq>(initial: T) -> LateSignal<T> {
+pub fn create_late_signal<T: PartialEq + 'static>(initial: T) -> LateSignal<T> {
     LateSignal::new(initial)
 }

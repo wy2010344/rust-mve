@@ -21,19 +21,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let log = Signal::new(String::new());
 
     let app = wy_engine::mve_integration::MveApp::new(move |cx| {
-        let name = name.clone();
-        let pass = pass.clone();
-        let log = log.clone();
         cx.child(column_at(50.0, 50.0, move |cx| {
-            let l = log.clone();
+            let l = log;
             cx.child(text_signal(move || l.get()));
 
-            let n1 = name.clone();
-            let n2 = name.clone();
+            let n1 = name;
+            let n2 = name;
             cx.child(text_field(move || n1.get(), move |t| n2.set(t)));
 
-            let p1 = pass.clone();
-            let p2 = pass.clone();
+            let p1 = pass;
+            let p2 = pass;
             cx.child(text_field_opts(
                 move || p1.get(),
                 move |t| p2.set(t),
@@ -46,9 +43,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
             ));
 
-            let l = log.clone();
-            let n = name.clone();
-            let p = pass.clone();
+            let l = log;
+            let n = name;
+            let p = pass;
             cx.child(button(
                 move || "显示输入".into(),
                 move || {

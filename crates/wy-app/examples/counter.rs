@@ -10,17 +10,17 @@ use wy_signal::{GetValue, SetValue, Signal};
 
 fn counter_ui(cx: &mut NodeContext, count: Signal<i32>) {
     cx.child(column_at(350.0, 250.0, move |cx| {
-        let c = count.clone();
+        let c = count;
         cx.child(text_signal(move || Box::new(format!("Count: {}", c.get()))));
 
-        let row_count = count.clone();
+        let row_count = count;
         cx.child(row(move |cx| {
             cx.child(button(move || "−".into(), {
-                let s = row_count.clone();
+                let s = row_count;
                 move || s.set(s.get() - 1)
             }));
             cx.child(button(move || "+".into(), {
-                let s = row_count.clone();
+                let s = row_count;
                 move || s.set(s.get() + 1)
             }));
         }));
@@ -29,9 +29,6 @@ fn counter_ui(cx: &mut NodeContext, count: Signal<i32>) {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let count = Signal::new(0);
-    let app = wy_engine::mve_integration::MveApp::new({
-        let count = count.clone();
-        move |cx| counter_ui(cx, count.clone())
-    });
+    let app = wy_engine::mve_integration::MveApp::new(move |cx| counter_ui(cx, count));
     wy_engine::runner::run(app)
 }
