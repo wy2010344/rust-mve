@@ -5,10 +5,13 @@
 //! 对应 Kotlin `DemoList.kt`：
 //! - 顶层按钮统计列表长度并添加条目（写主列表）；
 //! - 每项在 creater 里持有自己的信号（文本 / 折叠开关），
-//!   显示/隐藏明细只写项信号，不触碰主列表 → 该项局部重绘。
+//!   显示/隐藏明细只写项信号，不触碰主列表 → 该项局部重绘；
+//! - 顶层容器 `gap: if compact.get() { .. } else { .. }` —— 属性是动态的，
+//!   由宏包成闭包、布局期求值、读信号自动追踪
+//!   （Kotlin `override val gap get() = ...`）。
 //!
 //! 写法与 `todo.rs` 一致的 `rsx!` 宏；自定义绘制（明细条）以普通函数
-//! 返回 `Slot`，宏按普通组件调用处理。
+//! 返回 `Node`，宏按普通组件调用处理。
 
 use std::rc::Rc;
 
@@ -60,10 +63,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     ]);
     let next_id = Signal::new(3u64);
+    // 紧凑模式：驱动顶层容器的动态 gap（Kotlin `override val gap get() = ...`）
+    let compact = create_signal(false);
 
     let app = wy_engine::mve_integration::MveApp::new(move |cx| {
         let node = rsx! {
             vbox_at(50.0, 30.0) {
+                // 属性表达式由宏包成闭包，布局期求值、读信号自动追踪
+                gap: if compact.get() { 2.0 } else { 10.0 },
+                btn {
+                    label: if compact.get() { "宽松" } else { "紧凑" },
+                    on_click: move || compact.set(!compact.get())
+                }
                 btn {
                     label: format!("共有{}条 +", state_list.get().len()),
                     on_click: move || {

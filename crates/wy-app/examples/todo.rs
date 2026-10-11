@@ -22,6 +22,9 @@ struct Todo {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let todos = Signal::new(Vec::<Todo>::new());
+    // id 单调递增，永不复用：删除中间项后新 id 不会与已存在的项冲突，
+    // for_each 的 key 才始终唯一（用 list.len() 会重复）。
+    let next_id = Signal::new(0usize);
 
     let app = wy_engine::mve_integration::MveApp::new(move |cx| {
         let node = rsx! {
@@ -29,8 +32,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 btn {
                     label: "+ Add",
                     on_click: move || {
+                        let id = next_id.get();
+                        next_id.set(id + 1);
                         let mut list = todos.get();
-                        let id = list.len();
                         list.push(Todo {
                             id,
                             text: format!("Item {}", id + 1),

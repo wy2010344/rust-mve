@@ -155,7 +155,7 @@ fn layout_offsets_row_and_column() {
     });
     assert_eq!(node_size(&row_node), (118.0, 20.0));
     assert_eq!(
-        layout_offsets(Layout::Row { gap: 8.0 }, &children_nodes(&row_node)),
+        layout_offsets(Layout::Row, row_node.gap(), &children_nodes(&row_node)),
         vec![(0.0, 0.0), (58.0, 0.0)]
     );
 
@@ -173,7 +173,7 @@ fn layout_offsets_row_and_column() {
     });
     assert_eq!(node_size(&col_node), (50.0, 58.0));
     assert_eq!(
-        layout_offsets(Layout::Column { gap: 8.0 }, &children_nodes(&col_node)),
+        layout_offsets(Layout::Column, col_node.gap(), &children_nodes(&col_node)),
         vec![(0.0, 0.0), (0.0, 28.0)]
     );
 }
@@ -319,4 +319,90 @@ fn button_and_text_nodes() {
     let t = text(|| "hi".into());
     assert!(!t.focusable);
     assert!(t.on_click_fn.is_none());
+}
+
+// ============================================================================
+// 动态属性（复刻 Kotlin getter 语义）
+// ============================================================================
+
+#[test]
+fn dynamic_gap_via_fn() {
+    let gap = create_signal(4.0f32);
+    let n = Node {
+        layout: Some(Layout::Column),
+        gap_fn: Some(Rc::new(move || gap.get())),
+        ..Node::default()
+    };
+    assert_eq!(n.gap(), 4.0);
+    gap.set(20.0);
+    assert_eq!(n.gap(), 20.0, "gap_fn 每次求值，信号变化即生效");
+}
+
+#[test]
+fn dynamic_hide_via_fn() {
+    let vis = create_signal(true);
+    let n = Node {
+        hide_fn: Some(Rc::new(move || !vis.get())),
+        ..Node::default()
+    };
+    assert!(!n.is_hidden());
+    vis.set(false);
+    assert!(n.is_hidden());
+}
+
+#[test]
+fn dynamic_position_and_size_via_fn() {
+    let x = create_signal(10.0f32);
+    let w = create_signal(100.0f32);
+    let n = Node {
+        x_fn: Some(Rc::new(move || x.get())),
+        width_fn: Some(Rc::new(move || w.get())),
+        ..Node::default()
+    };
+    assert_eq!(n.pos_x(), 10.0);
+    assert_eq!(n.effective_width(), 100.0);
+    x.set(50.0);
+    w.set(200.0);
+    assert_eq!(n.pos_x(), 50.0);
+    assert_eq!(n.effective_width(), 200.0);
+    // node_size 走动态值
+    assert_eq!(node_size(&n), (200.0, 0.0));
+}
+
+#[test]
+fn size_fn_overrides_layout_derivation() {
+    let n = Node {
+        layout: Some(Layout::Column),
+        size_fn: Some(Rc::new(|| (300.0, 40.0))),
+        ..Node::default()
+    };
+    assert_eq!(node_size(&n), (300.0, 40.0), "size_fn 优先于子节点累加");
+}
+
+#[test]
+fn dynamic_gap_drives_layout_offsets() {
+    let gap = create_signal(8.0f32);
+    let container = Node {
+        layout: Some(Layout::Row),
+        gap_fn: Some(Rc::new(move || gap.get())),
+        arg_children_fn: Rc::new(move |cx| {
+            cx.add_node(Node {
+                width: 10.0,
+                height: 10.0,
+                ..Node::default()
+            });
+            cx.add_node(Node {
+                width: 10.0,
+                height: 10.0,
+                ..Node::default()
+            });
+        }),
+        ..Node::default()
+    };
+    let children = children_nodes(&container);
+    let offsets = layout_offsets(Layout::Row, container.gap(), &children);
+    assert_eq!(offsets[1].0, 18.0);
+    gap.set(0.0);
+    let offsets = layout_offsets(Layout::Row, container.gap(), &children);
+    assert_eq!(offsets[1].0, 10.0, "gap 变化后布局偏移立即更新");
 }

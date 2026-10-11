@@ -1,4 +1,4 @@
-//! FC 风格 DSL：结构化组件声明，取代「回调 + `cx`」样板。
+﻿//! FC 风格 DSL：结构化组件声明，取代「回调 + `cx`」样板。
 //!
 //! 动机：OOC 侧的 `dom` / `forEach` 用**剩余参数**接收子节点，
 //! 组件作者写 `button(on_click, text(...))` 而不是 `button(..., |cx| cx.child(...))`。
@@ -63,6 +63,10 @@ impl ChildArg {
 /// Rust 数组要求元素同类型，所以 `[text(..), for_each(..)]` 里的
 /// `Node` 与 `ChildArg` 需要统一到 `Slot` 才能放进同一个数组。
 /// `vbox` / `hbox` 等通过 [`Slot::from`] 自动转换（`Into<Slot>`）。
+///
+/// `Node` 是句柄型结构（字段以 `Rc` 为主，克隆共享），拆箱只多一次堆
+/// 分配，故不 `Box`。
+#[allow(clippy::large_enum_variant)]
 pub enum Slot {
     /// 单个已构造节点。
     One(Node),
@@ -200,25 +204,29 @@ fn box_with(layout: Option<Layout>, children: impl Children + 'static) -> Node {
 /// ```
 #[must_use]
 pub fn vbox(children: impl Children + 'static) -> Node {
-    box_with(Some(Layout::Column { gap: 8.0 }), children)
+    box_with(Some(Layout::Column), children)
 }
 
 /// 横排容器（主轴 X，间距 8）。
 #[must_use]
 pub fn hbox(children: impl Children + 'static) -> Node {
-    box_with(Some(Layout::Row { gap: 8.0 }), children)
+    box_with(Some(Layout::Row), children)
 }
 
 /// 自定义间距的竖排容器。
 #[must_use]
 pub fn vbox_gap(gap: f32, children: impl Children + 'static) -> Node {
-    box_with(Some(Layout::Column { gap }), children)
+    let mut n = box_with(Some(Layout::Column), children);
+    n.gap = gap;
+    n
 }
 
 /// 自定义间距的横排容器。
 #[must_use]
 pub fn hbox_gap(gap: f32, children: impl Children + 'static) -> Node {
-    box_with(Some(Layout::Row { gap }), children)
+    let mut n = box_with(Some(Layout::Row), children);
+    n.gap = gap;
+    n
 }
 
 /// 带绝对定位的竖排容器。
@@ -361,19 +369,10 @@ mod macro_alias {
 }
 
 pub use macro_alias::*;
-///
-/// 返回 [`ChildArg`] 而非 `Node`：动态区域（`GetNodes` slot）**直接注入父容器**。
-/// 若包成中间 `Node`，`flatten` 不递归进它的子节点，列表项会脱离父容器布局
-/// （高度塌成 0、所有项重叠在一行）。
-///
-/// # Examples
-///
-/// ```
-/// use wy_mve::{vbox, label, for_each};
-/// let node = vbox([
+
 /// 按 `render_for_each` 展开列表子节点（keyed diff）。
 ///
-/// 返回 [`Slot`]：动态区域（`GetNodes` slot）**直接注入父容器**。
+/// 返回 [`ChildArg`] 而非 `Node`：动态区域（`GetNodes` slot）**直接注入父容器**。
 /// 若包成中间 `Node`，`flatten` 不递归进它的子节点，列表项会脱离父容器布局
 /// （高度塌成 0、所有项重叠在一行）。
 ///
@@ -444,6 +443,52 @@ mod tests {
         };
         let kids = collect([slot]);
         assert_eq!(kids.len(), 1);
+    }
+
+    #[test]
+    fn rsx_static_attrs_assign_fields() {
+        use crate::rsx;
+        let slot = rsx! {
+            vbox {
+                gap: 12.0,
+                hide: false,
+                hbox {
+                    width: 300.0,
+                    label("x")
+                }
+            }
+        };
+        let n = slot.into_node();
+        assert_eq!(n.gap(), 12.0, "f32 字面量直赋静态字段");
+        assert_eq!(n.gap, 12.0);
+        assert!(!n.is_hidden());
+        let kids = collect([n]);
+        let hbox = &children_nodes(&kids[0])[0];
+        assert_eq!(hbox.width, 300.0);
+    }
+
+    #[test]
+    fn rsx_dynamic_attr_binds_signal() {
+        use crate::rsx;
+        use wy_signal::{create_signal, GetValue, SetValue};
+        let gap = create_signal(4.0f32);
+        let vis = create_signal(true);
+        let slot = rsx! {
+            vbox {
+                gap: gap.get(),
+                hide: !vis.get(),
+                label("x")
+            }
+        };
+        let n = slot.into_node();
+        assert_eq!(n.gap(), 4.0);
+        assert!(!n.is_hidden());
+        assert!(n.gap_fn.is_some(), "非字面量应包成 gap_fn");
+        assert!(n.hide_fn.is_some(), "非字面量应包成 hide_fn");
+        gap.set(32.0);
+        vis.set(false);
+        assert_eq!(n.gap(), 32.0, "信号变化后动态 gap 生效");
+        assert!(n.is_hidden(), "信号变化后动态 hide 生效");
     }
 
     #[test]
@@ -693,14 +738,12 @@ mod tests {
 
     #[test]
     fn gap_variants() {
-        assert_eq!(
-            vbox_gap(0.0, [text(|| "a".into())]).layout,
-            Some(Layout::Column { gap: 0.0 })
-        );
-        assert_eq!(
-            hbox_gap(16.0, [text(|| "a".into())]).layout,
-            Some(Layout::Row { gap: 16.0 })
-        );
+        let v = vbox_gap(0.0, [text(|| "a".into())]);
+        assert_eq!(v.layout, Some(Layout::Column));
+        assert_eq!(v.gap(), 0.0);
+        let h = hbox_gap(16.0, [text(|| "a".into())]);
+        assert_eq!(h.layout, Some(Layout::Row));
+        assert_eq!(h.gap(), 16.0);
     }
 
     #[test]

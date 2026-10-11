@@ -26,6 +26,13 @@ type ImeFn = Rc<dyn Fn(&mut ImeEvent) -> bool>;
 /// 供容器布局消费（复刻 Kotlin `RichTextNode.argWidth/argHeight`）。
 type MeasureFn = Rc<dyn Fn() -> (f32, f32)>;
 
+/// 动态数值属性（复刻 Kotlin `open val get() = ...` 的 getter 语义）。
+///
+/// 在布局/绘制期（信号 track 上下文内）求值，读信号自动追踪依赖。
+pub type DynNum = Rc<dyn Fn() -> f32>;
+/// 动态布尔属性（对应 Kotlin `open val hide: Boolean get() = ...`）。
+pub type DynBool = Rc<dyn Fn() -> bool>;
+
 /// 节点是否参与事件命中（有 handler 才算可命中）。
 pub fn has_handler(node: &Node) -> bool {
     node.on_click_fn.is_some() || node.on_down_fn.is_some() || node.on_up_fn.is_some()
@@ -65,12 +72,28 @@ pub struct Node {
     pub selection_enabled: bool,
     /// 一维容器角色：渲染期对扁平化后的子节点做排布。
     pub layout: Option<Layout>,
-    /// 布局尺寸（由布局系统或组件设置）。
+    /// 布局位置（静态值；动态来源见 `x_fn`/`y_fn`，对应 Kotlin `argPosition`）。
     pub x: f32,
     pub y: f32,
-    /// 布局尺寸（由布局系统或组件设置）。
+    /// 布局尺寸（静态值；动态来源见 `width_fn`/`height_fn`，对应 Kotlin `argSize`）。
     pub width: f32,
     pub height: f32,
+    /// 间距（复刻 Kotlin `FlexParam.gap`：容器属性而非布局配置，布局期读取）。
+    pub gap: f32,
+    /// 动态位置 X（覆盖 `x`，对应 Kotlin `override fun argPosition(Direction.x)`）。
+    pub x_fn: Option<DynNum>,
+    /// 动态位置 Y（覆盖 `y`）。
+    pub y_fn: Option<DynNum>,
+    /// 动态宽度（覆盖 `width`，对应 Kotlin `override val argWidth`）。
+    pub width_fn: Option<DynNum>,
+    /// 动态高度（覆盖 `height`，对应 Kotlin `override val argHeight`）。
+    pub height_fn: Option<DynNum>,
+    /// 动态间距（覆盖 `gap`，对应 Kotlin `override val gap get() = ...`）。
+    pub gap_fn: Option<DynNum>,
+    /// 动态隐藏（覆盖 `hidden`，对应 Kotlin `override val hide get() = ...`）。
+    pub hide_fn: Option<DynBool>,
+    /// 整体尺寸来源（覆盖推导链，对应 Kotlin `override fun argSize`）。
+    pub size_fn: Option<MeasureFn>,
     /// 自然尺寸测量：文本等内容型节点的 intrinsic 尺寸来源；
     /// `node_size` 优先取它，其次才用 `width`/`height`。
     pub measure_fn: Option<MeasureFn>,
@@ -104,6 +127,14 @@ impl Clone for Node {
             y: self.y,
             width: self.width,
             height: self.height,
+            gap: self.gap,
+            x_fn: self.x_fn.as_ref().map(Rc::clone),
+            y_fn: self.y_fn.as_ref().map(Rc::clone),
+            width_fn: self.width_fn.as_ref().map(Rc::clone),
+            height_fn: self.height_fn.as_ref().map(Rc::clone),
+            gap_fn: self.gap_fn.as_ref().map(Rc::clone),
+            hide_fn: self.hide_fn.as_ref().map(Rc::clone),
+            size_fn: self.size_fn.as_ref().map(Rc::clone),
             measure_fn: self.measure_fn.as_ref().map(Rc::clone),
             children: Rc::clone(&self.children),
             identity: Rc::clone(&self.identity),
@@ -156,6 +187,14 @@ impl Default for Node {
             y: 0.0,
             width: 0.0,
             height: 0.0,
+            gap: 8.0,
+            x_fn: None,
+            y_fn: None,
+            width_fn: None,
+            height_fn: None,
+            gap_fn: None,
+            hide_fn: None,
+            size_fn: None,
             measure_fn: None,
             children: Rc::new(RefCell::new(None)),
             identity,
@@ -218,25 +257,79 @@ impl Node {
         self.focusable
     }
 
+    /// 是否隐藏（动态 `hide_fn` 优先，回落静态 `hidden`；复刻 Kotlin `hide` getter）。
     pub fn is_hidden(&self) -> bool {
-        self.hidden
+        if let Some(f) = &self.hide_fn {
+            f()
+        } else {
+            self.hidden
+        }
+    }
+
+    /// 布局间距（动态 `gap_fn` 优先，回落静态 `gap`；复刻 Kotlin `FlexParam.gap`）。
+    pub fn gap(&self) -> f32 {
+        if let Some(f) = &self.gap_fn {
+            f()
+        } else {
+            self.gap
+        }
+    }
+
+    /// 布局位置 X（动态 `x_fn` 优先，回落静态 `x`；复刻 Kotlin `argPosition(Direction.x)`）。
+    pub fn pos_x(&self) -> f32 {
+        if let Some(f) = &self.x_fn {
+            f()
+        } else {
+            self.x
+        }
+    }
+
+    /// 布局位置 Y（动态 `y_fn` 优先，回落静态 `y`）。
+    pub fn pos_y(&self) -> f32 {
+        if let Some(f) = &self.y_fn {
+            f()
+        } else {
+            self.y
+        }
+    }
+
+    /// 动态宽度（`width_fn` 覆盖 `width`；对应 Kotlin `argWidth`）。
+    pub fn effective_width(&self) -> f32 {
+        if let Some(f) = &self.width_fn {
+            f()
+        } else {
+            self.width
+        }
+    }
+
+    /// 动态高度（`height_fn` 覆盖 `height`；对应 Kotlin `argHeight`）。
+    pub fn effective_height(&self) -> f32 {
+        if let Some(f) = &self.height_fn {
+            f()
+        } else {
+            self.height
+        }
     }
 }
 
 /// 一维容器排布：渲染期对扁平化后的子节点计算偏移。
 ///
 /// 对应 Kotlin `FlexParam`/`Direction` 的一维布局模型。
+/// 间距由节点属性提供（`Node::gap`），布局算法本身无状态——
+/// 复刻 Kotlin「gap 是容器属性、布局期向容器索取」的形态。
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Layout {
     /// 主轴 = X，子节点依次右排。
-    Row { gap: f32 },
+    Row,
     /// 主轴 = Y，子节点依次下排。
-    Column { gap: f32 },
+    Column,
 }
 
 /// 子节点类型：静态节点或动态区域。
 ///
 /// 对应 Kotlin `ValueOrGetList<Node>`。
+/// `Node` 是句柄型结构（字段以 `Rc` 为主），不 `Box`（见 [`crate::fc::Slot`]）。
+#[allow(clippy::large_enum_variant)]
 pub enum ChildSlot {
     /// 静态节点（构建期生成，之后不变）。
     Node(Node),
@@ -332,10 +425,20 @@ pub fn children_nodes(node: &Node) -> Vec<Node> {
 
 /// 节点内容的尺寸：布局容器按实时子节点计算，普通节点用自身宽高。
 ///
-/// 对应 Kotlin `FlexParam` 在布局期的尺寸派生。
+/// 对应 Kotlin `FlexParam` 在布局期的尺寸派生。优先级（贴近 Kotlin
+/// `RectNode.argSize` 的推导链）：
+/// 1. `size_fn`（显式覆盖，对应 Kotlin `override fun argSize`）
+/// 2. 布局容器：子节点累加撑起（对应 `sizeFromChildren`）
+/// 3. `measure_fn`（内容测量，如文本）
+/// 4. `width_fn`/`height_fn` 动态值
+/// 5. 静态 `width`/`height`
 pub fn node_size(node: &Node) -> (f32, f32) {
+    if let Some(f) = &node.size_fn {
+        return f();
+    }
     match node.layout {
-        Some(Layout::Row { gap }) => {
+        Some(Layout::Row) => {
+            let gap = node.gap();
             let children = children_nodes(node);
             let mut x = 0.0;
             let mut h = 0.0;
@@ -349,7 +452,8 @@ pub fn node_size(node: &Node) -> (f32, f32) {
             let w = if children.is_empty() { 0.0 } else { x - gap };
             (w, h)
         }
-        Some(Layout::Column { gap }) => {
+        Some(Layout::Column) => {
+            let gap = node.gap();
             let children = children_nodes(node);
             let mut y = 0.0;
             let mut w = 0.0;
@@ -366,18 +470,23 @@ pub fn node_size(node: &Node) -> (f32, f32) {
         None => {
             if let Some(m) = &node.measure_fn {
                 let (w, h) = m();
-                (w.max(node.width), h.max(node.height))
+                (
+                    w.max(node.effective_width()),
+                    h.max(node.effective_height()),
+                )
             } else {
-                (node.width, node.height)
+                (node.effective_width(), node.effective_height())
             }
         }
     }
 }
 
 /// 对扁平化子节点计算一维布局偏移（主轴依次排布，Cross 轴对齐到 0）。
-pub fn layout_offsets(layout: Layout, children: &[Node]) -> Vec<(f32, f32)> {
+///
+/// `gap` 由调用方从节点读取（`Node::gap`，动态属性优先）。
+pub fn layout_offsets(layout: Layout, gap: f32, children: &[Node]) -> Vec<(f32, f32)> {
     match layout {
-        Layout::Row { gap } => {
+        Layout::Row => {
             let mut x = 0.0;
             children
                 .iter()
@@ -388,7 +497,7 @@ pub fn layout_offsets(layout: Layout, children: &[Node]) -> Vec<(f32, f32)> {
                 })
                 .collect()
         }
-        Layout::Column { gap } => {
+        Layout::Column => {
             let mut y = 0.0;
             children
                 .iter()

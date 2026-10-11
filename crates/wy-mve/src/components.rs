@@ -1,4 +1,4 @@
-//! 声明式组件辅助函数：text / button / row / column。
+﻿//! 声明式组件辅助函数：text / button / row / column。
 //!
 //! 用户通过组合这些函数构建 UI，不需要手动写 draw/hit_test/event。
 //!
@@ -129,7 +129,7 @@ pub fn button(label: impl Fn() -> String + 'static, on_click: impl Fn() + 'stati
 /// 水平排列容器（主轴 = X，子节点依次右排，间距 8）。
 pub fn row(children: impl Fn(&mut NodeContext) + 'static) -> Node {
     Node {
-        layout: Some(Layout::Row { gap: 8.0 }),
+        layout: Some(Layout::Row),
         arg_children_fn: Rc::new(move |cx| children(cx)),
         ..Node::default()
     }
@@ -140,7 +140,7 @@ pub fn row_at(x: f32, y: f32, children: impl Fn(&mut NodeContext) + 'static) -> 
     Node {
         x,
         y,
-        layout: Some(Layout::Row { gap: 8.0 }),
+        layout: Some(Layout::Row),
         arg_children_fn: Rc::new(move |cx| children(cx)),
         ..Node::default()
     }
@@ -149,7 +149,7 @@ pub fn row_at(x: f32, y: f32, children: impl Fn(&mut NodeContext) + 'static) -> 
 /// 垂直排列容器（主轴 = Y，子节点依次下排，间距 8）。
 pub fn column(children: impl Fn(&mut NodeContext) + 'static) -> Node {
     Node {
-        layout: Some(Layout::Column { gap: 8.0 }),
+        layout: Some(Layout::Column),
         arg_children_fn: Rc::new(move |cx| children(cx)),
         ..Node::default()
     }
@@ -160,7 +160,7 @@ pub fn column_at(x: f32, y: f32, children: impl Fn(&mut NodeContext) + 'static) 
     Node {
         x,
         y,
-        layout: Some(Layout::Column { gap: 8.0 }),
+        layout: Some(Layout::Column),
         arg_children_fn: Rc::new(move |cx| children(cx)),
         ..Node::default()
     }
@@ -199,13 +199,15 @@ mod tests {
     #[test]
     fn row_sets_layout() {
         let r = row(|_| {});
-        assert_eq!(r.layout, Some(Layout::Row { gap: 8.0 }));
+        assert_eq!(r.layout, Some(Layout::Row));
+        assert_eq!(r.gap(), 8.0);
     }
 
     #[test]
     fn column_sets_layout() {
         let c = column(|_| {});
-        assert_eq!(c.layout, Some(Layout::Column { gap: 8.0 }));
+        assert_eq!(c.layout, Some(Layout::Column));
+        assert_eq!(c.gap(), 8.0);
     }
 
     #[test]
@@ -223,7 +225,7 @@ mod tests {
             });
         });
         let children = children_nodes(&r);
-        let offsets = crate::node::layout_offsets(Layout::Row { gap: 8.0 }, &children);
+        let offsets = crate::node::layout_offsets(Layout::Row, r.gap(), &children);
         assert_eq!(offsets[0], (0.0, 0.0));
         assert_eq!(offsets[1], (58.0, 0.0));
     }

@@ -179,7 +179,7 @@ fn collect_focusable(nodes: &[Node], chain: &mut Vec<Node>, out: &mut Vec<Vec<No
     for node in nodes {
         // 自我（文档序在前）
         chain.push(node.clone());
-        if node.focusable && !node.hidden {
+        if node.focusable && !node.is_hidden() {
             // 契约：焦点链为 叶→根（与 find_path/locate/hit_test_node 一致），
             // 此处收集到的 chain 是 根→叶，反转后再入列。
             out.push(chain.iter().rev().cloned().collect());
@@ -194,7 +194,7 @@ fn collect_focusable(nodes: &[Node], chain: &mut Vec<Node>, out: &mut Vec<Vec<No
 /// 收集指定节点子树内文档序 focusable 节点（`tab_navigate` 的 trap 范围）。
 fn collect_focusable_in_subtree(root: &Node, chain: &mut Vec<Node>, out: &mut Vec<Vec<Node>>) {
     chain.push(root.clone());
-    if root.focusable && !root.hidden {
+    if root.focusable && !root.is_hidden() {
         out.push(chain.iter().rev().cloned().collect());
     }
     for child in children_nodes(root) {

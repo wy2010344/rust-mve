@@ -24,11 +24,14 @@ fn draw_nodes(nodes: &[Node], scene: &mut Scene) {
 }
 
 /// 递归绘制：自我绘制在最底层，子节点按文档序叠在其上（对应 Kotlin Node.draw）。
+///
+/// 位置/可见性/间距走节点的动态属性（`pos_x`/`pos_y`/`is_hidden`/`gap`），
+/// 在 track 上下文内求值，读信号自动触发重绘。
 fn draw_node(node: &Node, origin: (f32, f32), scene: &mut Scene) {
-    if node.hidden {
+    if node.is_hidden() {
         return;
     }
-    let pos = (origin.0 + node.x, origin.1 + node.y);
+    let pos = (origin.0 + node.pos_x(), origin.1 + node.pos_y());
     if pos != (0.0, 0.0) {
         scene.push_transform(Point::new(pos.0, pos.1));
     }
@@ -38,7 +41,7 @@ fn draw_node(node: &Node, origin: (f32, f32), scene: &mut Scene) {
     let children = children_nodes(node);
     match node.layout {
         Some(layout) => {
-            let offsets = layout_offsets(layout, &children);
+            let offsets = layout_offsets(layout, node.gap(), &children);
             for (child, ofs) in children.iter().zip(offsets.iter()) {
                 draw_node(child, *ofs, scene);
             }
@@ -71,13 +74,13 @@ fn hit_test_node(
     x: f32,
     y: f32,
 ) -> Option<Vec<(Node, (f32, f32))>> {
-    if node.hidden {
+    if node.is_hidden() {
         return None;
     }
-    let pos = (origin.0 + node.x, origin.1 + node.y);
+    let pos = (origin.0 + node.pos_x(), origin.1 + node.pos_y());
     let children = children_nodes(node);
     let offsets = match node.layout {
-        Some(layout) => layout_offsets(layout, &children),
+        Some(layout) => layout_offsets(layout, node.gap(), &children),
         None => vec![(0.0, 0.0); children.len()],
     };
     // 子节点优先：倒序（后绘制的在上面）
@@ -357,7 +360,7 @@ mod tests {
         assert_eq!(h, 58.0); // 20 + 8 gap + 30
 
         let layout = col.layout.unwrap();
-        let offsets = layout_offsets(layout, &children_nodes(&col));
+        let offsets = layout_offsets(layout, col.gap(), &children_nodes(&col));
         assert_eq!(offsets[0], (0.0, 0.0));
         assert_eq!(offsets[1], (0.0, 28.0));
     }
@@ -392,7 +395,8 @@ mod tests {
         let chain = chain.unwrap();
         assert_eq!(chain.len(), 3); // +, row, column
         assert!(chain[0].0.on_click_fn.is_some(), "deepest is the + button");
-        assert_eq!(chain[1].0.layout, Some(wy_mve::Layout::Row { gap: 8.0 }));
+        assert_eq!(chain[1].0.layout, Some(wy_mve::Layout::Row));
+        assert_eq!(chain[1].0.gap(), 8.0);
 
         // 分发点击 → + 按钮 handler 执行并 stop
         let mut event = PointerEvent::new(click.0, click.1);

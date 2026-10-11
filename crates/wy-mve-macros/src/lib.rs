@@ -2,11 +2,18 @@
 //!
 //! 语法速览：
 //! - 容器：`vbox { child1 child2 }` —— 子块内平铺，无需逗号/括号
+//! - 属性：`vbox { gap: 12.0, width: w.get(), hide: empty.get(), btn { .. } }`
+//!   —— `name: expr` 是属性（通用布局属性直接映射 [`Node`] 字段），其余是子节点。
+//!   非字面量表达式由宏包成 `move || expr` 闭包，求值发生在布局/绘制期，
+//!   读信号自动追踪（复刻 Kotlin「属性是 getter」的形态）。
 //! - 组件：`btn { label: "x", on_click: move || { ... } }` —— 字段语法绑事件
 //! - 动态文本：`label(expr)` —— 自动包 `move || expr.to_string()`，
 //!   draw 期求值，信号变化自动追踪重绘
 //! - 列表：`for_each(list, key_fn) { |item, cx| { ... } }`
 //! - 条件：`if cond { ... } else { ... }` —— 转 `if/else`，false 分支不产出节点
+//!
+//! 可用布局属性：`x` `y` `width` `height` `gap` `hide` `size`（返回 `(w, h)`）
+//! `focusable` `skip_draw` `focus_trap` `selection_enabled` `focus_order`。
 //!
 //! 全部编译到 `wy_mve::fc` 的等价函数；宏只省掉闭包/逗号/`.into()` 样板。
 //! 所有子节点统一生成为 `wy_mve::fc::Slot`，容器/条件产出 `Vec<Slot>`。
@@ -47,11 +54,19 @@ fn skip_junk(input: ParseStream) {
 /// 一个 rsx 节点。
 enum Node {
     /// 容器：`vbox { ... }` / `hbox { ... }`
-    Container { name: Ident, children: Vec<Node> },
+    ///
+    /// `fields` 是通用布局属性（`gap`/`width`/`hide` 等），直接映射到
+    /// [`Node`] 的静态字段或动态 fn 字段（复刻 Kotlin getter 语义）。
+    Container {
+        name: Ident,
+        fields: Vec<(Ident, Expr)>,
+        children: Vec<Node>,
+    },
     /// 带位置参数的容器：`vbox_at(300.0, 50.0) { ... }`
     PositionalContainer {
         name: Ident,
         args: Vec<Expr>,
+        fields: Vec<(Ident, Expr)>,
         children: Vec<Node>,
     },
     /// 组件：`btn { label: "...", on_click: ... }`
@@ -157,10 +172,11 @@ impl Parse for Node {
             let args = parse_paren_args(input)?;
             // 后跟 `{` → 带定位参数的容器（如 `vbox_at(1.0, 2.0) { .. }`）
             if input.peek(syn::token::Brace) {
-                let children = parse_nodes_block(input)?;
+                let (fields, children) = parse_element_block(input)?;
                 return Ok(Node::PositionalContainer {
                     name,
                     args,
+                    fields,
                     children,
                 });
             }
@@ -174,10 +190,16 @@ impl Parse for Node {
         // `Tag { .. }`
         if input.peek(syn::token::Brace) {
             let (fields, children) = parse_element_block(input)?;
+            // 无子节点且有字段 → 组件（btn/label 的字段语法）；
+            // 否则 → 容器（字段是通用布局属性，可与子节点共存）
             if children.is_empty() && !fields.is_empty() {
                 Ok(Node::Component { name, fields })
             } else {
-                Ok(Node::Container { name, children })
+                Ok(Node::Container {
+                    name,
+                    fields,
+                    children,
+                })
             }
         } else {
             Err(syn::Error::new(
@@ -298,30 +320,30 @@ fn parse_for_each_tail(input: ParseStream) -> syn::Result<(Vec<Ident>, Vec<Node>
 // ============================================================================
 
 /// 生成一个子节点表达式的 TokenStream，结果类型恒为 `Slot`。
-fn gen_child(node: &Node) -> TokenStream2 {
+fn gen_child(node: &Node) -> syn::Result<TokenStream2> {
     let m = mve();
     match node {
-        Node::Text(lit) => quote! {
+        Node::Text(lit) => Ok(quote! {
             #m::fc::Slot::One(#m::text(move || #lit.to_string()))
-        },
-        Node::Dynamic(expr) => gen_dynamic(expr),
+        }),
+        Node::Dynamic(expr) => Ok(gen_dynamic(expr)),
         Node::Conditional {
             cond,
             then_branch,
             else_branch,
         } => {
-            let then_expr = gen_children_vec(then_branch);
+            let then_expr = gen_children_vec(then_branch)?;
             let else_expr = match else_branch {
-                Some(b) => gen_children_vec(b),
+                Some(b) => gen_children_vec(b)?,
                 None => quote! { ::std::vec![] },
             };
-            quote! {
+            Ok(quote! {
                 if #cond {
                     #then_expr
                 } else {
                     #else_expr
                 }
-            }
+            })
         }
         Node::ForEach {
             source,
@@ -330,28 +352,45 @@ fn gen_child(node: &Node) -> TokenStream2 {
             prelude,
             body,
         } => gen_for_each(source, key_fn, params, prelude, body),
-        Node::Container { name, children } => {
+        Node::Container {
+            name,
+            fields,
+            children,
+        } => {
             let f = format_ident!("fc__{}", name);
-            let arr = gen_children_vec(children);
-            quote! { #m::fc::Slot::One(#m::fc::#f(#arr)) }
+            let arr = gen_children_vec(children)?;
+            let attrs = gen_attr_assigns(fields, name)?;
+            if attrs.is_empty() {
+                Ok(quote! { #m::fc::Slot::One(#m::fc::#f(#arr)) })
+            } else {
+                Ok(quote! { #m::fc::Slot::One({ let mut __n = #m::fc::#f(#arr); #(#attrs)* __n }) })
+            }
         }
         Node::PositionalContainer {
             name,
             args,
+            fields,
             children,
         } => {
             let f = format_ident!("fc__{}", name);
-            let arr = gen_children_vec(children);
-            quote! { #m::fc::Slot::One(#m::fc::#f(#(#args,)* #arr)) }
+            let arr = gen_children_vec(children)?;
+            let attrs = gen_attr_assigns(fields, name)?;
+            if attrs.is_empty() {
+                Ok(quote! { #m::fc::Slot::One(#m::fc::#f(#(#args,)* #arr)) })
+            } else {
+                Ok(
+                    quote! { #m::fc::Slot::One({ let mut __n = #m::fc::#f(#(#args,)* #arr); #(#attrs)* __n }) },
+                )
+            }
         }
-        Node::Component { name, fields } => gen_component(name, fields),
+        Node::Component { name, fields } => Ok(gen_component(name, fields)),
         // 原始 Rust 语句块：求值后不产出节点
         Node::Raw(stmts) => {
             let m = mve();
-            quote! {{
+            Ok(quote! {{
                 #(#stmts)*
                 ::std::vec::Vec::<#m::fc::Slot>::new()
-            }}
+            }})
         }
     }
 }
@@ -384,14 +423,14 @@ fn gen_dynamic(expr: &Expr) -> TokenStream2 {
 ///
 /// `if` 分支产出 `Vec<Slot>`（多元素），需展开拼接；
 /// 其它节点产出单个 `Slot`，push 即可。
-fn gen_children_vec(nodes: &[Node]) -> TokenStream2 {
+fn gen_children_vec(nodes: &[Node]) -> syn::Result<TokenStream2> {
     let m = mve();
     let mut parts: Vec<TokenStream2> = Vec::new();
     for n in nodes {
         match n {
             // if 分支 → Vec<Slot>，展开拼接
             Node::Conditional { .. } => {
-                let one = gen_child(n);
+                let one = gen_child(n)?;
                 parts.push(quote! { __out.extend(#one); });
             }
             // 原始 Rust 语句 → 只求值不产出
@@ -399,16 +438,16 @@ fn gen_children_vec(nodes: &[Node]) -> TokenStream2 {
                 parts.push(quote! { #(#stmts)* });
             }
             _ => {
-                let one = gen_child(n);
+                let one = gen_child(n)?;
                 parts.push(quote! { __out.push(#one); });
             }
         }
     }
-    quote! {{
+    Ok(quote! {{
         let mut __out: ::std::vec::Vec<#m::fc::Slot> = ::std::vec::Vec::new();
         #(#parts)*
         __out
-    }}
+    }})
 }
 
 fn gen_for_each(
@@ -417,7 +456,7 @@ fn gen_for_each(
     params: &[Ident],
     prelude: &[Stmt],
     body: &[Node],
-) -> TokenStream2 {
+) -> syn::Result<TokenStream2> {
     let m = mve();
     let item = params
         .first()
@@ -427,8 +466,8 @@ fn gen_for_each(
         .get(1)
         .cloned()
         .unwrap_or_else(|| Ident::new("__cx", Span::call_site()));
-    let body_vec = gen_children_vec(body);
-    quote! {
+    let body_vec = gen_children_vec(body)?;
+    Ok(quote! {
         #m::fc::for_each_slots(
             move |__emit| {
                 for __it in #source.get() {
@@ -442,7 +481,99 @@ fn gen_for_each(
                 #m::fc::push_all(__slots, #cx_ident);
             },
         )
+    })
+}
+
+/// 通用布局属性名 → 赋值语句列表。
+///
+/// 复刻 Kotlin「属性是 getter」的形态：非字面量表达式统一包成
+/// `move || expr` 闭包赋给 `*_fn` 字段，求值发生在布局/绘制期
+/// （信号 track 上下文内），读信号自动追踪；f32/bool 字面量直接赋
+/// 静态字段，零闭包开销。
+///
+/// | 属性 | 静态字段 | 动态 fn 字段 | Kotlin 对应 |
+/// |---|---|---|---|
+/// | `x`/`y` | `x`/`y` | `x_fn`/`y_fn` | `argPosition` |
+/// | `width`/`height` | `width`/`height` | `width_fn`/`height_fn` | `argWidth`/`argHeight` |
+/// | `gap` | `gap` | `gap_fn` | `FlexParam.gap` |
+/// | `hide` | `hidden` | `hide_fn` | `hide` |
+/// | `size` | — | `size_fn`（闭包返回 `(w, h)`） | `argSize` |
+///
+/// 其余布尔字段（`focusable`/`skip_draw`/`focus_trap`/`selection_enabled`）
+/// 构建期直接赋值；`focus_order` 赋 `Option<i32>`。
+fn gen_attr_assigns(fields: &[(Ident, Expr)], container: &Ident) -> syn::Result<Vec<TokenStream2>> {
+    let mut out = Vec::new();
+    for (fname, value) in fields {
+        let Some(stmt) = gen_attr_assign(fname, value) else {
+            return Err(syn::Error::new(
+                fname.span(),
+                format!(
+                    "容器 `{container}` 不支持属性 `{fname}`；可用：x, y, width, height, \
+                     gap, hide, size, focusable, skip_draw, focus_trap, \
+                     selection_enabled, focus_order"
+                ),
+            ));
+        };
+        out.push(stmt);
     }
+    Ok(out)
+}
+
+/// 单个属性 → 赋值语句。
+fn gen_attr_assign(fname: &Ident, value: &Expr) -> Option<TokenStream2> {
+    match fname.to_string().as_str() {
+        "x" => Some(num_attr(quote! { x }, quote! { x_fn }, value)),
+        "y" => Some(num_attr(quote! { y }, quote! { y_fn }, value)),
+        "width" => Some(num_attr(quote! { width }, quote! { width_fn }, value)),
+        "height" => Some(num_attr(quote! { height }, quote! { height_fn }, value)),
+        "gap" => Some(num_attr(quote! { gap }, quote! { gap_fn }, value)),
+        "hide" => Some(bool_attr(quote! { hidden }, quote! { hide_fn }, value)),
+        // 整体尺寸覆盖（Kotlin `override fun argSize`），闭包返回 (w, h)
+        "size" => Some(quote! {
+            __n.size_fn = Some(::std::rc::Rc::new(move || #value));
+        }),
+        // 构建期布尔字段（Kotlin 里这些是构造配置而非 getter）
+        "focusable" => Some(quote! { __n.focusable = #value; }),
+        "skip_draw" => Some(quote! { __n.skip_draw = #value; }),
+        "focus_trap" => Some(quote! { __n.focus_trap = #value; }),
+        "selection_enabled" => Some(quote! { __n.selection_enabled = #value; }),
+        "focus_order" => Some(quote! { __n.focus_order = #value; }),
+        _ => None,
+    }
+}
+
+/// f32 属性：字面量直赋静态字段，其余包闭包给 fn 字段。
+fn num_attr(static_field: TokenStream2, fn_field: TokenStream2, value: &Expr) -> TokenStream2 {
+    if is_float_lit(value) {
+        quote! { __n.#static_field = #value; }
+    } else {
+        quote! { __n.#fn_field = Some(::std::rc::Rc::new(move || #value)); }
+    }
+}
+
+/// bool 属性：字面量直赋静态字段，其余包闭包给 fn 字段。
+fn bool_attr(static_field: TokenStream2, fn_field: TokenStream2, value: &Expr) -> TokenStream2 {
+    if matches!(
+        value,
+        Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Bool(_),
+            ..
+        })
+    ) {
+        quote! { __n.#static_field = #value; }
+    } else {
+        quote! { __n.#fn_field = Some(::std::rc::Rc::new(move || #value)); }
+    }
+}
+
+fn is_float_lit(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Float(_),
+            ..
+        })
+    )
 }
 
 fn gen_component(name: &Ident, fields: &[(Ident, Expr)]) -> TokenStream2 {
@@ -511,5 +642,8 @@ pub fn rsx(input: TokenStream) -> TokenStream {
         Ok(n) => n,
         Err(e) => return e.to_compile_error().into(),
     };
-    gen_child(&node).into()
+    match gen_child(&node) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
 }
