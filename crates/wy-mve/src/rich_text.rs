@@ -18,6 +18,17 @@ use wy_signal::{GetValue, SetValue, Signal};
 use wy_text::EditCore;
 
 use crate::node::{ImeEvent, Key, KeyEvent, Node, PointerEvent};
+use crate::text_util::{byte_to_char as _byte_to_char, char_to_byte as _char_to_byte};
+
+/// display char 索引 → 字节索引（`caret_box` 等 parley 几何函数按字节寻址）。
+fn char_to_byte(text: &str, char_idx: usize) -> usize {
+    _char_to_byte(text, char_idx)
+}
+
+/// 字节索引 → display char 索引（`hit_point`/`hit_line` 返回字节）。
+fn byte_to_char(text: &str, byte_idx: usize) -> usize {
+    _byte_to_char(text, byte_idx)
+}
 
 /// 文本绘制左内边距。
 const PAD_X: f32 = 6.0;
@@ -87,6 +98,10 @@ struct SharedState {
     focused: Signal<bool>,
     /// 上次已同步的外部文本（防回环与重复重灌）。
     last_synced: String,
+    /// 多击计数（400ms / 5px 内同位置连击，Kotlin ClickTracker）。
+    clicks: crate::text_util::ClickTracker,
+    /// 双击拖选锚词（display 字节区间）：双击建立，on_move 词级扩展，on_up 清空。
+    word_anchor: Option<(usize, usize)>,
 }
 
 type Shared = Rc<RefCell<SharedState>>;
@@ -120,6 +135,8 @@ pub fn rich_editable_opts(
     let shared: Shared = Rc::new(RefCell::new(SharedState {
         focused: Signal::new(false),
         last_synced: initial.clone(),
+        clicks: crate::text_util::ClickTracker::new(),
+        word_anchor: None,
     }));
     {
         let mut c = core.borrow_mut();
@@ -226,8 +243,16 @@ pub fn rich_editable_opts(
                     if vis_s >= vis_e {
                         continue;
                     }
-                    let sb = wy_render::text_measure::caret_box(text_for_x, opts.font_size, vis_s);
-                    let eb = wy_render::text_measure::caret_box(text_for_x, opts.font_size, vis_e);
+                    let sb = wy_render::text_measure::caret_box(
+                        text_for_x,
+                        opts.font_size,
+                        char_to_byte(text_for_x, vis_s),
+                    );
+                    let eb = wy_render::text_measure::caret_box(
+                        text_for_x,
+                        opts.font_size,
+                        char_to_byte(text_for_x, vis_e),
+                    );
                     scene.fill_rect(
                         Rect::new(PAD_X + sb.x, top + sb.top, eb.x - sb.x, sb.height),
                         Color::rgba(100, 100, 200, 60),
@@ -243,7 +268,11 @@ pub fn rich_editable_opts(
                     &core.display_text()
                 };
                 let disp_idx = core.logic_to_display_index(core.cursor());
-                let cb = wy_render::text_measure::caret_box(text_for_x, opts.font_size, disp_idx);
+                let cb = wy_render::text_measure::caret_box(
+                    text_for_x,
+                    opts.font_size,
+                    char_to_byte(text_for_x, disp_idx),
+                );
                 scene.fill_rect(
                     Rect::new(PAD_X + cb.x, top + cb.top, 2.0, cb.height),
                     opts.text_color,
@@ -257,8 +286,16 @@ pub fn rich_editable_opts(
                 } else {
                     &core.display_text()
                 };
-                let sb = wy_render::text_measure::caret_box(text_for_x, opts.font_size, cs);
-                let eb = wy_render::text_measure::caret_box(text_for_x, opts.font_size, ce);
+                let sb = wy_render::text_measure::caret_box(
+                    text_for_x,
+                    opts.font_size,
+                    char_to_byte(text_for_x, cs),
+                );
+                let eb = wy_render::text_measure::caret_box(
+                    text_for_x,
+                    opts.font_size,
+                    char_to_byte(text_for_x, ce),
+                );
                 let ax = PAD_X + sb.x;
                 let bx = PAD_X + eb.x;
                 let by = top + sb.top;
@@ -282,23 +319,101 @@ pub fn rich_editable_opts(
         })
     };
 
-    // --- 点击：聚焦 + 定位光标（parley 字形命中测试，行感知） ---
+    // --- 点击：聚焦 + 多击手势（单击定位 / 双击选词+拖词 / 三击选段） ---
     let on_down_fn = {
         let core = Rc::clone(&core);
         let shared = Rc::clone(&shared);
         let opts = Rc::clone(&opts);
         Rc::new(move |event: &mut PointerEvent| {
-            shared.borrow_mut().focused.set(true);
+            let mut s = shared.borrow_mut();
+            s.focused.set(true);
             let mut core = core.borrow_mut();
             let display_text = core.display_text();
-            let display_idx = wy_render::text_measure::hit_point(
+            let byte_idx = wy_render::text_measure::hit_point(
                 &display_text,
                 opts.font_size,
                 event.x - PAD_X,
                 event.y - text_top(&opts),
             );
-            let logic_idx = core.display_to_logic_index(display_idx);
-            core.set_cursor(logic_idx);
+            let count = s.clicks.record(event.x, event.y);
+            match count {
+                // 三击（及以后）选段：display 段不含 `\n`（Kotlin paragraphRangeAt）
+                3.. => {
+                    s.word_anchor = None;
+                    let disp_idx = byte_to_char(&display_text, byte_idx);
+                    let (ls, le) = display_line_ranges(&display_text)
+                        .into_iter()
+                        .find(|&(ls, le)| disp_idx >= ls && disp_idx <= le)
+                        .unwrap_or((0, 0));
+                    if ls < le {
+                        let l0 = core.display_to_logic_index(ls);
+                        let l1 = core.display_to_logic_index(le);
+                        core.select_range(l0, l1);
+                    }
+                }
+                // 双击选词，锚定后可拖拽词级扩展
+                2 => {
+                    let (bs, be) = crate::text_util::word_range_at(&display_text, byte_idx)
+                        .unwrap_or((0, display_text.len()));
+                    s.word_anchor = Some((bs, be));
+                    let l0 = core.display_to_logic_index(byte_to_char(&display_text, bs));
+                    let l1 = core.display_to_logic_index(byte_to_char(&display_text, be));
+                    core.select_range(l0, l1);
+                }
+                // 单击定位（shift 扩选）
+                _ => {
+                    s.word_anchor = None;
+                    let logic_idx =
+                        core.display_to_logic_index(byte_to_char(&display_text, byte_idx));
+                    if event.shift {
+                        core.move_to_position(logic_idx, true);
+                    } else {
+                        core.set_cursor(logic_idx);
+                    }
+                }
+            }
+        })
+    };
+
+    // --- 拖选：双击锚词级扩展，否则光标扩展（选区跟随指针） ---
+    let on_move_fn = {
+        let core = Rc::clone(&core);
+        let shared = Rc::clone(&shared);
+        let opts = Rc::clone(&opts);
+        Rc::new(move |event: &mut PointerEvent| {
+            let s = shared.borrow_mut();
+            let mut core = core.borrow_mut();
+            let display_text = core.display_text();
+            let byte_idx = wy_render::text_measure::hit_point(
+                &display_text,
+                opts.font_size,
+                event.x - PAD_X,
+                event.y - text_top(&opts),
+            );
+            match s.word_anchor {
+                Some((a0, a1)) => {
+                    // 锚词固定，目标端吸附到目标处整词边界（Kotlin expandWordSelection）
+                    let (b0, b1) = crate::text_util::expand_word_selection(a0, a1, byte_idx, |b| {
+                        crate::text_util::word_range_at(&display_text, b)
+                    });
+                    let l0 = core.display_to_logic_index(byte_to_char(&display_text, b0));
+                    let l1 = core.display_to_logic_index(byte_to_char(&display_text, b1));
+                    core.select_range(l0, l1);
+                }
+                None => {
+                    let logic_idx =
+                        core.display_to_logic_index(byte_to_char(&display_text, byte_idx));
+                    core.move_to_position(logic_idx, true);
+                }
+            }
+        })
+    };
+
+    // --- 释放：结束双击拖词会话 ---
+    let on_up_fn = {
+        let shared = Rc::clone(&shared);
+        Rc::new(move |_event: &mut PointerEvent| {
+            shared.borrow_mut().word_anchor = None;
         })
     };
 
@@ -332,13 +447,14 @@ pub fn rich_editable_opts(
                             x
                         };
                         let target_line = current_line - 1;
-                        let target_display = wy_render::text_measure::hit_line(
+                        let target_byte = wy_render::text_measure::hit_line(
                             &display_text,
                             opts.font_size,
                             target_line,
                             current_x,
                         );
-                        let logic_target = core.display_to_logic_index(target_display);
+                        let logic_target =
+                            core.display_to_logic_index(byte_to_char(&display_text, target_byte));
                         if shift {
                             core.move_to_position(logic_target, true);
                         } else {
@@ -366,13 +482,14 @@ pub fn rich_editable_opts(
                             x
                         };
                         let target_line = current_line + 1;
-                        let target_display = wy_render::text_measure::hit_line(
+                        let target_byte = wy_render::text_measure::hit_line(
                             &display_text,
                             opts.font_size,
                             target_line,
                             current_x,
                         );
-                        let logic_target = core.display_to_logic_index(target_display);
+                        let logic_target =
+                            core.display_to_logic_index(byte_to_char(&display_text, target_byte));
                         if shift {
                             core.move_to_position(logic_target, true);
                         } else {
@@ -464,7 +581,11 @@ pub fn rich_editable_opts(
                 core.display_text()
             };
             let disp_idx = core.logic_to_display_index(core.cursor());
-            let cb = wy_render::text_measure::caret_box(&shown, opts.font_size, disp_idx);
+            let cb = wy_render::text_measure::caret_box(
+                &shown,
+                opts.font_size,
+                char_to_byte(&shown, disp_idx),
+            );
             (PAD_X + cb.x, text_top(&opts) + cb.top, 2.0, cb.height)
         })
     };
@@ -473,6 +594,8 @@ pub fn rich_editable_opts(
         draw_fn,
         hit_test_fn,
         on_down_fn: Some(on_down_fn),
+        on_move_fn: Some(on_move_fn),
+        on_up_fn: Some(on_up_fn),
         key_fn: Some(key_fn),
         ime_fn: Some(ime_fn),
         ime_cursor_fn: Some(ime_cursor_fn),
@@ -661,7 +784,12 @@ fn line_index_for_offset(text: &str, offset: usize) -> usize {
 
 /// 光标在当前行内的 X 坐标（与绘制同一排版来源，字形簇边界）。
 fn cursor_x_on_line(display_text: &str, font_size: f32, display_idx: usize) -> f32 {
-    wy_render::text_measure::caret_box(display_text, font_size, display_idx).x
+    wy_render::text_measure::caret_box(
+        display_text,
+        font_size,
+        char_to_byte(display_text, display_idx),
+    )
+    .x
 }
 
 // ---------------------------------------------------------------------------
@@ -1051,5 +1179,116 @@ mod tests {
         record_frame(&tracker, &node, &draws);
         assert_eq!(draws.get(), 2, "外部信号文本变化必须触发重录");
         assert_eq!(core.borrow().text(), "hello", "sync 重灌内核文本");
+    }
+
+    // --- 多击手势：单击定位 / 双击选词 / 三击选段 / 拖选 / shift 扩选 ---
+
+    fn edit_doc(text: &str) -> (Node, Rc<RefCell<EditCore>>) {
+        let t = text.to_string();
+        rich_editable_opts(move || t.clone(), |_| {}, RichTextOpts::default())
+    }
+
+    /// 第 `char_idx` 个字形内的测试点击点（x = 字形左界 + 1px，y = 首行行盒内）。
+    fn at(text: &str, char_idx: usize) -> (f32, f32) {
+        let opts = RichTextOpts::default();
+        let byte = char_to_byte(text, char_idx);
+        let cb = wy_render::text_measure::caret_box(text, opts.font_size, byte);
+        let cb0 = wy_render::text_measure::caret_box(text, opts.font_size, 0);
+        (PAD_X + cb.x + 1.0, text_top(&opts) + cb0.top + 4.0)
+    }
+
+    fn down(node: &Node, x: f32, y: f32, shift: bool) {
+        let mut ev = PointerEvent::new(x, y);
+        ev.shift = shift;
+        node.on_down_fn.as_ref().unwrap()(&mut ev);
+    }
+
+    fn mv(node: &Node, x: f32, y: f32) {
+        let mut ev = PointerEvent::new(x, y);
+        node.on_move_fn.as_ref().unwrap()(&mut ev);
+    }
+
+    #[test]
+    fn double_click_selects_word() {
+        let (node, core) = edit_doc("Hello world");
+        let (x, y) = at("Hello world", 2);
+        down(&node, x, y, false);
+        assert_eq!(core.borrow().cursor(), 2, "单击定位到命中字形");
+        down(&node, x, y, false);
+        let c = core.borrow();
+        assert_eq!((c.sel_start(), c.sel_end()), (0, 5), "双击选整词 Hello");
+    }
+
+    #[test]
+    fn triple_click_selects_paragraph() {
+        let text = "hi there\nxy";
+        let (node, core) = edit_doc(text);
+        let (x, y) = at(text, 4);
+        down(&node, x, y, false);
+        down(&node, x, y, false);
+        down(&node, x, y, false);
+        let c = core.borrow();
+        assert_eq!(
+            (c.sel_start(), c.sel_end()),
+            (0, 8),
+            "三击选整段（段不含 \\n）"
+        );
+    }
+
+    #[test]
+    fn drag_extends_selection() {
+        let text = "Hello world";
+        let (node, core) = edit_doc(text);
+        let (x1, y1) = at(text, 1);
+        let (x2, y2) = at(text, 8);
+        down(&node, x1, y1, false);
+        assert_eq!(core.borrow().cursor(), 1);
+        mv(&node, x2, y2);
+        let c = core.borrow();
+        assert_eq!((c.sel_start(), c.sel_end()), (1, 8), "拖选扩展选区");
+    }
+
+    #[test]
+    fn shift_click_extends_selection() {
+        let text = "Hello world";
+        let (node, core) = edit_doc(text);
+        let (x1, y1) = at(text, 1);
+        let (x2, y2) = at(text, 8);
+        down(&node, x1, y1, false);
+        down(&node, x2, y2, true);
+        let c = core.borrow();
+        assert_eq!((c.sel_start(), c.sel_end()), (1, 8), "shift+点击扩选");
+    }
+
+    #[test]
+    fn double_click_drag_expands_word() {
+        let text = "Hello world";
+        let (node, core) = edit_doc(text);
+        let (x1, y1) = at(text, 2);
+        let (x2, y2) = at(text, 9);
+        down(&node, x1, y1, false);
+        down(&node, x1, y1, false);
+        assert_eq!((core.borrow().sel_start(), core.borrow().sel_end()), (0, 5));
+        mv(&node, x2, y2);
+        let c = core.borrow();
+        assert_eq!(
+            (c.sel_start(), c.sel_end()),
+            (0, 11),
+            "锚词 Hello 固定，目标端吸附到 world"
+        );
+    }
+
+    #[test]
+    fn double_click_cjk_roundtrips_char_byte() {
+        // 中文 = 多字节：hit_point/word_range_at 走字节，EditCore 走字符，
+        // 双击选词必须正确往返（回归：光标/选区按字节当字符会错位）。
+        let text = "中文 测试";
+        let (node, core) = edit_doc(text);
+        let (x, y) = at(text, 1); // '文' 字形（字节 3）
+        down(&node, x, y, false);
+        assert_eq!(core.borrow().cursor(), 1, "单击命中 '文' 前字符边界");
+        down(&node, x, y, false);
+        let c = core.borrow();
+        assert_eq!((c.sel_start(), c.sel_end()), (0, 2), "双击选 '中文' 两字符");
     }
 }

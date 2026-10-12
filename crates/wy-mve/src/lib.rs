@@ -30,6 +30,7 @@ mod foreach;
 mod node;
 mod rich_text;
 mod text_field;
+pub mod text_util;
 
 pub use components::{
     button, column, column_at, row, row_at, spacer, text, text_signal, text_styled,

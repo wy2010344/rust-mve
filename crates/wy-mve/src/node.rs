@@ -56,6 +56,8 @@ pub struct Node {
     pub on_down_fn: Option<ClickFn>,
     /// 释放事件。
     pub on_up_fn: Option<ClickFn>,
+    /// 指针移动事件（按下捕获期间派发，拖选用）。
+    pub on_move_fn: Option<ClickFn>,
     /// 按键事件。
     pub key_fn: Option<KeyFn>,
     /// IME 输入法组合事件（组合文本 / 光标偏移；返回 true 表示已消费）。
@@ -120,6 +122,7 @@ impl Clone for Node {
             on_click_fn: self.on_click_fn.as_ref().map(Rc::clone),
             on_down_fn: self.on_down_fn.as_ref().map(Rc::clone),
             on_up_fn: self.on_up_fn.as_ref().map(Rc::clone),
+            on_move_fn: self.on_move_fn.as_ref().map(Rc::clone),
             key_fn: self.key_fn.as_ref().map(Rc::clone),
             ime_fn: self.ime_fn.as_ref().map(Rc::clone),
             ime_cursor_fn: self.ime_cursor_fn.as_ref().map(Rc::clone),
@@ -181,6 +184,7 @@ impl Default for Node {
             on_click_fn: None,
             on_down_fn: None,
             on_up_fn: None,
+            on_move_fn: None,
             key_fn: None,
             ime_fn: None,
             ime_cursor_fn: None,
@@ -240,6 +244,12 @@ impl Node {
 
     pub fn run_on_up(&self, event: &mut PointerEvent) {
         if let Some(f) = &self.on_up_fn {
+            f(event);
+        }
+    }
+
+    pub fn run_on_move(&self, event: &mut PointerEvent) {
+        if let Some(f) = &self.on_move_fn {
             f(event);
         }
     }
@@ -366,6 +376,8 @@ pub struct PointerEvent {
     pub y: f32,
     pub root_x: f32,
     pub root_y: f32,
+    /// 按下时 Shift 是否按住（shift+点击扩选，引擎在分发前填充）。
+    pub shift: bool,
     pub stopped: bool,
 }
 
@@ -376,6 +388,7 @@ impl PointerEvent {
             y,
             root_x: x,
             root_y: y,
+            shift: false,
             stopped: false,
         }
     }

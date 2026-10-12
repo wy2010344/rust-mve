@@ -87,6 +87,10 @@ struct SharedState {
     state_rev: Signal<u64>,
     /// 上次已同步的外部文本（防回环与重复重灌）。
     last_synced: String,
+    /// 多击计数（400ms / 5px 内同位置连击，Kotlin ClickTracker）。
+    clicks: crate::text_util::ClickTracker,
+    /// 双击拖选锚词（display 字节区间）：双击建立，on_move 词级扩展，on_up 清空。
+    word_anchor: Option<(usize, usize)>,
 }
 
 impl SharedState {
@@ -124,6 +128,8 @@ pub fn text_field_opts(
         focused: Signal::new(false),
         state_rev: Signal::new(0),
         last_synced: initial.clone(),
+        clicks: crate::text_util::ClickTracker::new(),
+        word_anchor: None,
     }));
     {
         let mut s = shared.borrow_mut();
@@ -250,16 +256,74 @@ pub fn text_field_opts(
 
     let hit_test_fn = Rc::new(move |_x: f32, _y: f32| true);
 
-    // --- 点击：聚焦 + 定位光标 ---
+    // --- 点击：聚焦 + 多击手势（单击定位 / 双击选词+拖词 / 三击选段） ---
     let on_down_fn = {
         let shared = Rc::clone(&shared);
         let opts = Rc::clone(&opts);
         Rc::new(move |event: &mut PointerEvent| {
             let mut s = shared.borrow_mut();
             s.focused.set(true);
+            let count = s.clicks.record(event.x, event.y);
+            match count {
+                // 三击选段：单行字段段 = 全部文本（Kotlin paragraphRangeAt 段不含 \n）
+                3.. => {
+                    s.word_anchor = None;
+                    let len = s.editable.text().len();
+                    if len > 0 {
+                        s.editable.select_range(0, len);
+                    }
+                }
+                // 双击选词，锚定后可拖拽词级扩展
+                2 => {
+                    s.editable
+                        .move_to_point(event.x - PAD_X, text_top(&opts), false);
+                    let hit = s.editable.cursor();
+                    let text = s.editable.text();
+                    let (bs, be) =
+                        crate::text_util::word_range_at(&text, hit).unwrap_or((0, text.len()));
+                    s.word_anchor = Some((bs, be));
+                    s.editable.select_range(bs, be);
+                }
+                // 单击定位（shift 扩选）
+                _ => {
+                    s.word_anchor = None;
+                    s.editable
+                        .move_to_point(event.x - PAD_X, text_top(&opts), event.shift);
+                }
+            }
             s.mark_dirty();
+        })
+    };
+
+    // --- 拖选：双击锚词级扩展，否则光标扩展（选区跟随指针） ---
+    let on_move_fn = {
+        let shared = Rc::clone(&shared);
+        let opts = Rc::clone(&opts);
+        Rc::new(move |event: &mut PointerEvent| {
+            let mut s = shared.borrow_mut();
+            let extend = s.word_anchor.is_none();
             s.editable
-                .move_to_point(event.x - PAD_X, text_top(&opts), false);
+                .move_to_point(event.x - PAD_X, text_top(&opts), extend);
+            if let Some((a0, a1)) = s.word_anchor {
+                let hit = s.editable.cursor();
+                let text = s.editable.text();
+                let (b0, b1) = crate::text_util::expand_word_selection(a0, a1, hit, |b| {
+                    crate::text_util::word_range_at(&text, b)
+                });
+                s.editable.select_range(b0, b1);
+            }
+            s.mark_dirty();
+        })
+    };
+
+    // --- 释放：结束双击拖词会话 ---
+    let on_up_fn = {
+        let shared = Rc::clone(&shared);
+        Rc::new(move |_event: &mut PointerEvent| {
+            let mut s = shared.borrow_mut();
+            if s.word_anchor.take().is_some() {
+                s.mark_dirty();
+            }
         })
     };
 
@@ -321,6 +385,8 @@ pub fn text_field_opts(
         draw_fn,
         hit_test_fn,
         on_down_fn: Some(on_down_fn),
+        on_move_fn: Some(on_move_fn),
+        on_up_fn: Some(on_up_fn),
         key_fn: Some(key_fn),
         ime_fn: Some(ime_fn),
         ime_cursor_fn: Some(ime_cursor_fn),
@@ -481,6 +547,8 @@ mod tests {
             focused: Signal::new(true),
             state_rev: Signal::new(0),
             last_synced: text.to_string(),
+            clicks: crate::text_util::ClickTracker::new(),
+            word_anchor: None,
         }
     }
 

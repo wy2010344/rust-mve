@@ -202,6 +202,11 @@ impl EditableParagraph {
             self.with_driver(|mut drv| drv.move_to_point(x, y));
         }
     }
+
+    /// 按字节区间设置选区（双击选词 / 三击选段 / 拖选命中均产出字节偏移）。
+    pub fn select_range(&mut self, start: usize, end: usize) {
+        self.with_driver(|mut drv| drv.select_byte_range(start, end));
+    }
 }
 
 impl Default for EditableParagraph {
@@ -271,6 +276,18 @@ mod tests {
         assert_eq!((a, b), (0, 5));
         let geo = ed.selection_geometry();
         assert!(!geo.is_empty());
+    }
+
+    #[test]
+    fn select_range_wraps_driver() {
+        let mut ed = EditableParagraph::new(14.0);
+        ed.replace_with("hello world");
+        ed.select_range(6, 11);
+        assert_eq!(ed.selection_range(), (6, 11));
+        // 多字节：中文按字节选区
+        ed.replace_with("中文 测试");
+        ed.select_range(0, 6);
+        assert_eq!(ed.selection_range(), (0, 6));
     }
 
     #[test]

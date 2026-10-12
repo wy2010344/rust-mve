@@ -58,6 +58,7 @@ fn draw_node(node: &Node, origin: (f32, f32), scene: &mut Scene) {
 }
 
 /// 命中测试：子节点优先（后绘制的在上，倒序），对应 Kotlin `Node.hitTest`。
+#[cfg(test)]
 fn hit_test_nodes(nodes: &[Node], x: f32, y: f32) -> bool {
     nodes
         .iter()
@@ -103,30 +104,63 @@ fn hit_test_node(
 /// 每节点用**局部坐标**（命中链携带的绝对位置换算），复刻 Kotlin
 /// `dispatchClick`/`dispatchPointerEvent`：先 `runOnDown` 再 `runOnClick`，
 /// 任一阶段 stopPropagation 即终止。
+#[cfg(test)]
 fn dispatch_click_nodes(nodes: &[Node], x: f32, y: f32, event: &mut wy_mve::PointerEvent) {
-    let hit = nodes
+    if let Some(chain) = nodes
         .iter()
-        .find_map(|node| hit_test_node(node, (0.0, 0.0), x, y));
-    let Some(chain) = hit else {
-        return;
-    };
+        .find_map(|node| hit_test_node(node, (0.0, 0.0), x, y))
+    {
+        dispatch_click_chain(&chain, event);
+    }
+}
+
+/// 沿给定命中链分发 down/click 两阶段（链为 叶→根，携带绝对原点）。
+fn dispatch_click_chain(chain: &[(Node, (f32, f32))], event: &mut wy_mve::PointerEvent) {
     // 链：叶→根（与调度一致）。每项 (node, 绝对位置)，换算局部坐标。
-    for (node, pos) in &chain {
+    for (node, pos) in chain {
         // Kotlin 区分 Down/Click 的方式是**调用哪个 handler**（runOnDown vs
         // runOnClick），不是事件上的字段——本 Rust port 的 `PointerEvent`
         // 无 `method` 字段（编译器 `available fields` 佐证）。两阶段循环本身
         // 就已表达阶段：第一轮 = Down，第二轮 = Click。
-        event.x = x - pos.0;
-        event.y = y - pos.1;
+        event.x = event.root_x - pos.0;
+        event.y = event.root_y - pos.1;
         node.run_on_down(event);
         if event.stopped {
             return;
         }
     }
-    for (node, pos) in &chain {
+    for (node, pos) in chain {
+        event.x = event.root_x - pos.0;
+        event.y = event.root_y - pos.1;
+        node.run_on_click(event);
+        if event.stopped {
+            return;
+        }
+    }
+}
+
+/// 沿捕获链分发指针移动（叶→根；拖动扩展选区）。
+fn dispatch_move_chain(chain: &[(Node, (f32, f32))], x: f32, y: f32, shift: bool) {
+    let mut event = wy_mve::PointerEvent::new(x, y);
+    event.shift = shift;
+    for (node, pos) in chain {
         event.x = x - pos.0;
         event.y = y - pos.1;
-        node.run_on_click(event);
+        node.run_on_move(&mut event);
+        if event.stopped {
+            return;
+        }
+    }
+}
+
+/// 沿捕获链分发指针释放（叶→根；结束拖动会话）。
+fn dispatch_up_chain(chain: &[(Node, (f32, f32))], x: f32, y: f32, shift: bool) {
+    let mut event = wy_mve::PointerEvent::new(x, y);
+    event.shift = shift;
+    for (node, pos) in chain {
+        event.x = x - pos.0;
+        event.y = y - pos.1;
+        node.run_on_up(&mut event);
         if event.stopped {
             return;
         }
@@ -142,6 +176,10 @@ pub struct MveApp {
     cursor: UnsafeCell<(f32, f32)>,
     /// 焦点管理（identity 链定位，复刻 Kotlin Renderer）。
     focus: FocusManager,
+    /// 按下捕获链（叶→根，携带绝对原点）：按下建立，move 沿链派发，松开清空。
+    capture: Option<Vec<(Node, (f32, f32))>>,
+    /// 当前修饰键（winit ModifiersChanged 同步；按下时填入 PointerEvent.shift）。
+    modifiers: winit::keyboard::ModifiersState,
 }
 
 impl MveApp {
@@ -155,6 +193,8 @@ impl MveApp {
             root,
             cursor: UnsafeCell::new((0.0, 0.0)),
             focus: FocusManager::default(),
+            capture: None,
+            modifiers: winit::keyboard::ModifiersState::empty(),
         }
     }
 
@@ -187,8 +227,18 @@ impl crate::runner::WyApp for MveApp {
         let cursor = unsafe { &mut *self.cursor.get() };
 
         match event {
+            WindowEvent::ModifiersChanged(mods) => {
+                self.modifiers = mods.state();
+                false
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 *cursor = (position.x as f32, position.y as f32);
+                // 按下捕获期间：沿链派发移动（编辑器拖选）
+                if let Some(chain) = &self.capture {
+                    let (x, y) = *cursor;
+                    let shift = self.modifiers.shift_key();
+                    dispatch_move_chain(chain, x, y, shift);
+                }
                 false
             }
             WindowEvent::MouseInput {
@@ -198,15 +248,32 @@ impl crate::runner::WyApp for MveApp {
             } => {
                 let (x, y) = *cursor;
                 let nodes = self.root.nodes();
-                if hit_test_nodes(&nodes, x, y) {
-                    // 点击聚焦：命中链中更新焦点（Kotlin Renderer 点击聚焦逻辑）。
-                    let mut mve_event = wy_mve::PointerEvent::new(x, y);
-                    let chain = hit_test_node_chain(&nodes, x, y);
-                    if let Some(chain) = &chain {
-                        self.focus.focus_on_click(chain);
-                    }
-                    dispatch_click_nodes(&nodes, x, y, &mut mve_event);
-                    return mve_event.stopped;
+                let chain = nodes
+                    .iter()
+                    .find_map(|node| hit_test_node(node, (0.0, 0.0), x, y));
+                let Some(chain) = chain else {
+                    // 点击空白：清捕获（对齐浏览器语义）
+                    self.capture = None;
+                    return false;
+                };
+                // 存捕获链：move/up 沿链派发（即使移出节点也继续）
+                self.capture = Some(chain.clone());
+                let node_chain: Vec<Node> = chain.iter().map(|(n, _)| n.clone()).collect();
+                self.focus.focus_on_click(&node_chain);
+                let mut mve_event = wy_mve::PointerEvent::new(x, y);
+                mve_event.shift = self.modifiers.shift_key();
+                dispatch_click_chain(&chain, &mut mve_event);
+                mve_event.stopped
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => {
+                let (x, y) = *cursor;
+                if let Some(chain) = self.capture.take() {
+                    let shift = self.modifiers.shift_key();
+                    dispatch_up_chain(&chain, x, y, shift);
                 }
                 false
             }
@@ -310,18 +377,11 @@ fn to_mve_key(key: &crate::event::Key) -> wy_mve::Key {
     }
 }
 
-/// 命中节点链（子→根；`hit_test_node` 的公开包装，供点击聚焦复用）。
-fn hit_test_node_chain(nodes: &[Node], x: f32, y: f32) -> Option<Vec<Node>> {
-    nodes
-        .iter()
-        .find_map(|node| hit_test_node(node, (0.0, 0.0), x, y))
-        .map(|chain| chain.into_iter().map(|(n, _)| n).collect())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::runner::WyApp;
+    use std::cell::RefCell;
     use std::rc::Rc;
     use wy_mve::{button, column, node_size, row, text, PointerEvent};
     use wy_signal::{GetValue, SetValue, Signal};
@@ -368,6 +428,68 @@ mod tests {
         let n = Node::default();
         assert_eq!(n, n.clone());
         assert_ne!(n, Node::default());
+    }
+
+    #[test]
+    fn press_capture_dispatches_move_then_up_once() {
+        // 按下捕获：move/up 沿命中链派发；松开后捕获清空（后续 move 不派发）。
+        let log: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let app = MveApp::new({
+            let log = Rc::clone(&log);
+            move |cx| {
+                let l_down = Rc::clone(&log);
+                let l_move = Rc::clone(&log);
+                let l_up = Rc::clone(&log);
+                cx.child(Node {
+                    width: 100.0,
+                    height: 100.0,
+                    hit_test_fn: Rc::new(|x, y| {
+                        (0.0..100.0).contains(&x) && (0.0..100.0).contains(&y)
+                    }),
+                    on_down_fn: Some(Rc::new(move |ev| {
+                        l_down
+                            .borrow_mut()
+                            .push(format!("down:{:.0},{:.0}", ev.root_x, ev.root_y));
+                    })),
+                    on_move_fn: Some(Rc::new(move |ev| {
+                        l_move.borrow_mut().push(format!("move:{:.0}", ev.root_x));
+                    })),
+                    on_up_fn: Some(Rc::new(move |_ev| {
+                        l_up.borrow_mut().push("up".to_string());
+                    })),
+                    ..Node::default()
+                });
+            }
+        });
+
+        let mut scene = Scene::new();
+        app.draw(&mut scene, 200.0, 200.0);
+
+        let mut app = app;
+        let cursor = |x: f64, y: f64| winit::event::WindowEvent::CursorMoved {
+            device_id: winit::event::DeviceId::dummy(),
+            position: winit::dpi::PhysicalPosition::new(x, y),
+        };
+        let mouse = |state: winit::event::ElementState| winit::event::WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state,
+            button: winit::event::MouseButton::Left,
+        };
+
+        app.handle_event(&cursor(50.0, 50.0)); // 只更新光标（未按下，无捕获）
+        app.handle_event(&mouse(winit::event::ElementState::Pressed));
+        app.handle_event(&cursor(70.0, 50.0)); // 捕获期间 → move 派发
+        app.handle_event(&mouse(winit::event::ElementState::Released));
+        app.handle_event(&cursor(90.0, 50.0)); // 已释放 → 不再派发
+
+        assert_eq!(
+            *log.borrow(),
+            vec![
+                "down:50,50".to_string(),
+                "move:70".to_string(),
+                "up".to_string()
+            ]
+        );
     }
 
     #[test]
