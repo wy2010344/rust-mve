@@ -610,8 +610,10 @@ fn editable_handle_ime(core: &mut EditCore, event: &ImeEvent) -> bool {
             }
             true
         }
-        ImeEvent::Commit(_text) => {
+        ImeEvent::Commit(text) => {
+            // 对齐 Kotlin 平台层：先移除预编辑窗口，再经常规插入路径写入已确认文本
             core.end_composition(false);
+            core.insert_text(text);
             true
         }
     }
@@ -819,6 +821,32 @@ mod tests {
         assert!(editable_handle_ime(&mut c, &ev));
         assert!(!c.in_composing());
         assert_eq!(c.text(), "a中");
+    }
+
+    /// winit Windows 真实序列：提交时先 `Preedit("")` 清窗，再 `Commit(text)`，
+    /// 且 commit 文本可能与 preedit 不同——commit 文本必须写入正文。
+    #[test]
+    fn ime_winit_windows_commit_sequence() {
+        let mut c = core("");
+        c.set_cursor(0);
+        let ev = ImeEvent::Preedit {
+            text: "nihao".into(),
+            cursor: Some((5, 5)),
+        };
+        assert!(editable_handle_ime(&mut c, &ev));
+        assert_eq!(c.text(), "nihao");
+        // winit：GCS_RESULTSTR → 先清 preedit，再提交
+        let ev = ImeEvent::Preedit {
+            text: String::new(),
+            cursor: None,
+        };
+        assert!(editable_handle_ime(&mut c, &ev));
+        assert_eq!(c.text(), "");
+        let ev = ImeEvent::Commit("你好".into());
+        assert!(editable_handle_ime(&mut c, &ev));
+        assert_eq!(c.text(), "你好");
+        assert!(!c.in_composing());
+        assert_eq!(c.cursor(), 2);
     }
 
     #[test]

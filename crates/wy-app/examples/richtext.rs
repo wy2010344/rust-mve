@@ -1,4 +1,4 @@
-//! RichEditableTextNode 全链路示例：MVE + 焦点 + 键盘/IME + 样式操作。
+//! RichEditableTextNode 全链路示例：`rsx!` 声明式写法 + 焦点 + 键盘/IME + 样式操作。
 //!
 //! 运行：`cargo run -p wy-app --example richtext`
 //!
@@ -9,13 +9,14 @@
 //! - Ctrl+←/→ 词级跳转，Home/End 行首/行尾；
 //! - 密码输入框（掩码 `•` 显示）；
 //! - 实时日志输出当前文本。
+//!
+//! 编辑器构造返回 `(Node, 共享内核)` 元组（按钮要直接拿内核 `style_range`），
+//! 无法走 rsx! 的单节点组件调用，故保留函数式构造；其余节点用 `rsx!`。
 
 use std::rc::Rc;
 
-use wy_mve::{
-    button, column_at, rich_editable_opts, rich_text_opts, row, text, Node, RichTextOpts,
-};
-use wy_render::{Color, Point, Scene};
+use wy_mve::{column_at, rich_editable_opts, rich_text_opts, rsx, text_styled, RichTextOpts};
+use wy_render::Color;
 use wy_signal::{GetValue, SetValue, Signal};
 use wy_text::TextStyle;
 
@@ -26,24 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = wy_engine::mve_integration::MveApp::new(move |cx| {
         cx.child(column_at(30.0, 30.0, move |cx| {
-            // ---- 标题 ----
-            cx.child(Node {
-                draw_fn: Rc::new(|scene| {
-                    if let Some(s) = scene.downcast_mut::<Scene>() {
-                        s.draw_text(
-                            Point::new(0.0, 0.0),
-                            "Rich Text 编辑器 Demo",
-                            18.0,
-                            Color::BLACK,
-                        );
-                    }
-                }),
-                width: 200.0,
-                height: 24.0,
-                ..Node::default()
-            });
-
-            // ---- 多行富文本编辑器（共享内核句柄 → 按钮可直接 style_range） ----
+            // 编辑器在闭包内构造（返回 `(Node, 共享内核)` 元组，局部变量才能 move 进树）
             let editor_opts = RichTextOpts {
                 width: 400.0,
                 height: 100.0,
@@ -55,103 +39,92 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let d2 = doc;
             let (editor_node, core_rc) =
                 rich_editable_opts(move || d1.get(), move |t| d2.set(t), editor_opts);
+            let c1 = core_rc;
+
+            cx.child(text_styled(
+                || "Rich Text 编辑器 Demo".into(),
+                18.0,
+                Color::BLACK,
+            ));
             cx.child(editor_node);
 
-            // ---- 样式按钮行 ----
-            let c1 = core_rc.clone();
-            let d_log = log;
-            cx.child(row(move |cx| {
-                // 红色：把选区样式设为红色
-                let c = Rc::clone(&c1);
-                let lg = d_log;
-                cx.child(button(
-                    move || "红色".into(),
-                    move || {
-                        {
-                            let mut core = c.borrow_mut();
-                            let (s, e) = (core.sel_start(), core.sel_end());
-                            if s < e {
-                                core.style_range(
-                                    s,
-                                    e,
-                                    Some(TextStyle::normal().with_color(0xFFFF0000)),
-                                );
+            // 样式按钮行 + 密码区 + 日志：同一列（与外层 column 同 gap，布局等价）
+            cx.child(
+                rsx! {
+                    vbox {
+                        hbox {
+                            // `let` 混入 rsx：逐按钮克隆共享内核（Rc 非 Copy）
+                            let c = Rc::clone(&c1);
+                            btn {
+                                label: "红色",
+                                on_click: move || {
+                                    let mut core = c.borrow_mut();
+                                    let (s, e) = (core.sel_start(), core.sel_end());
+                                    if s < e {
+                                        core.style_range(
+                                            s,
+                                            e,
+                                            Some(TextStyle::normal().with_color(0xFFFF0000)),
+                                        );
+                                    }
+                                    log.set("已应用红色".into());
+                                }
+                            }
+                            let c = Rc::clone(&c1);
+                            btn {
+                                label: "蓝色",
+                                on_click: move || {
+                                    let mut core = c.borrow_mut();
+                                    let (s, e) = (core.sel_start(), core.sel_end());
+                                    if s < e {
+                                        core.style_range(
+                                            s,
+                                            e,
+                                            Some(TextStyle::normal().with_color(0xFF0000FF)),
+                                        );
+                                    }
+                                }
+                            }
+                            let c = Rc::clone(&c1);
+                            btn {
+                                label: "清除样式",
+                                on_click: move || {
+                                    let mut core = c.borrow_mut();
+                                    let (s, e) = (core.sel_start(), core.sel_end());
+                                    if s < e {
+                                        core.style_range(s, e, None);
+                                    }
+                                }
+                            }
+                            let c = Rc::clone(&c1);
+                            btn {
+                                label: "撤销",
+                                on_click: move || c.borrow_mut().undo(),
+                            }
+                            let c = Rc::clone(&c1);
+                            btn {
+                                label: "重做",
+                                on_click: move || c.borrow_mut().redo(),
                             }
                         }
-                        lg.set("已应用红色".into());
-                    },
-                ));
 
-                // 蓝色
-                let c = Rc::clone(&c1);
-                cx.child(button(
-                    move || "蓝色".into(),
-                    move || {
-                        let mut core = c.borrow_mut();
-                        let (s, e) = (core.sel_start(), core.sel_end());
-                        if s < e {
-                            core.style_range(
-                                s,
-                                e,
-                                Some(TextStyle::normal().with_color(0xFF0000FF)),
-                            );
-                        }
-                    },
-                ));
-
-                // 清除选区样式（回退基础样式）
-                let c = Rc::clone(&c1);
-                cx.child(button(
-                    move || "清除样式".into(),
-                    move || {
-                        let mut core = c.borrow_mut();
-                        let (s, e) = (core.sel_start(), core.sel_end());
-                        if s < e {
-                            core.style_range(s, e, None);
-                        }
-                    },
-                ));
-
-                // 撤销
-                let c = Rc::clone(&c1);
-                cx.child(button(
-                    move || "撤销".into(),
-                    move || {
-                        c.borrow_mut().undo();
-                    },
-                ));
-
-                // 重做
-                let c = Rc::clone(&c1);
-                cx.child(button(
-                    move || "重做".into(),
-                    move || {
-                        c.borrow_mut().redo();
-                    },
-                ));
-            }));
-
-            // ---- 密码框标签 ----
-            cx.child(text(|| "密码框:".into()));
-
-            // ---- 密码输入 ----
-            let p1 = pass;
-            let p2 = pass;
-            cx.child(rich_text_opts(
-                move || p1.get(),
-                move |t| p2.set(t),
-                RichTextOpts {
-                    width: 200.0,
-                    height: 32.0,
-                    placeholder: "密码".into(),
-                    password: true,
-                    ..Default::default()
-                },
-            ));
-
-            // ---- 日志 ----
-            let log_sig = log;
-            cx.child(text(move || log_sig.get()));
+                        label("密码框:")
+                        rich_text_opts(
+                            move || pass.get(),
+                            move |t| pass.set(t),
+                            RichTextOpts {
+                                width: 200.0,
+                                height: 32.0,
+                                placeholder: "密码".into(),
+                                password: true,
+                                ..Default::default()
+                            }
+                        )
+                        label(log.get())
+                    }
+                }
+                .into_node(),
+            );
         }));
     });
 

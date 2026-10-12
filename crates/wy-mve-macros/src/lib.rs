@@ -253,11 +253,15 @@ fn parse_nodes_block(input: ParseStream) -> syn::Result<Vec<Node>> {
 type ElementBlock = (Vec<(Ident, Expr)>, Vec<Node>);
 
 /// 解析元素块 `{ ... }`：区分 `name: expr` 字段与子节点。
+///
+/// 允许混入普通 Rust 语句（`let` 绑定等）—— 以 [`Node::Raw`] 原样透传，
+/// 且按出现顺序落盘（如逐按钮 `let c = Rc::clone(..)` 必须先于按钮求值）。
 fn parse_element_block(input: ParseStream) -> syn::Result<ElementBlock> {
     let content;
     syn::braced!(content in input);
     let mut fields = Vec::new();
-    let mut children = Vec::new();
+    let mut children: Vec<Node> = Vec::new();
+    let mut raw: Vec<Stmt> = Vec::new();
 
     while !content.is_empty() {
         skip_junk(&content);
@@ -272,8 +276,19 @@ fn parse_element_block(input: ParseStream) -> syn::Result<ElementBlock> {
             fields.push((name, value));
             continue;
         }
-        // 子节点
+        // Rust 语句（let / 赋值等）→ 暂存，遇到节点时按序落盘
+        if content.peek(Token![let]) {
+            raw.push(content.parse::<Stmt>()?);
+            continue;
+        }
+        // 子节点：先把积累的语句落盘，保持执行顺序
+        if !raw.is_empty() {
+            children.push(Node::Raw(std::mem::take(&mut raw)));
+        }
         children.push(content.parse::<Node>()?);
+    }
+    if !raw.is_empty() {
+        children.push(Node::Raw(raw));
     }
     Ok((fields, children))
 }

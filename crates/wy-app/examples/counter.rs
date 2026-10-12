@@ -1,30 +1,24 @@
-//! 计数器示例：函数组件 + 信号驱动。
+//! 计数器示例：`rsx!` 声明式写法 + 信号驱动。
 //!
 //! 运行：`cargo run -p wy-app --example counter`
 //!
-//! 树结构只构建一次；文本与按钮在 draw 期读取 signal，
-//! 按键 set 信号 → RedrawTracker 自动触发重绘。
+//! 树结构只构建一次；`label(format!(..))` 由宏包成闭包在 draw 期求值，
+//! 读信号自动追踪 → 按键 set 信号后该文本局部重绘。
 
-use wy_mve::{button, column_at, row, text_signal, NodeContext};
+use wy_mve::{rsx, NodeContext};
 use wy_signal::{GetValue, SetValue, Signal};
 
 fn counter_ui(cx: &mut NodeContext, count: Signal<i32>) {
-    cx.child(column_at(350.0, 250.0, move |cx| {
-        let c = count;
-        cx.child(text_signal(move || Box::new(format!("Count: {}", c.get()))));
-
-        let row_count = count;
-        cx.child(row(move |cx| {
-            cx.child(button(move || "−".into(), {
-                let s = row_count;
-                move || s.set(s.get() - 1)
-            }));
-            cx.child(button(move || "+".into(), {
-                let s = row_count;
-                move || s.set(s.get() + 1)
-            }));
-        }));
-    }));
+    let node = rsx! {
+        vbox_at(350.0, 250.0) {
+            label(format!("Count: {}", count.get()))
+            hbox {
+                btn { label: "−", on_click: move || count.set(count.get() - 1) }
+                btn { label: "+", on_click: move || count.set(count.get() + 1) }
+            }
+        }
+    };
+    cx.child(node.into_node());
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

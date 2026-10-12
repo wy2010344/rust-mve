@@ -947,7 +947,9 @@ impl EditCore {
     /// 平台上报组合文本（复刻 `onComposing`）。
     pub fn on_composing(&mut self, text: &str, cursor_pos: usize) {
         if text.is_empty() {
-            self.end_composition(true); // 空 preedit = 取消组合，还原原文
+            // 空 preedit = 提交完成：仅移除预编辑窗口（不还原原文），
+            // 已确认文本由平台经常规插入路径另行写入（对齐 Kotlin onComposing）
+            self.end_composition(false);
             return;
         }
         // absorbGlobalSelection：纯逻辑层无全局会话，未定位则从 0 开始
@@ -985,27 +987,35 @@ impl EditCore {
             .set(cursor_pos.min(text.chars().count()));
     }
 
-    /// 结束组合态。[restore]=true 还原被替换原文（取消语义）；false 仅清标记保留文本。
+    /// 结束组合态。[restore]=true 还原被替换原文（取消语义）；
+    /// false 移除预编辑窗口（正常提交，已确认文本由平台经常规插入路径另行写入）。
+    /// 非组合态下为无害空操作。光标一律回到基座插入点。
     pub fn end_composition(&mut self, restore: bool) {
         let base = self.composition_base.take();
         let win_len = self.composing_text.get().chars().count();
         self.composing_text.set(String::new());
         self.composing_cursor_pos.set(0);
         self.preferred_x = f32::NAN;
-        if !restore {
+        if base.is_none() && win_len == 0 {
             return;
         }
-        let (start, orig) = match base {
-            Some((s, o)) => (s, o),
-            None => return,
-        };
         let cur = self.text().to_string();
         let cur_len = cur.chars().count();
+        let start = match base {
+            Some((s, _)) => s,
+            None => self.cursor().min(cur_len),
+        };
+        let restored = if restore {
+            base.map(|(_, orig)| orig).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let head_end = start.min(cur_len);
         let tail_start = (start + win_len).min(cur_len);
         let new_text = format!(
             "{}{}{}",
-            slice_chars(&cur, 0, start),
-            orig,
+            slice_chars(&cur, 0, head_end),
+            restored,
             slice_chars(&cur, tail_start, cur_len),
         );
         if new_text != cur {
@@ -1392,15 +1402,18 @@ mod tests {
     }
 
     #[test]
-    fn composing_inserts_and_removes() {
+    fn composing_commit_removes_window() {
         let mut c = new_core("");
         c.set_cursor(0);
         c.on_composing("ni", 1);
         assert!(c.in_composing());
         assert_eq!(c.text(), "ni");
-        c.end_composition(false); // 确认提交
-        assert_eq!(c.text(), "ni");
+        c.end_composition(false); // 正常提交：移除窗口（已确认文本由平台另行插入）
+        assert_eq!(c.text(), "");
         assert!(!c.in_composing());
+        c.insert_text("你");
+        assert_eq!(c.text(), "你");
+        assert_eq!(c.cursor(), 1);
     }
 
     #[test]
@@ -1420,7 +1433,19 @@ mod tests {
         c.on_composing("hi", 1);
         assert_eq!(c.text(), "hi");
         c.end_composition(false);
+        assert_eq!(c.text(), "");
+    }
+
+    #[test]
+    fn empty_preedit_removes_window_not_restore() {
+        // Kotlin onComposing("")：仅移除窗口，不还原被替换的原文
+        let mut c = new_core("hello");
+        c.select_all();
+        c.on_composing("hi", 1);
         assert_eq!(c.text(), "hi");
+        c.on_composing("", 0);
+        assert!(!c.in_composing());
+        assert_eq!(c.text(), "");
     }
 
     #[test]

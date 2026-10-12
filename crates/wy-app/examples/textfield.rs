@@ -1,4 +1,4 @@
-//! TextField 全链路示例：MVE + 焦点 + 键盘/IME 输入。
+//! TextField 全链路示例：`rsx!` 声明式写法 + 焦点 + 键盘/IME 输入。
 //!
 //! 运行：`cargo run -p wy-app --example textfield`
 //!
@@ -9,10 +9,7 @@
 //! - 密码框掩码显示；
 //! - 输入内容实时同步到信号（on_change）。
 
-use std::rc::Rc;
-
-use wy_mve::{button, column_at, text_field, text_field_opts, Node, TextFieldOpts};
-use wy_render::{Color, Point, Scene};
+use wy_mve::{rsx, text_field, text_field_opts, TextFieldOpts};
 use wy_signal::{GetValue, SetValue, Signal};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -21,55 +18,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let log = Signal::new(String::new());
 
     let app = wy_engine::mve_integration::MveApp::new(move |cx| {
-        cx.child(column_at(50.0, 50.0, move |cx| {
-            let l = log;
-            cx.child(text_signal(move || l.get()));
-
-            let n1 = name;
-            let n2 = name;
-            cx.child(text_field(move || n1.get(), move |t| n2.set(t)));
-
-            let p1 = pass;
-            let p2 = pass;
-            cx.child(text_field_opts(
-                move || p1.get(),
-                move |t| p2.set(t),
-                TextFieldOpts {
-                    width: 220.0,
-                    height: 32.0,
-                    placeholder: "密码".into(),
-                    password: true,
-                    ..Default::default()
-                },
-            ));
-
-            let l = log;
-            let n = name;
-            let p = pass;
-            cx.child(button(
-                move || "显示输入".into(),
-                move || {
-                    let mut s = String::new();
-                    s.push_str(&format!("name={}\n", n.get()));
-                    s.push_str(&format!("pass={}\n", p.get()));
-                    l.set(s);
-                },
-            ));
-        }));
+        let node = rsx! {
+            vbox_at(50.0, 50.0) {
+                label(log.get())
+                text_field(move || name.get(), move |t| name.set(t))
+                text_field_opts(
+                    move || pass.get(),
+                    move |t| pass.set(t),
+                    TextFieldOpts {
+                        width: 220.0,
+                        height: 32.0,
+                        placeholder: "密码".into(),
+                        password: true,
+                        ..Default::default()
+                    }
+                )
+                btn {
+                    label: "显示输入",
+                    on_click: move || {
+                        let mut s = String::new();
+                        s.push_str(&format!("name={}\n", name.get()));
+                        s.push_str(&format!("pass={}\n", pass.get()));
+                        log.set(s);
+                    }
+                }
+            }
+        };
+        cx.child(node.into_node());
     });
 
     wy_engine::runner::run(app)
-}
-
-/// 主标签（简单文本信号 → Scene 文本图元）。
-fn text_signal(label: impl Fn() -> String + 'static) -> Node {
-    Node {
-        draw_fn: Rc::new(move |scene| {
-            let s = label();
-            if let Some(scene) = scene.downcast_mut::<Scene>() {
-                scene.draw_text(Point::new(0.0, 0.0), &s, 14.0, Color::BLACK);
-            }
-        }),
-        ..Node::default()
-    }
 }

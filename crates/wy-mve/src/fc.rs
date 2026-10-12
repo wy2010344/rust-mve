@@ -385,7 +385,7 @@ pub use macro_alias::*;
 ///     for_each(
 ///         |f| (0..3).for_each(|i| f(i.to_string(), i)),
 ///         |_k, _v, cx| {
-///             cx.child(label(|| "item".into()))
+///             cx.child(label(|| "item".into()).into_node())
 ///         },
 ///     ),
 /// ]);
@@ -443,6 +443,32 @@ mod tests {
         };
         let kids = collect([slot]);
         assert_eq!(kids.len(), 1);
+    }
+
+    /// 元素块内混入 `let`：按出现顺序求值（先克隆后绑进按钮闭包），不产出节点。
+    #[test]
+    fn rsx_let_between_children_keeps_order() {
+        use crate::node::PointerEvent;
+        use crate::rsx;
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let shared = Rc::new(Cell::new(0));
+        let slot = rsx! {
+            vbox {
+                let c = Rc::clone(&shared);
+                btn { label: "a", on_click: move || c.set(c.get() + 1) }
+                let c = Rc::clone(&shared);
+                btn { label: "b", on_click: move || c.set(c.get() + 10) }
+            }
+        };
+        let node = slot.into_node();
+        let kids = collect([node]);
+        let children = children_nodes(&kids[0]);
+        assert_eq!(children.len(), 2, "let 语句不产出节点");
+        children[0].run_on_click(&mut PointerEvent::new(0.0, 0.0));
+        assert_eq!(shared.get(), 1, "第一个按钮闭包持有自己的克隆");
+        children[1].run_on_click(&mut PointerEvent::new(0.0, 0.0));
+        assert_eq!(shared.get(), 11, "第二个按钮闭包独立于第一个");
     }
 
     #[test]
