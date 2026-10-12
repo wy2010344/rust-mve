@@ -152,6 +152,16 @@ pub trait WyApp {
         None
     }
 
+    /// IME 候选窗跟随的光标盒 `(x, y, w, h)`（窗口客户区坐标）。
+    ///
+    /// `ime_allowed() == Some(true)` 时 runner 调用
+    /// `Window::set_ime_cursor_area`（仅变化时），对齐 Kotlin
+    /// `Renderer.overlayTrack` → `SkiaWindow.setInputOverlay` 的候选窗定位。
+    /// 默认无光标盒。
+    fn ime_cursor_area(&self) -> Option<(f32, f32, f32, f32)> {
+        None
+    }
+
     /// 提供无障碍树更新（可选）。
     ///
     /// 每次渲染后调用。返回 `Some(TreeUpdate)` 会更新平台无障碍树。
@@ -202,6 +212,7 @@ pub fn run(app: impl WyApp + 'static) -> Result<(), Box<dyn std::error::Error>> 
         blit_pipeline: None,
         blit_bind_group_layout: None,
         ime_allowed: None,
+        ime_cursor: None,
     };
 
     event_loop.run_app(&mut state)?;
@@ -236,6 +247,8 @@ struct AppState<A: WyApp> {
     blit_bind_group_layout: Option<wgpu::BindGroupLayout>,
     /// 已同步到窗口的 IME 允许状态（`None` = 未设置过）。
     ime_allowed: Option<bool>,
+    /// 已同步到窗口的 IME 光标盒（`None` = 未设置过）。
+    ime_cursor: Option<(f32, f32, f32, f32)>,
 }
 
 impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
@@ -526,6 +539,7 @@ impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         // 非 Poll 模式下不需要主动请求重绘
         self.sync_ime_allowed();
+        self.sync_ime_cursor_area();
     }
 }
 
@@ -541,7 +555,32 @@ impl<A: WyApp> AppState<A> {
                 window.set_ime_allowed(allowed);
             }
         }
+        // IME 重新允许时清缓存，强制下一次 sync 重设光标盒
+        // （失焦期间平台可能已丢弃定位）。
+        if want == Some(true) {
+            self.ime_cursor = None;
+        }
         self.ime_allowed = want;
+    }
+
+    /// 同步 IME 候选窗光标盒到窗口（仅在 IME 允许且变化时调用）。
+    ///
+    /// 对齐 Kotlin `overlayTrack`：候选窗跟随光标；失焦（IME 禁用）时不更新。
+    fn sync_ime_cursor_area(&mut self) {
+        if self.ime_allowed != Some(true) {
+            return;
+        }
+        let want = self.app.ime_cursor_area();
+        if want == self.ime_cursor {
+            return;
+        }
+        if let (Some(window), Some((x, y, w, h))) = (&self.window, want) {
+            window.set_ime_cursor_area(
+                winit::dpi::LogicalPosition::new(x as f64, y as f64),
+                winit::dpi::LogicalSize::new(w as f64, h as f64),
+            );
+        }
+        self.ime_cursor = want;
     }
 
     fn render(&mut self) {

@@ -211,7 +211,7 @@ pub fn rich_editable_opts(
                 }
             }
 
-            // 选区高亮（逐行绘制）
+            // 选区高亮（逐行绘制，字形行盒几何对齐 Kotlin TIGHT rect）
             if core.has_selection() && focused {
                 let sel_s = core.logic_to_display_index(core.sel_start());
                 let sel_e = core.logic_to_display_index(core.sel_end());
@@ -220,20 +220,17 @@ pub fn rich_editable_opts(
                 } else {
                     &core.display_text()
                 };
-                let line_height = wy_render::text_measure::line_height(opts.font_size);
                 for &(ls, le) in &display_line_ranges(text_for_x) {
                     let vis_s = sel_s.max(ls);
                     let vis_e = sel_e.min(le);
                     if vis_s >= vis_e {
                         continue;
                     }
-                    let line_idx = line_index_for_offset(text_for_x, vis_s);
-                    let ly = top + cursor_y(opts.font_size, line_idx);
-                    let ax = PAD_X + cursor_x_on_line(text_for_x, opts.font_size, vis_s);
-                    let bx = PAD_X + cursor_x_on_line(text_for_x, opts.font_size, vis_e);
+                    let sb = wy_render::text_measure::caret_box(text_for_x, opts.font_size, vis_s);
+                    let eb = wy_render::text_measure::caret_box(text_for_x, opts.font_size, vis_e);
                     scene.fill_rect(
-                        Rect::new(ax, ly, bx - ax, line_height),
-                        Color::rgba(0, 120, 212, 70),
+                        Rect::new(PAD_X + sb.x, top + sb.top, eb.x - sb.x, sb.height),
+                        Color::rgba(100, 100, 200, 60),
                     );
                 }
             }
@@ -246,25 +243,34 @@ pub fn rich_editable_opts(
                     &core.display_text()
                 };
                 let disp_idx = core.logic_to_display_index(core.cursor());
-                let line_idx = line_index_for_offset(text_for_x, disp_idx);
-                let cx = PAD_X + cursor_x_on_line(text_for_x, opts.font_size, disp_idx);
-                let cy = top + cursor_y(opts.font_size, line_idx);
-                scene.fill_rect(Rect::new(cx, cy, 1.0, opts.font_size), opts.text_color);
+                let cb = wy_render::text_measure::caret_box(text_for_x, opts.font_size, disp_idx);
+                scene.fill_rect(
+                    Rect::new(PAD_X + cb.x, top + cb.top, 2.0, cb.height),
+                    opts.text_color,
+                );
             }
 
-            // IME 组合带下划线
+            // IME 组合带：背景 + 底部 2px 下划线（对齐 Kotlin drawComposing）
             if let Some((cs, ce)) = core.composing_display_range() {
                 let text_for_x = if is_mask {
                     shown.as_str()
                 } else {
                     &core.display_text()
                 };
-                let line_idx = line_index_for_offset(text_for_x, cs);
-                let ly = top + cursor_y(opts.font_size, line_idx);
-                let ax = PAD_X + cursor_x_on_line(text_for_x, opts.font_size, cs);
-                let bx = PAD_X + cursor_x_on_line(text_for_x, opts.font_size, ce);
-                let y = ly + opts.font_size + 1.0;
-                scene.fill_rect(Rect::new(ax, y, bx - ax, 1.0), opts.text_color);
+                let sb = wy_render::text_measure::caret_box(text_for_x, opts.font_size, cs);
+                let eb = wy_render::text_measure::caret_box(text_for_x, opts.font_size, ce);
+                let ax = PAD_X + sb.x;
+                let bx = PAD_X + eb.x;
+                let by = top + sb.top;
+                let bh = sb.height;
+                scene.fill_rect(
+                    Rect::new(ax, by, (bx - ax).max(1.0), bh),
+                    Color::rgba(200, 200, 255, 50),
+                );
+                scene.fill_rect(
+                    Rect::new(ax, (by + bh - 2.0).max(by), (bx - ax).max(1.0), 2.0),
+                    Color::rgba(0, 0, 0, 140),
+                );
             }
         })
     };
@@ -276,7 +282,7 @@ pub fn rich_editable_opts(
         })
     };
 
-    // --- 点击：聚焦 + 定位光标（多行感知） ---
+    // --- 点击：聚焦 + 定位光标（parley 字形命中测试，行感知） ---
     let on_down_fn = {
         let core = Rc::clone(&core);
         let shared = Rc::clone(&shared);
@@ -285,18 +291,11 @@ pub fn rich_editable_opts(
             shared.borrow_mut().focused.set(true);
             let mut core = core.borrow_mut();
             let display_text = core.display_text();
-            let line_height = wy_render::text_measure::line_height(opts.font_size);
-            let text_y = event.y - text_top(&opts);
-            let click_line = (text_y / line_height).floor().max(0.0) as usize;
-            let line_ranges = display_line_ranges(&display_text);
-            let line_idx = click_line.min(line_ranges.len().saturating_sub(1));
-            let (line_start, line_end) = line_ranges[line_idx];
-            let display_idx = offset_from_x_on_line(
+            let display_idx = wy_render::text_measure::hit_point(
                 &display_text,
                 opts.font_size,
-                line_start,
-                line_end,
                 event.x - PAD_X,
+                event.y - text_top(&opts),
             );
             let logic_idx = core.display_to_logic_index(display_idx);
             core.set_cursor(logic_idx);
@@ -319,7 +318,6 @@ pub fn rich_editable_opts(
                 Key::ArrowUp => {
                     let display_text = core.display_text();
                     let display_idx = core.logic_to_display_index(core.cursor());
-                    let line_ranges = display_line_ranges(&display_text);
                     let current_line = line_index_for_offset(&display_text, display_idx);
 
                     if current_line == 0 {
@@ -334,12 +332,10 @@ pub fn rich_editable_opts(
                             x
                         };
                         let target_line = current_line - 1;
-                        let (target_start, target_end) = line_ranges[target_line];
-                        let target_display = offset_from_x_on_line(
+                        let target_display = wy_render::text_measure::hit_line(
                             &display_text,
                             opts.font_size,
-                            target_start,
-                            target_end,
+                            target_line,
                             current_x,
                         );
                         let logic_target = core.display_to_logic_index(target_display);
@@ -370,12 +366,10 @@ pub fn rich_editable_opts(
                             x
                         };
                         let target_line = current_line + 1;
-                        let (target_start, target_end) = line_ranges[target_line];
-                        let target_display = offset_from_x_on_line(
+                        let target_display = wy_render::text_measure::hit_line(
                             &display_text,
                             opts.font_size,
-                            target_start,
-                            target_end,
+                            target_line,
                             current_x,
                         );
                         let logic_target = core.display_to_logic_index(target_display);
@@ -458,12 +452,30 @@ pub fn rich_editable_opts(
         })
     };
 
+    // --- IME 候选窗定位：返回光标盒（节点局部坐标） ---
+    let ime_cursor_fn = {
+        let core = Rc::clone(&core);
+        let opts = Rc::clone(&opts);
+        Rc::new(move || {
+            let core = core.borrow();
+            let shown = if opts.password && !core.showing_placeholder() {
+                mask(core.text())
+            } else {
+                core.display_text()
+            };
+            let disp_idx = core.logic_to_display_index(core.cursor());
+            let cb = wy_render::text_measure::caret_box(&shown, opts.font_size, disp_idx);
+            (PAD_X + cb.x, text_top(&opts) + cb.top, 2.0, cb.height)
+        })
+    };
+
     let node = Node {
         draw_fn,
         hit_test_fn,
         on_down_fn: Some(on_down_fn),
         key_fn: Some(key_fn),
         ime_fn: Some(ime_fn),
+        ime_cursor_fn: Some(ime_cursor_fn),
         focusable: true,
         width: opts.width,
         height: opts.height,
@@ -647,40 +659,9 @@ fn line_index_for_offset(text: &str, offset: usize) -> usize {
     line
 }
 
-/// 光标在当前行内的 X 坐标（相对于行首）。
+/// 光标在当前行内的 X 坐标（与绘制同一排版来源，字形簇边界）。
 fn cursor_x_on_line(display_text: &str, font_size: f32, display_idx: usize) -> f32 {
-    let chars: Vec<char> = display_text.chars().collect();
-    let line_start = chars[..display_idx.min(chars.len())]
-        .iter()
-        .rposition(|&ch| ch == '\n')
-        .map(|p| p + 1)
-        .unwrap_or(0);
-    let line_prefix: String = chars[line_start..display_idx.min(chars.len())]
-        .iter()
-        .collect();
-    wy_render::text_measure::measure_text(&line_prefix, font_size).0
-}
-
-/// 从行内 X 坐标映射到显示索引。
-fn offset_from_x_on_line(
-    display_text: &str,
-    font_size: f32,
-    line_start: usize,
-    line_end: usize,
-    x: f32,
-) -> usize {
-    let line_text: String = display_text
-        .chars()
-        .skip(line_start)
-        .take(line_end - line_start)
-        .collect();
-    line_start + wy_render::text_measure::index_at_x(&line_text, font_size, x.max(0.0))
-}
-
-/// 光标的 Y 坐标（基于 Parley 实际行高）。
-fn cursor_y(font_size: f32, line_idx: usize) -> f32 {
-    let lh = wy_render::text_measure::line_height(font_size);
-    line_idx as f32 * lh
+    wy_render::text_measure::caret_box(display_text, font_size, display_idx).x
 }
 
 // ---------------------------------------------------------------------------

@@ -255,6 +255,37 @@ impl crate::runner::WyApp for MveApp {
         locate(self.focus.path(), &nodes)
             .map(|chain| chain.first().is_some_and(|n| n.ime_fn.is_some()))
     }
+
+    /// IME 候选窗光标盒：焦点节点的局部光标盒 + 焦点链布局偏移累加
+    /// （对齐 Kotlin `EditableTextNode.inputOverlay` = 绝对原点 + padding + 字形盒）。
+    fn ime_cursor_area(&self) -> Option<(f32, f32, f32, f32)> {
+        let path = self.focus.path();
+        if path.is_empty() {
+            return None;
+        }
+        let nodes = self.root.nodes();
+        // locate 返回 叶→根 链，反转成 根→叶 后逐级累加自身 pos 与父布局的子偏移。
+        let mut chain = locate(path, &nodes)?;
+        chain.reverse();
+        let mut origin = (0.0f32, 0.0f32);
+        for i in 0..chain.len() {
+            origin.0 += chain[i].pos_x();
+            origin.1 += chain[i].pos_y();
+            if let Some(child) = chain.get(i + 1) {
+                let children = children_nodes(&chain[i]);
+                let idx = children.iter().position(|c| c == child)?;
+                let offsets = match chain[i].layout {
+                    Some(layout) => layout_offsets(layout, chain[i].gap(), &children),
+                    None => vec![(0.0, 0.0); children.len()],
+                };
+                let ofs = offsets.get(idx)?;
+                origin.0 += ofs.0;
+                origin.1 += ofs.1;
+            }
+        }
+        let (x, y, w, h) = chain.last()?.run_ime_cursor_rect()?;
+        Some((origin.0 + x, origin.1 + y, w, h))
+    }
 }
 
 /// wy-render `Key` → wy-mve `Key`（两者变体同构）。
@@ -458,6 +489,39 @@ mod tests {
         // 清除焦点 → 不干预
         app.focus.clear_focus();
         assert_eq!(app.ime_allowed(), None);
+    }
+
+    #[test]
+    fn ime_cursor_area_follows_focus() {
+        let mut app = MveApp::new(move |cx: &mut wy_mve::NodeContext| {
+            cx.child(wy_mve::column(move |cx| {
+                cx.child(wy_mve::text_field(String::new, move |_| {}));
+                cx.child(wy_mve::text_field(String::new, move |_| {}));
+            }));
+        });
+        assert_eq!(app.ime_cursor_area(), None, "无焦点无光标盒");
+
+        let mut scene = Scene::new();
+        app.draw(&mut scene, 200.0, 100.0);
+
+        // 点击第二个输入框（默认 200x32，列 gap 8 → 第二个 y≈40）
+        let nodes = app.root.nodes();
+        let chain = hit_test_node(&nodes[0], (0.0, 0.0), 50.0, 50.0)
+            .unwrap()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect::<Vec<_>>();
+        app.focus.focus_on_click(&chain);
+
+        let (x, y, w, h) = app.ime_cursor_area().expect("聚焦后应有 IME 光标盒");
+        assert!((0.0..200.0).contains(&x), "x={x}");
+        // 焦点链偏移累加：第二行输入框的 y 必须超过第一行高度（32）
+        assert!(y >= 40.0, "候选窗应跟随第二行光标，y={y}");
+        assert!(w > 0.0 && h > 0.0, "w={w} h={h}");
+
+        // 清除焦点 → 无光标盒
+        app.focus.clear_focus();
+        assert_eq!(app.ime_cursor_area(), None);
     }
 
     #[test]

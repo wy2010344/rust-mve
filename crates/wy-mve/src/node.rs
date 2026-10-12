@@ -22,6 +22,8 @@ type ClickFn = Rc<dyn Fn(&mut PointerEvent)>;
 type KeyFn = Rc<dyn Fn(&mut KeyEvent) -> bool>;
 /// IME 输入法事件处理（组合态文本上报）。
 type ImeFn = Rc<dyn Fn(&mut ImeEvent) -> bool>;
+/// IME 候选窗定位：光标盒 `(x, y, w, h)`（节点局部坐标）。
+type ImeCursorFn = Rc<dyn Fn() -> (f32, f32, f32, f32)>;
 /// 测量节点自然尺寸（宽高像素）。文本等内容撑开型节点用它提供 intrinsic 尺寸，
 /// 供容器布局消费（复刻 Kotlin `RichTextNode.argWidth/argHeight`）。
 type MeasureFn = Rc<dyn Fn() -> (f32, f32)>;
@@ -58,6 +60,10 @@ pub struct Node {
     pub key_fn: Option<KeyFn>,
     /// IME 输入法组合事件（组合文本 / 光标偏移；返回 true 表示已消费）。
     pub ime_fn: Option<ImeFn>,
+    /// IME 候选窗定位：返回光标盒 `(x, y, w, h)`（节点局部坐标）。
+    /// 引擎换算为窗口绝对坐标后喂给 `Window::set_ime_cursor_area`，
+    /// 对齐 Kotlin `EditableTextNode.inputOverlay` 的候选窗跟随。
+    pub ime_cursor_fn: Option<ImeCursorFn>,
     /// 是否可聚焦。
     pub focusable: bool,
     /// 是否隐藏（不参与布局和命中测试）。
@@ -116,6 +122,7 @@ impl Clone for Node {
             on_up_fn: self.on_up_fn.as_ref().map(Rc::clone),
             key_fn: self.key_fn.as_ref().map(Rc::clone),
             ime_fn: self.ime_fn.as_ref().map(Rc::clone),
+            ime_cursor_fn: self.ime_cursor_fn.as_ref().map(Rc::clone),
             focusable: self.focusable,
             hidden: self.hidden,
             skip_draw: self.skip_draw,
@@ -176,6 +183,7 @@ impl Default for Node {
             on_up_fn: None,
             key_fn: None,
             ime_fn: None,
+            ime_cursor_fn: None,
             focusable: false,
             hidden: false,
             skip_draw: false,
@@ -251,6 +259,11 @@ impl Node {
         } else {
             false
         }
+    }
+
+    /// 查询光标盒（节点局部坐标），供 IME 候选窗定位。
+    pub fn run_ime_cursor_rect(&self) -> Option<(f32, f32, f32, f32)> {
+        self.ime_cursor_fn.as_ref().map(|f| f())
     }
 
     pub fn is_focusable(&self) -> bool {

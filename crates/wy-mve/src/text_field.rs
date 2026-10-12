@@ -198,31 +198,52 @@ pub fn text_field_opts(
                 scene.draw_text(Point::new(PAD_X, top), shown, opts.font_size, color);
             }
 
-            // 选区高亮（Enter 到编辑器的几何，掩码时按掩码重算）
+            // 选区高亮（字形行盒几何，对齐 Kotlin TIGHT rect）
             let anchor = s.editable.anchor().min(disp_len);
             let cursor = s.editable.cursor().min(disp_len);
             let (lo, hi) = (anchor.min(cursor), anchor.max(cursor));
             if lo < hi {
-                let ax = PAD_X + cursor_x(&display, opts.font_size, lo);
-                let bx = PAD_X + cursor_x(&display, opts.font_size, hi);
+                let sb = wy_render::text_measure::caret_box(&display, opts.font_size, lo);
+                let eb = wy_render::text_measure::caret_box(&display, opts.font_size, hi);
                 scene.fill_rect(
-                    Rect::new(ax, top, bx - ax, opts.font_size),
-                    Color::rgba(0, 120, 212, 70),
+                    Rect::new(PAD_X + sb.x, top + sb.top, eb.x - sb.x, sb.height),
+                    Color::rgba(100, 100, 200, 60),
                 );
             }
 
             // 光标（聚焦 + 未组合时显示）
             if s.focused.get() && !s.editable.is_composing() {
-                let cx = PAD_X + cursor_x(&display, opts.font_size, cursor);
-                scene.fill_rect(Rect::new(cx, top, 1.0, opts.font_size), opts.text_color);
+                let cb = wy_render::text_measure::caret_box(&display, opts.font_size, cursor);
+                scene.fill_rect(
+                    Rect::new(PAD_X + cb.x, top + cb.top, 2.0, cb.height),
+                    opts.text_color,
+                );
             }
 
-            // IME 组合带下划线
+            // IME 组合带：背景 + 底部 2px 下划线（对齐 Kotlin drawComposing）
             if let Some(range) = s.editable.composing_range() {
-                let a = PAD_X + cursor_x(&display, opts.font_size, range.start.min(disp_len));
-                let b = PAD_X + cursor_x(&display, opts.font_size, range.end.min(disp_len));
-                let y = top + opts.font_size + 1.0;
-                scene.fill_rect(Rect::new(a, y, b - a, 1.0), opts.text_color);
+                let sb = wy_render::text_measure::caret_box(
+                    &display,
+                    opts.font_size,
+                    range.start.min(disp_len),
+                );
+                let eb = wy_render::text_measure::caret_box(
+                    &display,
+                    opts.font_size,
+                    range.end.min(disp_len),
+                );
+                let ax = PAD_X + sb.x;
+                let bx = PAD_X + eb.x;
+                let by = top + sb.top;
+                let bh = sb.height;
+                scene.fill_rect(
+                    Rect::new(ax, by, (bx - ax).max(1.0), bh),
+                    Color::rgba(200, 200, 255, 50),
+                );
+                scene.fill_rect(
+                    Rect::new(ax, (by + bh - 2.0).max(by), (bx - ax).max(1.0), 2.0),
+                    Color::rgba(0, 0, 0, 140),
+                );
             }
         })
     };
@@ -275,12 +296,34 @@ pub fn text_field_opts(
         })
     };
 
+    // --- IME 候选窗定位：返回光标盒（节点局部坐标） ---
+    let ime_cursor_fn = {
+        let shared = Rc::clone(&shared);
+        let opts = Rc::clone(&opts);
+        Rc::new(move || {
+            let s = shared.borrow();
+            let text = s.editable.text();
+            let (display, disp_len) = if opts.password {
+                let m = mask(&text);
+                let n = m.len();
+                (m, n)
+            } else {
+                let n = text.len();
+                (text, n)
+            };
+            let cursor = s.editable.cursor().min(disp_len);
+            let cb = wy_render::text_measure::caret_box(&display, opts.font_size, cursor);
+            (PAD_X + cb.x, text_top(&opts) + cb.top, 2.0, cb.height)
+        })
+    };
+
     Node {
         draw_fn,
         hit_test_fn,
         on_down_fn: Some(on_down_fn),
         key_fn: Some(key_fn),
         ime_fn: Some(ime_fn),
+        ime_cursor_fn: Some(ime_cursor_fn),
         focusable: true,
         width: opts.width,
         height: opts.height,
@@ -421,11 +464,6 @@ fn editable_handle_ime(s: &mut SharedState, event: &ImeEvent) -> bool {
             true
         }
     }
-}
-
-/// 光标 X 坐标（本地前缀宽度）——复用 `wy_render::text_measure`。
-fn cursor_x(text: &str, font_size: f32, text_idx: usize) -> f32 {
-    wy_render::text_measure::cursor_x(text, font_size, text_idx)
 }
 
 #[cfg(test)]
