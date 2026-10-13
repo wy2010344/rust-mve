@@ -654,16 +654,30 @@ impl<A: WyApp> AppState<A> {
         );
 
         // 3. 获取 surface texture
+        //
+        // macOS/Metal 上 surface 刚 configure 且窗口尚未完成首次显示时，
+        // get_current_texture 常返回瞬态失败（Timeout/Occluded/Lost/Outdated）。
+        // 若此时直接 return，首帧会被吞掉，界面停在白屏直到下次输入事件触发
+        // 重绘（表现为"启动白屏、点击一下才出现"）。因此失败时 configure 后
+        // 重新 request_redraw，下一帧重试。
         let surface_texture = match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(tex)
             | wgpu::CurrentSurfaceTexture::Suboptimal(tex) => tex,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 surface.configure(device, config);
+                if let Some(window) = &self.window {
+                    self.needs_redraw.set(true);
+                    window.request_redraw();
+                }
                 return;
             }
             wgpu::CurrentSurfaceTexture::Timeout
             | wgpu::CurrentSurfaceTexture::Occluded
             | wgpu::CurrentSurfaceTexture::Validation => {
+                if let Some(window) = &self.window {
+                    self.needs_redraw.set(true);
+                    window.request_redraw();
+                }
                 return;
             }
         };
