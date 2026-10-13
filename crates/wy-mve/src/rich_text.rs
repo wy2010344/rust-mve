@@ -499,40 +499,82 @@ pub fn rich_editable_opts(
                     true
                 }
                 Key::Home => {
-                    let display_text = core.display_text();
-                    let display_idx = core.logic_to_display_index(core.cursor());
-                    let chars: Vec<char> = display_text.chars().collect();
-                    let line_start_char = chars[..display_idx.min(chars.len())]
-                        .iter()
-                        .rposition(|&ch| ch == '\n')
-                        .map(|p| p + 1)
-                        .unwrap_or(0);
-                    let logic_target = core.display_to_logic_index(line_start_char);
-                    if shift {
-                        core.move_to_position(logic_target, true);
+                    if event.ctrl {
+                        // Ctrl+Home 文档首（Kotlin moveDocStart/selectDocStart）
+                        core.move_to_position(0, shift);
+                        core.set_preferred_x(f32::NAN);
                     } else {
-                        core.set_cursor(logic_target);
+                        let display_text = core.display_text();
+                        let display_idx = core.logic_to_display_index(core.cursor());
+                        let chars: Vec<char> = display_text.chars().collect();
+                        let line_start_char = chars[..display_idx.min(chars.len())]
+                            .iter()
+                            .rposition(|&ch| ch == '\n')
+                            .map(|p| p + 1)
+                            .unwrap_or(0);
+                        let logic_target = core.display_to_logic_index(line_start_char);
+                        if shift {
+                            core.move_to_position(logic_target, true);
+                        } else {
+                            core.set_cursor(logic_target);
+                        }
+                        core.set_preferred_x(f32::NAN);
                     }
-                    core.set_preferred_x(f32::NAN);
                     true
                 }
                 Key::End => {
+                    if event.ctrl {
+                        // Ctrl+End 文档尾（Kotlin moveDocEnd/selectDocEnd）
+                        let len = core.text_len();
+                        core.move_to_position(len, shift);
+                        core.set_preferred_x(f32::NAN);
+                    } else {
+                        let display_text = core.display_text();
+                        let display_idx = core.logic_to_display_index(core.cursor());
+                        let chars: Vec<char> = display_text.chars().collect();
+                        let remaining = &chars[display_idx.min(chars.len())..];
+                        let line_end_char = display_idx
+                            + remaining
+                                .iter()
+                                .position(|&ch| ch == '\n')
+                                .unwrap_or(remaining.len());
+                        let logic_target = core.display_to_logic_index(line_end_char);
+                        if shift {
+                            core.move_to_position(logic_target, true);
+                        } else {
+                            core.set_cursor(logic_target);
+                        }
+                        core.set_preferred_x(f32::NAN);
+                    }
+                    true
+                }
+                Key::PageUp | Key::PageDown => {
+                    // 一次跳动 12 行（Kotlin jumpLines + pageLines=12）：
+                    // 保持 preferredX 视觉列，行号 clamp 到首/末行。
+                    let up = matches!(event.key, Key::PageUp);
                     let display_text = core.display_text();
                     let display_idx = core.logic_to_display_index(core.cursor());
-                    let chars: Vec<char> = display_text.chars().collect();
-                    let remaining = &chars[display_idx.min(chars.len())..];
-                    let line_end_char = display_idx
-                        + remaining
-                            .iter()
-                            .position(|&ch| ch == '\n')
-                            .unwrap_or(remaining.len());
-                    let logic_target = core.display_to_logic_index(line_end_char);
-                    if shift {
-                        core.move_to_position(logic_target, true);
+                    let line_count = display_line_ranges(&display_text).len();
+                    let current_line = line_index_for_offset(&display_text, display_idx);
+                    let delta: isize = if up { -12 } else { 12 };
+                    let max_line = line_count.saturating_sub(1) as isize;
+                    let target_line = ((current_line as isize) + delta).clamp(0, max_line) as usize;
+                    let current_x = if !core.preferred_x().is_nan() {
+                        core.preferred_x()
                     } else {
-                        core.set_cursor(logic_target);
-                    }
-                    core.set_preferred_x(f32::NAN);
+                        let x = cursor_x_on_line(&display_text, opts.font_size, display_idx);
+                        core.set_preferred_x(x);
+                        x
+                    };
+                    let target_byte = wy_render::text_measure::hit_line(
+                        &display_text,
+                        opts.font_size,
+                        target_line,
+                        current_x,
+                    );
+                    let logic_target =
+                        core.display_to_logic_index(byte_to_char(&display_text, target_byte));
+                    core.move_to_position(logic_target, shift);
                     true
                 }
                 _ => editable_handle_key(&mut core, event),
@@ -956,6 +998,7 @@ mod tests {
 
     #[test]
     fn tab_escape_not_consumed() {
+        // 纯逻辑层不消费（PageUp/Down 的行几何在组件层 key_fn 处理）
         let mut c = core("hi");
         for k in [Key::Tab, Key::Escape, Key::PageUp, Key::PageDown] {
             let ev = key(k, false, false);
@@ -964,6 +1007,57 @@ mod tests {
                 "{k:?} should not consume"
             );
         }
+    }
+
+    #[test]
+    fn page_down_jumps_twelve_lines() {
+        let text: String = (0..15)
+            .map(|i| format!("L{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (node, core) = edit_doc(&text);
+
+        let mut ev = key(Key::PageDown, false, false);
+        assert!(node.key_fn.as_ref().unwrap()(&mut ev));
+        let cur = core.borrow().cursor();
+        assert_eq!(
+            line_index_for_offset(&text, cur),
+            12,
+            "PageDown 从行 0 跳 12 行"
+        );
+
+        let mut ev = key(Key::PageUp, false, false);
+        assert!(node.key_fn.as_ref().unwrap()(&mut ev));
+        let cur = core.borrow().cursor();
+        assert_eq!(line_index_for_offset(&text, cur), 0, "PageUp 跳回行 0");
+
+        let mut ev = key(Key::PageUp, false, false);
+        assert!(node.key_fn.as_ref().unwrap()(&mut ev));
+        assert_eq!(
+            line_index_for_offset(&text, core.borrow().cursor()),
+            0,
+            "行 0 再 PageUp clamp 不越界"
+        );
+    }
+
+    #[test]
+    fn ctrl_home_end_jump_document() {
+        let text = "ab\ncd\nef";
+        let (node, core) = edit_doc(text);
+        core.borrow_mut().set_cursor(4);
+
+        let mut ev = key(Key::Home, true, false); // Ctrl+Home
+        assert!(node.key_fn.as_ref().unwrap()(&mut ev));
+        assert_eq!(core.borrow().cursor(), 0, "Ctrl+Home 到文档首");
+
+        let mut ev = key(Key::End, true, true); // Ctrl+Shift+End
+        assert!(node.key_fn.as_ref().unwrap()(&mut ev));
+        let c = core.borrow();
+        assert_eq!(
+            (c.sel_start(), c.sel_end()),
+            (0, 8),
+            "Ctrl+Shift+End 选到文档尾"
+        );
     }
 
     #[test]

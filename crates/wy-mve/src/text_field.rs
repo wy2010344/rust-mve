@@ -91,12 +91,80 @@ struct SharedState {
     clicks: crate::text_util::ClickTracker,
     /// 双击拖选锚词（display 字节区间）：双击建立，on_move 词级扩展，on_up 清空。
     word_anchor: Option<(usize, usize)>,
+    /// 撤销栈（parley PlainEditor 无 undo，快照式自建，深度对齐 EditCore=100）。
+    undo_stack: Vec<Snapshot>,
+    /// 重做栈（新编辑时清空）。
+    redo_stack: Vec<Snapshot>,
 }
+
+/// 编辑快照（undo/redo 栈条目）。
+#[derive(Clone)]
+struct Snapshot {
+    text: String,
+    anchor: usize,
+    cursor: usize,
+}
+
+impl Snapshot {
+    fn capture(s: &SharedState) -> Self {
+        Self {
+            text: s.editable.text(),
+            anchor: s.editable.anchor(),
+            cursor: s.editable.cursor(),
+        }
+    }
+
+    fn apply(&self, s: &mut SharedState) {
+        s.editable.replace_with(&self.text);
+        if self.anchor == self.cursor {
+            s.editable
+                .with_driver(|mut drv| drv.move_to_byte(self.cursor));
+        } else {
+            s.editable.select_range(self.anchor, self.cursor);
+        }
+    }
+}
+
+/// undo/redo 栈深度上限（对齐 Kotlin `maxHistorySize = 100`）。
+const MAX_HISTORY: usize = 100;
 
 impl SharedState {
     /// 标记内核状态已变化，使绘制 memo 失效并重录。
     fn mark_dirty(&mut self) {
         self.state_rev.set(self.state_rev.get().wrapping_add(1));
+    }
+
+    /// 文本变化后入栈（redo 清空；超深丢最旧）。
+    fn record_history(&mut self, snap: Snapshot) {
+        self.undo_stack.push(snap);
+        if self.undo_stack.len() > MAX_HISTORY {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+    }
+
+    /// 撤销：弹栈应用；IME 组合态禁用（防破坏组合会话）。
+    fn undo(&mut self) {
+        if self.editable.is_composing() {
+            return;
+        }
+        if let Some(snap) = self.undo_stack.pop() {
+            let cur = Snapshot::capture(self);
+            self.redo_stack.push(cur);
+            snap.apply(self);
+        }
+    }
+
+    /// 重做。
+    fn redo(&mut self) {
+        if self.editable.is_composing() {
+            return;
+        }
+        if let Some(snap) = self.redo_stack.pop() {
+            let cur = Snapshot::capture(self);
+            self.undo_stack.push(cur);
+            snap.apply(self);
+        }
     }
 }
 
@@ -130,6 +198,8 @@ pub fn text_field_opts(
         last_synced: initial.clone(),
         clicks: crate::text_util::ClickTracker::new(),
         word_anchor: None,
+        undo_stack: Vec::new(),
+        redo_stack: Vec::new(),
     }));
     {
         let mut s = shared.borrow_mut();
@@ -335,8 +405,15 @@ pub fn text_field_opts(
         let opts = Rc::clone(&opts);
         Rc::new(move |event: &mut KeyEvent| -> bool {
             let mut s = shared.borrow_mut();
+            let before = Snapshot::capture(&s);
             let handled = editable_handle_key(&mut s, &opts, event);
             if handled {
+                // undo/redo 键本身不入栈；文本变化才记录
+                let is_history = matches!(event.key, Key::Char(c) if matches!(c.to_ascii_lowercase(), 'z' | 'y'))
+                    && (event.ctrl || event.meta);
+                if !is_history && s.editable.text() != before.text {
+                    s.record_history(before);
+                }
                 s.mark_dirty();
                 push_change(&mut s, &*value, &*on_change);
             }
@@ -351,8 +428,13 @@ pub fn text_field_opts(
         let on_change = Rc::clone(&on_change);
         Rc::new(move |event: &mut ImeEvent| -> bool {
             let mut s = shared.borrow_mut();
+            let before = Snapshot::capture(&s);
             let handled = editable_handle_ime(&mut s, event);
             if handled {
+                // 仅 IME Commit 改正文才入栈（Preedit 组合带不算独立编辑）
+                if matches!(event, ImeEvent::Commit(_)) && s.editable.text() != before.text {
+                    s.record_history(before);
+                }
                 s.mark_dirty();
                 push_change(&mut s, &*value, &*on_change);
             }
@@ -476,48 +558,70 @@ fn editable_handle_key(s: &mut SharedState, opts: &TextFieldOpts, event: &KeyEve
             }
             true
         }
-        // 未处理的控制键（Enter / Tab / Escape / PageUp/Down）交给上层
+        // 单行字段无页概念：消费但不动光标（对齐 Kotlin 单行 getGlyphPosition
+        // y 越界 clamp 回本行 = 无变化）
+        Key::PageUp | Key::PageDown => true,
+        // 未处理的控制键（Enter / Tab / Escape）交给上层
         _ => false,
     }
 }
 
-/// Ctrl 快捷键：A 全选 / C 复制 / X 剪切 / V 粘贴（对齐 Kotlin Renderer 全局拦截）。
+/// Ctrl 快捷键：A 全选 / C 复制 / X 剪切 / V 粘贴 / Home·End 文档首尾。
 ///
-/// 单行字段：粘贴剥除换行；paste 空串不插，先终止组合态。
+/// 对齐 Kotlin Renderer 全局拦截。单行字段：粘贴剥除换行；paste 空串不插，
+/// 先终止组合态。
 fn handle_ctrl_shortcut(s: &mut SharedState, event: &KeyEvent) -> bool {
-    let Key::Char(c) = event.key else {
-        return false;
-    };
-    match c.to_ascii_lowercase() {
-        'a' => {
-            s.editable.select_all();
+    match event.key {
+        // 单行字段 Ctrl+Home/End = 文档首尾（Kotlin moveDocStart/End）
+        Key::Home => {
+            s.editable.with_driver(|mut drv| drv.move_to_text_start());
             true
         }
-        'c' => {
-            if let Some(sel) = s.editable.selected_text() {
-                crate::clipboard::clipboard_set(&sel);
+        Key::End => {
+            s.editable.with_driver(|mut drv| drv.move_to_text_end());
+            true
+        }
+        Key::Char(c) => match c.to_ascii_lowercase() {
+            'a' => {
+                s.editable.select_all();
+                true
             }
-            true
-        }
-        'x' => {
-            if let Some(sel) = s.editable.selected_text() {
-                crate::clipboard::clipboard_set(&sel);
-                s.editable.delete_selection();
-            }
-            true
-        }
-        'v' => {
-            if let Some(text) = crate::clipboard::clipboard_get() {
-                // 单行字段粘贴剥除换行（对齐 EditCore::insert_text 的 single_line 过滤）
-                let text = text.replace(['\n', '\r'], "");
-                if !text.is_empty() {
-                    s.editable.end_composing_if_any();
-                    s.editable
-                        .with_driver(|mut drv| drv.insert_or_replace_selection(&text));
+            'c' => {
+                if let Some(sel) = s.editable.selected_text() {
+                    crate::clipboard::clipboard_set(&sel);
                 }
+                true
             }
-            true
-        }
+            'x' => {
+                if let Some(sel) = s.editable.selected_text() {
+                    crate::clipboard::clipboard_set(&sel);
+                    s.editable.delete_selection();
+                }
+                true
+            }
+            'v' => {
+                if let Some(text) = crate::clipboard::clipboard_get() {
+                    // 单行字段粘贴剥除换行（对齐 EditCore::insert_text 的 single_line 过滤）
+                    let text = text.replace(['\n', '\r'], "");
+                    if !text.is_empty() {
+                        s.editable.end_composing_if_any();
+                        s.editable
+                            .with_driver(|mut drv| drv.insert_or_replace_selection(&text));
+                    }
+                }
+                true
+            }
+            // 撤销/重做（Kotlin: undo = ctrl&&!shift+'z'，redo = ctrl+'y' 或 ctrl&&shift+'z'）
+            'z' if !event.shift => {
+                s.undo();
+                true
+            }
+            'y' | 'z' => {
+                s.redo();
+                true
+            }
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -565,6 +669,8 @@ mod tests {
             last_synced: text.to_string(),
             clicks: crate::text_util::ClickTracker::new(),
             word_anchor: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         }
     }
 
@@ -644,18 +750,27 @@ mod tests {
     #[test]
     fn enter_tab_escape_not_consumed() {
         let mut s = shared("hi", 14.0);
-        for k in [
-            Key::Enter,
-            Key::Tab,
-            Key::Escape,
-            Key::PageUp,
-            Key::PageDown,
-        ] {
+        for k in [Key::Enter, Key::Tab, Key::Escape] {
             let ev = key(k, false, false);
             assert!(
                 !editable_handle_key(&mut s, &default_opts(), &ev),
                 "{k:?} 不应消费"
             );
+        }
+    }
+
+    #[test]
+    fn page_up_down_consumed_as_noop() {
+        // 单行字段无页概念：消费但不动光标
+        let mut s = shared("hi", 14.0);
+        s.editable.with_driver(|mut drv| drv.move_to_byte(1));
+        for k in [Key::PageUp, Key::PageDown] {
+            let ev = key(k, false, false);
+            assert!(
+                editable_handle_key(&mut s, &default_opts(), &ev),
+                "{k:?} 应消费"
+            );
+            assert_eq!(s.editable.cursor(), 1, "{k:?} 光标不动");
         }
     }
 
@@ -727,6 +842,105 @@ mod tests {
         assert_eq!(mask("héllo"), "*****");
         assert_eq!(mask(""), "");
         assert_eq!(mask("a😀b"), "***");
+    }
+
+    #[test]
+    fn ctrl_z_undo_inserts() {
+        let mut s = shared("", 14.0);
+        let ev = key(Key::Char('a'), false, false);
+        assert!(editable_handle_key(&mut s, &default_opts(), &ev));
+        assert_eq!(s.editable.text(), "a");
+        // 模拟 key_fn 的历史记录（纯函数层不入栈，组件层负责）
+        s.record_history(Snapshot {
+            text: String::new(),
+            anchor: 0,
+            cursor: 0,
+        });
+        let ev = key(Key::Char('z'), true, false); // Ctrl+Z
+        assert!(editable_handle_key(&mut s, &default_opts(), &ev));
+        assert_eq!(s.editable.text(), "", "Ctrl+Z 撤销插入");
+        assert_eq!(s.editable.cursor(), 0);
+    }
+
+    #[test]
+    fn ctrl_y_redo_after_undo() {
+        let mut s = shared("", 14.0);
+        s.record_history(Snapshot {
+            text: String::new(),
+            anchor: 0,
+            cursor: 0,
+        });
+        s.editable.with_driver(|mut drv| drv.move_to_byte(0));
+        s.editable
+            .with_driver(|mut drv| drv.insert_or_replace_selection("x"));
+        let ev = key(Key::Char('z'), true, false);
+        assert!(editable_handle_key(&mut s, &default_opts(), &ev));
+        assert_eq!(s.editable.text(), "");
+        let ev = key(Key::Char('y'), true, false); // Ctrl+Y
+        assert!(editable_handle_key(&mut s, &default_opts(), &ev));
+        assert_eq!(s.editable.text(), "x", "Ctrl+Y 重做");
+    }
+
+    #[test]
+    fn ctrl_shift_z_redo() {
+        let mut s = shared("", 14.0);
+        s.record_history(Snapshot {
+            text: String::new(),
+            anchor: 0,
+            cursor: 0,
+        });
+        s.editable.with_driver(|mut drv| drv.move_to_byte(0));
+        s.editable
+            .with_driver(|mut drv| drv.insert_or_replace_selection("x"));
+        let ev = key(Key::Char('z'), true, false);
+        assert!(editable_handle_key(&mut s, &default_opts(), &ev));
+        assert_eq!(s.editable.text(), "");
+        let ev = key(Key::Char('z'), true, true); // Ctrl+Shift+Z
+        assert!(editable_handle_key(&mut s, &default_opts(), &ev));
+        assert_eq!(s.editable.text(), "x", "Ctrl+Shift+Z 重做");
+    }
+
+    #[test]
+    fn undo_redo_restores_selection() {
+        let mut s = shared("abc", 14.0);
+        s.editable
+            .with_driver(|mut drv| drv.select_byte_range(0, 3));
+        s.record_history(Snapshot {
+            text: "abc".into(),
+            anchor: 0,
+            cursor: 3,
+        });
+        s.editable.delete_selection();
+        s.editable
+            .with_driver(|mut drv| drv.insert_or_replace_selection("x"));
+        assert_eq!(s.editable.text(), "x");
+        let ev = key(Key::Char('z'), true, false);
+        assert!(editable_handle_key(&mut s, &default_opts(), &ev));
+        assert_eq!(s.editable.text(), "abc");
+        assert_eq!(s.editable.selection_range(), (0, 3), "undo 恢复选区");
+    }
+
+    #[test]
+    fn undo_composition_is_noop() {
+        let mut s = shared("a", 14.0);
+        s.record_history(Snapshot {
+            text: "a".into(),
+            anchor: 1,
+            cursor: 1,
+        });
+        s.editable.with_driver(|mut drv| drv.move_to_byte(1));
+        // 组合态中禁用 undo（防破坏 IME 会话）
+        let ev = ImeEvent::Preedit {
+            text: "中".into(),
+            cursor: Some((3, 3)),
+        };
+        assert!(editable_handle_ime(&mut s, &ev));
+        assert!(s.editable.is_composing());
+        let ev = key(Key::Char('z'), true, false);
+        assert!(editable_handle_key(&mut s, &default_opts(), &ev));
+        // 组合态 undo 不生效：已提交文本不变，组合态仍在
+        assert!(s.editable.is_composing(), "组合态仍活跃");
+        assert_eq!(s.editable.text(), "a", "已提交文本不变");
     }
 
     fn default_opts() -> TextFieldOpts {
