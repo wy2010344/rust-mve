@@ -260,8 +260,8 @@ pub fn rich_editable_opts(
                 }
             }
 
-            // 光标（聚焦 + 未组合时显示）
-            if focused && !core.in_composing() {
+            // 光标（聚焦 + 无选区 + 未组合时显示，对齐 Kotlin !hasSel）
+            if focused && !core.has_selection() && !core.in_composing() {
                 let text_for_x = if is_mask {
                     shown.as_str()
                 } else {
@@ -553,14 +553,8 @@ pub fn rich_editable_opts(
         let value = Rc::clone(&value);
         let on_change = Rc::clone(&on_change);
         Rc::new(move |event: &mut ImeEvent| -> bool {
-            eprintln!("[IME] rich_text ime_fn: event={:?}", event);
             let mut core = core.borrow_mut();
             let handled = editable_handle_ime(&mut core, event);
-            eprintln!(
-                "[IME] rich_text handled={}, text={:?}",
-                handled,
-                core.text()
-            );
             if handled {
                 let mut s = shared.borrow_mut();
                 push_change(&core, &mut s.last_synced, &*value, &*on_change);
@@ -709,19 +703,50 @@ fn editable_handle_key(core: &mut EditCore, event: &KeyEvent) -> bool {
     }
 }
 
-/// Ctrl 快捷键：Z 撤销 / Y 重做 / A 全选。
+/// Ctrl 快捷键：Z 撤销 / Y 重做 / Ctrl+Shift+Z 重做 / A 全选 / C 复制 / X 剪切 / V 粘贴。
+///
+/// 对齐 Kotlin `EditableTextNode.handleKey`（:563-566）与 `Renderer.keyPress`
+/// 的剪贴板拦截（:425-447）：
+/// - CapsLock/Shift 下平台给大写字母，先按 `lowercaseChar()` 归一；
+/// - undo = ctrl && !shift && 'z'；redo = (ctrl && 'y') || (ctrl && shift && 'z')；
+/// - paste 空串不插，先终止组合态（`endComposition(restore=false)`）。
 fn handle_ctrl_shortcut(core: &mut EditCore, event: &KeyEvent) -> bool {
-    match event.key {
-        Key::Char('z') if !event.alt => {
+    let Key::Char(c) = event.key else {
+        return false;
+    };
+    match c.to_ascii_lowercase() {
+        'z' if !event.shift => {
             core.undo();
             true
         }
-        Key::Char('y') | Key::Char('z') if event.alt => {
+        'y' | 'z' => {
             core.redo();
             true
         }
-        Key::Char('a') => {
+        'a' => {
             core.select_all();
+            true
+        }
+        'c' => {
+            if let Some(sel) = core.selected_text() {
+                crate::clipboard::clipboard_set(&sel);
+            }
+            true
+        }
+        'x' => {
+            if let Some(sel) = core.selected_text() {
+                crate::clipboard::clipboard_set(&sel);
+                core.delete_selection();
+            }
+            true
+        }
+        'v' => {
+            if let Some(text) = crate::clipboard::clipboard_get() {
+                if !text.is_empty() {
+                    core.end_composition(false);
+                    core.insert_text(&text);
+                }
+            }
             true
         }
         _ => false,
@@ -891,6 +916,32 @@ mod tests {
         assert!(editable_handle_key(&mut c, &ev));
         assert_eq!(c.sel_start(), 0);
         assert_eq!(c.sel_end(), 5);
+    }
+
+    #[test]
+    fn caps_lock_does_not_break_undo_redo() {
+        // 移植 Kotlin EditableShortcutTest：CapsLock/Shift 下平台给大写字母，
+        // 快捷键按 lowercaseChar() 归一后仍生效；Ctrl+Shift+Z = redo。
+        let mut c = core("");
+        c.insert_text("A");
+        c.insert_text("B");
+        assert_eq!(c.text(), "AB");
+
+        let ev = key(Key::Char('Z'), true, false); // CapsLock → 大写 Z
+        assert!(editable_handle_key(&mut c, &ev));
+        assert_eq!(c.text(), "A", "大写 Z 的 Ctrl+Z 应撤销");
+
+        let ev = key(Key::Char('Z'), true, true); // Shift 保持大写
+        assert!(editable_handle_key(&mut c, &ev));
+        assert_eq!(c.text(), "AB", "Ctrl+Shift+Z 应重做");
+
+        let ev = key(Key::Char('Z'), true, false);
+        assert!(editable_handle_key(&mut c, &ev));
+        assert_eq!(c.text(), "A");
+
+        let ev = key(Key::Char('Y'), true, false); // CapsLock → 大写 Y
+        assert!(editable_handle_key(&mut c, &ev));
+        assert_eq!(c.text(), "AB", "大写 Y 的 Ctrl+Y 应重做");
     }
 
     #[test]
@@ -1290,5 +1341,50 @@ mod tests {
         down(&node, x, y, false);
         let c = core.borrow();
         assert_eq!((c.sel_start(), c.sel_end()), (0, 2), "双击选 '中文' 两字符");
+    }
+
+    #[test]
+    fn ctrl_c_x_v_clipboard_roundtrip() {
+        use crate::clipboard::{set_clipboard, Clipboard};
+
+        struct Mem(RefCell<Option<String>>);
+        impl Clipboard for Mem {
+            fn get_text(&self) -> Option<String> {
+                self.0.borrow().clone()
+            }
+            fn set_text(&self, t: &str) {
+                *self.0.borrow_mut() = Some(t.to_string());
+            }
+        }
+
+        crate::clipboard::reset_for_tests();
+        set_clipboard(Mem(RefCell::new(None)));
+
+        let (node, core) = edit_doc("Hello");
+        core.borrow_mut().select_range(0, 2);
+        let mut ev = key(Key::Char('c'), true, false);
+        assert!(node.key_fn.as_ref().unwrap()(&mut ev));
+        assert_eq!(
+            crate::clipboard::clipboard_get().as_deref(),
+            Some("He"),
+            "复制写入剪贴板"
+        );
+        assert_eq!(core.borrow().text(), "Hello", "复制不改文本");
+
+        let mut ev = key(Key::Char('x'), true, false);
+        assert!(node.key_fn.as_ref().unwrap()(&mut ev));
+        assert_eq!(core.borrow().text(), "llo", "剪切删除选区，光标在 0");
+        assert_eq!(crate::clipboard::clipboard_get().as_deref(), Some("He"));
+
+        // 首次粘贴：0 处插入 "He" → "Hello"，光标推进到 2
+        let mut ev = key(Key::Char('v'), true, false);
+        assert!(node.key_fn.as_ref().unwrap()(&mut ev));
+        assert_eq!(core.borrow().text(), "Hello");
+        // 二次粘贴：2 处插入 "He" → "HeHello"
+        let mut ev = key(Key::Char('v'), true, false);
+        assert!(node.key_fn.as_ref().unwrap()(&mut ev));
+        assert_eq!(core.borrow().text(), "HeHello", "粘贴两次");
+
+        crate::clipboard::reset_for_tests();
     }
 }

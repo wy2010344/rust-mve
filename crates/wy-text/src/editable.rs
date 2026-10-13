@@ -207,6 +207,28 @@ impl EditableParagraph {
     pub fn select_range(&mut self, start: usize, end: usize) {
         self.with_driver(|mut drv| drv.select_byte_range(start, end));
     }
+
+    /// 当前选中文本；无选区返回 `None`（剪贴板复制源）。
+    pub fn selected_text(&self) -> Option<String> {
+        self.editor.selected_text().map(str::to_string)
+    }
+
+    /// 删除选区（剪切 / 覆盖输入复用）；无选区为空操作。
+    pub fn delete_selection(&mut self) {
+        self.with_driver(|mut drv| drv.delete_selection());
+    }
+
+    /// 全选。
+    pub fn select_all(&mut self) {
+        self.with_driver(|mut drv| drv.select_all());
+    }
+
+    /// 组合态中则终止组合（粘贴前调用，对齐 Kotlin paste 先 `endComposition(restore=false)`）。
+    pub fn end_composing_if_any(&mut self) {
+        if self.editor.is_composing() {
+            self.with_driver(|mut drv| drv.finish_compose());
+        }
+    }
 }
 
 impl Default for EditableParagraph {

@@ -37,6 +37,12 @@ pub fn clipboard_set(text: &str) {
     });
 }
 
+/// 测试用：清空注册（thread_local，仅当前线程可见）。
+#[cfg(test)]
+pub(crate) fn reset_for_tests() {
+    CLIPBOARD.with(|c| *c.borrow_mut() = None);
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -58,20 +64,20 @@ mod tests {
         CLIPBOARD.with(|c| *c.borrow_mut() = None);
     }
 
+    // thread_local 全局可变，多测试并行会互踩——合并为单个测试串行覆盖。
     #[test]
-    fn unregistered_clipboard_is_noop() {
+    fn clipboard_noop_then_roundtrip() {
         reset();
         assert_eq!(clipboard_get(), None);
-        clipboard_set("x"); // 不 panic
-    }
+        clipboard_set("x"); // 未注册：no-op 不 panic
 
-    #[test]
-    fn set_and_get_roundtrip() {
-        reset();
         set_clipboard(MemoryClipboard(RefCell::new(None)));
         clipboard_set("hello");
         assert_eq!(clipboard_get().as_deref(), Some("hello"));
         clipboard_set("");
         assert_eq!(clipboard_get().as_deref(), Some(""));
+
+        reset();
+        assert_eq!(clipboard_get(), None);
     }
 }

@@ -217,8 +217,8 @@ pub fn text_field_opts(
                 );
             }
 
-            // 光标（聚焦 + 未组合时显示）
-            if s.focused.get() && !s.editable.is_composing() {
+            // 光标（聚焦 + 无选区 + 未组合时显示，对齐 Kotlin !hasSel）
+            if s.focused.get() && lo == hi && !s.editable.is_composing() {
                 let cb = wy_render::text_measure::caret_box(&display, opts.font_size, cursor);
                 scene.fill_rect(
                     Rect::new(PAD_X + cb.x, top + cb.top, 2.0, cb.height),
@@ -421,29 +421,23 @@ fn editable_handle_key(s: &mut SharedState, opts: &TextFieldOpts, event: &KeyEve
 
     let _ = opts;
     match event.key {
-        Key::Char(ch) if !ctrl_or_meta && !shift => {
+        Key::Char(ch) => {
+            // winit 在 Shift+字母时给大写字母，直接插入即可
             s.editable.with_driver(|mut drv| {
                 drv.insert_or_replace_selection(&ch.to_string());
             });
             true
         }
         Key::Backspace => {
-            if ctrl_or_meta {
-                s.editable.with_driver(|mut drv| {
-                    if shift {
-                        // Cmd+Backspace 删行（macOS）；Rust 侧先作普通词删除
-                        drv.backdelete_word();
-                    } else {
-                        drv.backdelete_word();
-                    }
-                });
+            if shift {
+                s.editable.with_driver(|mut drv| drv.backdelete_word());
             } else {
                 s.editable.with_driver(|mut drv| drv.backdelete());
             }
             true
         }
         Key::Delete => {
-            if ctrl_or_meta {
+            if shift {
                 s.editable.with_driver(|mut drv| drv.delete_word());
             } else {
                 s.editable.with_driver(|mut drv| drv.delete());
@@ -451,13 +445,7 @@ fn editable_handle_key(s: &mut SharedState, opts: &TextFieldOpts, event: &KeyEve
             true
         }
         Key::ArrowLeft => {
-            if ctrl_or_meta {
-                if shift {
-                    s.editable.with_driver(|mut drv| drv.select_word_left());
-                } else {
-                    s.editable.with_driver(|mut drv| drv.move_word_left());
-                }
-            } else if shift {
+            if shift {
                 s.editable.with_driver(|mut drv| drv.select_left());
             } else {
                 s.editable.with_driver(|mut drv| drv.move_left());
@@ -465,13 +453,7 @@ fn editable_handle_key(s: &mut SharedState, opts: &TextFieldOpts, event: &KeyEve
             true
         }
         Key::ArrowRight => {
-            if ctrl_or_meta {
-                if shift {
-                    s.editable.with_driver(|mut drv| drv.select_word_right());
-                } else {
-                    s.editable.with_driver(|mut drv| drv.move_word_right());
-                }
-            } else if shift {
+            if shift {
                 s.editable.with_driver(|mut drv| drv.select_right());
             } else {
                 s.editable.with_driver(|mut drv| drv.move_right());
@@ -499,11 +481,45 @@ fn editable_handle_key(s: &mut SharedState, opts: &TextFieldOpts, event: &KeyEve
     }
 }
 
-/// Ctrl 快捷键：A 全选 / C 复制 / X 剪切 / V 粘贴。
-fn handle_ctrl_shortcut(_s: &mut SharedState, _event: &KeyEvent) -> bool {
-    // TODO(二期)：剪贴板经 wy-mve::clipboard 桥 + 全选/复制/剪切/粘贴。
-    // 目前编辑内核接管已知操作返回 false，其余打印日志避免误消费。
-    false
+/// Ctrl 快捷键：A 全选 / C 复制 / X 剪切 / V 粘贴（对齐 Kotlin Renderer 全局拦截）。
+///
+/// 单行字段：粘贴剥除换行；paste 空串不插，先终止组合态。
+fn handle_ctrl_shortcut(s: &mut SharedState, event: &KeyEvent) -> bool {
+    let Key::Char(c) = event.key else {
+        return false;
+    };
+    match c.to_ascii_lowercase() {
+        'a' => {
+            s.editable.select_all();
+            true
+        }
+        'c' => {
+            if let Some(sel) = s.editable.selected_text() {
+                crate::clipboard::clipboard_set(&sel);
+            }
+            true
+        }
+        'x' => {
+            if let Some(sel) = s.editable.selected_text() {
+                crate::clipboard::clipboard_set(&sel);
+                s.editable.delete_selection();
+            }
+            true
+        }
+        'v' => {
+            if let Some(text) = crate::clipboard::clipboard_get() {
+                // 单行字段粘贴剥除换行（对齐 EditCore::insert_text 的 single_line 过滤）
+                let text = text.replace(['\n', '\r'], "");
+                if !text.is_empty() {
+                    s.editable.end_composing_if_any();
+                    s.editable
+                        .with_driver(|mut drv| drv.insert_or_replace_selection(&text));
+                }
+            }
+            true
+        }
+        _ => false,
+    }
 }
 
 /// IME 组合事件 → 编辑内核。
@@ -570,6 +586,15 @@ mod tests {
         assert!(editable_handle_key(&mut s, &default_opts(), &ev));
         assert_eq!(s.editable.text(), "hxi");
         assert_eq!(s.editable.cursor(), 2);
+    }
+
+    #[test]
+    fn shift_letter_inserts_uppercase() {
+        // winit 在 Shift+字母时给大写字母；此前 `!shift` 守卫把它丢弃
+        let mut s = shared("", 14.0);
+        let ev = key(Key::Char('A'), false, true);
+        assert!(editable_handle_key(&mut s, &default_opts(), &ev));
+        assert_eq!(s.editable.text(), "A");
     }
 
     #[test]

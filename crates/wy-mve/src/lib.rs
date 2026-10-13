@@ -23,6 +23,7 @@
 //! - [`collect`] — 摊平子节点参数
 //! - [`text`] / [`button`] — 同名于 `components`，此处语义等价
 
+pub mod clipboard;
 pub mod components;
 mod context;
 pub mod fc;

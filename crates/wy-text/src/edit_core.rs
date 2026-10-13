@@ -772,6 +772,21 @@ impl EditCore {
         self.focus.set(Some(self.text_len()));
     }
 
+    /// 当前选中文本；无选区返回 `None`（字符索引切片）。
+    pub fn selected_text(&self) -> Option<String> {
+        if !self.has_selection() {
+            return None;
+        }
+        let s = self.sel_start();
+        let e = self.sel_end();
+        (s < e).then(|| slice_chars(self.text(), s, e))
+    }
+
+    /// 删除选区（剪切 / 覆盖输入路径复用）；无选区为空操作。
+    pub fn delete_selection(&mut self) {
+        self.del_sel();
+    }
+
     pub fn select_range(&mut self, start: usize, end: usize) {
         self.anchor.set(Some(start.min(self.text_len())));
         self.focus.set(Some(end.min(self.text_len())));

@@ -181,6 +181,11 @@ pub trait WyApp {
 /// 创建窗口、初始化 wgpu/Vello，然后运行渲染循环。
 /// 此函数阻塞直到窗口关闭。
 pub fn run(app: impl WyApp + 'static) -> Result<(), Box<dyn std::error::Error>> {
+    // 注册系统剪贴板（arboard；失败保持未注册 = 组件层 no-op）
+    if let Ok(cb) = arboard::Clipboard::new() {
+        wy_mve::clipboard::set_clipboard(ArboardClipboard(std::cell::RefCell::new(cb)));
+    }
+
     let event_loop = EventLoop::<AppEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
@@ -217,6 +222,18 @@ pub fn run(app: impl WyApp + 'static) -> Result<(), Box<dyn std::error::Error>> 
 
     event_loop.run_app(&mut state)?;
     Ok(())
+}
+
+/// arboard → wy-mve 剪贴板桥（trait 是 `&self`，arboard API 是 `&mut self`，RefCell 桥接）。
+struct ArboardClipboard(std::cell::RefCell<arboard::Clipboard>);
+
+impl wy_mve::clipboard::Clipboard for ArboardClipboard {
+    fn get_text(&self) -> Option<String> {
+        self.0.borrow_mut().get_text().ok()
+    }
+    fn set_text(&self, text: &str) {
+        let _ = self.0.borrow_mut().set_text(text.to_string());
+    }
 }
 
 /// 应用内部状态。
@@ -478,23 +495,19 @@ impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
                 // 输入法事件 → 统一 ImeEvent 转发给应用（聚焦节点消费）
                 match ime {
                     winit::event::Ime::Enabled => {
-                        eprintln!("[IME] Enabled");
                         self.app.handle_ime_event(&wy_mve::ImeEvent::Enabled);
                     }
                     winit::event::Ime::Disabled => {
-                        eprintln!("[IME] Disabled");
                         self.app.handle_ime_event(&wy_mve::ImeEvent::Disabled);
                     }
                     // winit Preedit 的 (usize,usize) 即组合带内光标区间，直接透传
                     winit::event::Ime::Preedit(text, sel) => {
-                        eprintln!("[IME] Preedit: {:?} sel={:?}", text, sel);
                         self.app.handle_ime_event(&wy_mve::ImeEvent::Preedit {
                             text: text.clone(),
                             cursor: *sel,
                         });
                     }
                     winit::event::Ime::Commit(text) => {
-                        eprintln!("[IME] Commit: {:?}", text);
                         self.app
                             .handle_ime_event(&wy_mve::ImeEvent::Commit(text.clone()));
                     }
