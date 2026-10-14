@@ -70,9 +70,12 @@ enum Node {
         children: Vec<Node>,
     },
     /// 组件：`btn { label: "...", on_click: ... }`
+    ///
+    /// `stmts` 是块内混入的 `let` 等语句（不产出节点，组件调用前求值）。
     Component {
         name: Ident,
         fields: Vec<(Ident, Expr)>,
+        stmts: Vec<Stmt>,
     },
     /// 静态文本节点（裸字面量）
     Text(LitStr),
@@ -190,11 +193,25 @@ impl Parse for Node {
         // `Tag { .. }`
         if input.peek(syn::token::Brace) {
             let (fields, children) = parse_element_block(input)?;
-            // 无子节点且有字段 → 组件（btn/label 的字段语法）；
+            // 分离 let 等原始语句：只有真子节点参与 Component/Container 判定
+            let mut real_children = Vec::new();
+            let mut stmts = Vec::new();
+            for c in &children {
+                match c {
+                    Node::Raw(s) => stmts.extend(s.iter().cloned()),
+                    other => real_children.push(other),
+                }
+            }
+            // 无真子节点且有字段 → 组件（btn/label 的字段语法）；
             // 否则 → 容器（字段是通用布局属性，可与子节点共存）
-            if children.is_empty() && !fields.is_empty() {
-                Ok(Node::Component { name, fields })
+            if real_children.is_empty() && !fields.is_empty() {
+                Ok(Node::Component {
+                    name,
+                    fields,
+                    stmts,
+                })
             } else {
+                // 容器路径：语句保持在 children 中的原位（已按序落盘）
                 Ok(Node::Container {
                     name,
                     fields,
@@ -398,7 +415,11 @@ fn gen_child(node: &Node) -> syn::Result<TokenStream2> {
                 )
             }
         }
-        Node::Component { name, fields } => Ok(gen_component(name, fields)),
+        Node::Component {
+            name,
+            fields,
+            stmts,
+        } => gen_component(name, fields, stmts),
         // 原始 Rust 语句块：求值后不产出节点
         Node::Raw(stmts) => {
             let m = mve();
@@ -591,32 +612,153 @@ fn is_float_lit(expr: &Expr) -> bool {
     )
 }
 
-fn gen_component(name: &Ident, fields: &[(Ident, Expr)]) -> TokenStream2 {
+/// 组件参数规格：必填位置参数 + 可选 opts 记录式参数。
+///
+/// 复刻 Kotlin「具名参数 + 默认值」。宏无法从字段名推断 Rust 类型，故用
+/// 静态表声明：哪些字段是必填位置参数，其余字段收集进 `opts` 记录式结构体
+/// （`..Default::default()` 兜底，复用各 Opts 的 `impl Default`）。
+struct ComponentSpec {
+    /// 必填位置参数字段名（按顺序传给 `fc__<name>`）。
+    ///
+    /// 值在生成时经 [`to_param_closure`] 转成闭包。
+    required: &'static [&'static str],
+    /// 可选 opts 结构体类型路径（记录式参数收集桶）；`None` 表示无 opts。
+    ///
+    /// 为 `Some` 时，`fc__<name>` 签名末位必须是该 opts 类型。
+    opts_ty: Option<&'static str>,
+}
+
+/// 组件名 → 规格。未注册的标签仍按旧规则（label 闭包 / 无参）生成。
+fn component_spec(name: &str) -> Option<ComponentSpec> {
+    match name {
+        "btn" | "button" => Some(ComponentSpec {
+            required: &["label", "on_click"],
+            opts_ty: None,
+        }),
+        "text_field" => Some(ComponentSpec {
+            required: &["value", "on_change"],
+            opts_ty: Some("TextFieldOpts"),
+        }),
+        "rich_text" => Some(ComponentSpec {
+            required: &["value", "on_change"],
+            opts_ty: Some("RichTextOpts"),
+        }),
+        _ => None,
+    }
+}
+
+/// 生成组件调用表达式。
+///
+/// - 已注册组件（[`component_spec`]）：按规格收集必填位置参数与 opts 记录字段；
+///   未知字段报编译错误（不再静默丢弃）。
+/// - 未注册组件：旧规则（有 `label` 则传 label 闭包，否则无参），未知字段报错。
+/// - `stmts` 是块内混入的 `let` 等语句，先求值再构造组件。
+fn gen_component(
+    name: &Ident,
+    fields: &[(Ident, Expr)],
+    stmts: &[Stmt],
+) -> syn::Result<TokenStream2> {
     let m = mve();
-    let mut on_click = None;
+    let fname = name.to_string();
+
+    // 已注册组件：按规格生成
+    if let Some(spec) = component_spec(&fname) {
+        let f = format_ident!("fc__{}", name);
+        let mut positionals: Vec<TokenStream2> = Vec::new();
+        let mut opts_fields: Vec<(Ident, Expr)> = Vec::new();
+
+        for req in spec.required {
+            let Some((_, expr)) = fields.iter().find(|(n, _)| n == req) else {
+                // btn/button 历史兼容：缺 label/on_click 用空闭包兜底
+                if matches!(fname.as_str(), "btn" | "button") {
+                    positionals.push(match *req {
+                        "label" => quote! { || ::std::string::String::new() },
+                        "on_click" => quote! { || {} },
+                        _ => unreachable!("btn 必填参数只有 label/on_click"),
+                    });
+                    continue;
+                }
+                return Err(syn::Error::new(
+                    name.span(),
+                    format!("组件 `{name}` 缺少必填参数 `{req}`"),
+                ));
+            };
+            positionals.push(to_param_closure(req, expr));
+        }
+
+        for (n, e) in fields {
+            if spec.required.contains(&n.to_string().as_str()) {
+                continue;
+            }
+            opts_fields.push((n.clone(), e.clone()));
+        }
+
+        let call = match spec.opts_ty {
+            Some(opts_ty) => {
+                let opts_ty_path = format_ident!("{}", opts_ty);
+                let opts_init = if opts_fields.is_empty() {
+                    quote! { #m::#opts_ty_path::default() }
+                } else {
+                    let assigns = opts_fields.iter().map(|(n, e)| quote! { #n: #e });
+                    quote! { #m::#opts_ty_path { #(#assigns,)* ..::std::default::Default::default() } }
+                };
+                quote! { #m::fc::#f(#(#positionals,)* #opts_init) }
+            }
+            None => quote! { #m::fc::#f(#(#positionals),*) },
+        };
+
+        // 所有 fc__* 别名均返回 Slot，无需再包。
+        if stmts.is_empty() {
+            return Ok(call);
+        }
+        return Ok(quote! {{
+            #(#stmts)*
+            #call
+        }});
+    }
+
+    // 未注册组件：旧规则（label 闭包 / 无参），未知字段报错
     let mut label_expr = None;
-    for (fname, fexpr) in fields {
-        match fname.to_string().as_str() {
-            "on_click" => on_click = Some(fexpr.clone()),
-            "label" => label_expr = Some(fexpr.clone()),
-            _ => {}
+    for (n, e) in fields {
+        if n == "label" {
+            label_expr = Some(e.clone());
+        } else {
+            return Err(syn::Error::new(
+                n.span(),
+                format!(
+                    "组件 `{name}` 不支持参数 `{n}`；已注册组件：btn, button, text_field, rich_text。\
+                     自定义组件请用函数调用语法 `{name}(...)`"
+                ),
+            ));
         }
     }
-    let f = format_ident!("fc__{}", name);
 
-    // `fc__btn` / `fc__label` 本身就返回 Slot，不要再包一层。
-    if name == "btn" || name == "button" {
-        let label_tok = label_expr
-            .map(|e| to_label_closure(&e))
-            .unwrap_or_else(|| quote! { || ::std::string::String::new() });
-        let click_tok = on_click.unwrap_or_else(|| syn::parse_quote!(|| {}));
-        return quote! { #m::fc::#f(#label_tok, #click_tok) };
-    }
-    if let Some(l) = label_expr {
+    let f = format_ident!("fc__{}", name);
+    let call = if let Some(l) = label_expr {
         let ltok = to_label_closure(&l);
-        return quote! { #m::fc::#f(#ltok) };
+        quote! { #m::fc::#f(#ltok) }
+    } else {
+        quote! { #m::fc::#f() }
+    };
+
+    if stmts.is_empty() {
+        return Ok(call);
     }
-    quote! { #m::fc::#f() }
+    Ok(quote! {{
+        #(#stmts)*
+        #call
+    }})
+}
+
+/// 必填参数 → 闭包：`label`/`value` 走字符串字面量优化，其余透传闭包。
+fn to_param_closure(field: &str, e: &Expr) -> TokenStream2 {
+    match field {
+        "label" => to_label_closure(e),
+        // value 闭包：字面量包 to_string，闭包透传，其余包 move ||
+        "value" => to_label_closure(e),
+        // on_change 等回调：必须是闭包，透传
+        _ => quote! { #e },
+    }
 }
 
 fn to_label_closure(e: &Expr) -> TokenStream2 {
@@ -653,12 +795,52 @@ fn to_label_closure(e: &Expr) -> TokenStream2 {
 /// ```
 #[proc_macro]
 pub fn rsx(input: TokenStream) -> TokenStream {
-    let node = match syn::parse::<Node>(input) {
-        Ok(n) => n,
+    // 根级支持混入普通 Rust 语句（`let` 等）：解析前缀语句 + 单个根节点，
+    // 生成块先求值语句再产出节点。对齐 Kotlin `composable` 内的局部变量。
+    let (stmts, node) = match syn::parse::<RsxRoot>(input) {
+        Ok(r) => (r.stmts, r.node),
         Err(e) => return e.to_compile_error().into(),
     };
-    match gen_child(&node) {
-        Ok(ts) => ts.into(),
-        Err(e) => e.to_compile_error().into(),
+    let body = match gen_child(&node) {
+        Ok(ts) => ts,
+        Err(e) => return e.to_compile_error().into(),
+    };
+    if stmts.is_empty() {
+        body.into()
+    } else {
+        quote! {{
+            #(#stmts)*
+            #body
+        }}
+        .into()
+    }
+}
+
+/// `rsx!` 根：前缀 Rust 语句 + 单个根节点。
+struct RsxRoot {
+    stmts: Vec<Stmt>,
+    node: Node,
+}
+
+impl Parse for RsxRoot {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let mut stmts = Vec::new();
+        loop {
+            skip_junk(input);
+            if input.is_empty() {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    "rsx! 至少需要一个根节点",
+                ));
+            }
+            // `let` 语句 → 前缀；否则进入节点解析
+            if input.peek(Token![let]) {
+                stmts.push(input.parse::<Stmt>()?);
+                continue;
+            }
+            break;
+        }
+        let node = input.parse::<Node>()?;
+        Ok(RsxRoot { stmts, node })
     }
 }

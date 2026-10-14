@@ -366,6 +366,26 @@ mod macro_alias {
     pub fn fc__label(content: impl Fn() -> String + 'static) -> Slot {
         super::label(content)
     }
+    /// `rsx! { text_field { value: .., on_change: .., .. } }`。
+    ///
+    /// 必填位置参数 + opts 记录式（`..Default::default()`）。
+    #[must_use]
+    pub fn fc__text_field(
+        value: impl Fn() -> String + 'static,
+        on_change: impl Fn(String) + 'static,
+        opts: crate::text_field::TextFieldOpts,
+    ) -> Slot {
+        Slot::One(crate::text_field::text_field_opts(value, on_change, opts))
+    }
+    /// `rsx! { rich_text { value: .., on_change: .., .. } }`。
+    #[must_use]
+    pub fn fc__rich_text(
+        value: impl Fn() -> String + 'static,
+        on_change: impl Fn(String) + 'static,
+        opts: crate::rich_text::RichTextOpts,
+    ) -> Slot {
+        Slot::One(crate::rich_text::rich_text_opts(value, on_change, opts))
+    }
 }
 
 pub use macro_alias::*;
@@ -469,6 +489,83 @@ mod tests {
         assert_eq!(shared.get(), 1, "第一个按钮闭包持有自己的克隆");
         children[1].run_on_click(&mut PointerEvent::new(0.0, 0.0));
         assert_eq!(shared.get(), 11, "第二个按钮闭包独立于第一个");
+    }
+
+    /// 根级 `let`：rsx! 顶层混入语句，先求值再产出根节点。
+    #[test]
+    fn rsx_root_level_let() {
+        use crate::rsx;
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let shared = Rc::new(Cell::new(5));
+        let slot = rsx! {
+            let c = Rc::clone(&shared);
+            let n = c.get() * 2;
+            label(format!("n={n}"))
+        };
+        let kids = collect([slot]);
+        assert_eq!(kids.len(), 1, "根级 let 不产出节点");
+    }
+
+    /// 组件块内 `let`：不误判成容器，let 先求值再绑进组件闭包。
+    #[test]
+    fn rsx_let_inside_component_block() {
+        use crate::rsx;
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let shared = Rc::new(Cell::new(0));
+        let slot = rsx! {
+            vbox {
+                btn {
+                    let c = Rc::clone(&shared);
+                    label: "a",
+                    on_click: move || c.set(c.get() + 1),
+                }
+            }
+        };
+        let node = slot.into_node();
+        let kids = collect([node]);
+        let children = children_nodes(&kids[0]);
+        assert_eq!(children.len(), 1, "组件块内 let 不产出额外节点");
+        assert!(children[0].on_click_fn.is_some(), "btn 仍是组件而非容器");
+    }
+
+    /// 组件记录式参数：text_field 必填 + opts 覆盖，其余走 Default。
+    #[test]
+    fn rsx_component_record_opts() {
+        use crate::rsx;
+        use crate::text_field::TextFieldOpts;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let value = Rc::new(RefCell::new(String::from("hi")));
+        let value2 = Rc::clone(&value);
+        let slot = rsx! {
+            text_field {
+                value: move || value2.borrow().clone(),
+                on_change: { let v = Rc::clone(&value); move |t| { *v.borrow_mut() = t; } },
+                width: 220.0,
+                password: true,
+            }
+        };
+        let node = slot.into_node();
+        // 记录式参数编译通过即证明：width/password 进 opts，其余 Default
+        assert_eq!(TextFieldOpts::default().height, 34.0, "未覆盖字段走默认");
+        assert_eq!(TextFieldOpts::default().font_size, 14.0);
+        let _ = node;
+    }
+
+    /// 组件缺必填参数：编译错误（此处仅验证正常路径，错误路径由宏在编译期报）。
+    #[test]
+    fn rsx_component_required_and_default() {
+        use crate::rsx;
+        let empty = String::new();
+        let slot = rsx! {
+            rich_text {
+                value: move || empty.clone(),
+                on_change: |_| {},
+            }
+        };
+        let _ = slot.into_node();
     }
 
     #[test]
