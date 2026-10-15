@@ -813,4 +813,45 @@ mod tests {
             app.draw(scene, 400.0, 100.0);
         });
     }
+
+    #[test]
+    fn nested_text_field_does_not_steal_clicks() {
+        // 回归：column > [button, text_field]。文本框在逆序命中遍历中先被检查，
+        // 若其 hit_test 不看边界（恒 true），会越界截获上方按钮的点击 →
+        // 按钮失效、焦点错位。修复后点击按钮应命中按钮。
+        let clicked = Rc::new(RefCell::new(false));
+        let app = MveApp::new({
+            let clicked = Rc::clone(&clicked);
+            move |cx| {
+                let c = Rc::clone(&clicked);
+                cx.child(column(move |cx| {
+                    cx.child(button(move || "ok".into(), {
+                        let c = Rc::clone(&c);
+                        move || *c.borrow_mut() = true
+                    }));
+                    cx.child(wy_mve::text_field(String::new, |_| {}));
+                }));
+            }
+        });
+
+        let mut scene = Scene::new();
+        app.draw(&mut scene, 400.0, 400.0);
+
+        let nodes = app.root.nodes();
+        let col = &nodes[0];
+        let children = children_nodes(col);
+        let (btn_w, btn_h) = node_size(&children[0]);
+        let click = (btn_w / 2.0, btn_h / 2.0);
+
+        // 命中链最深节点应是按钮，而非下方文本框
+        let chain = hit_test_node(col, (0.0, 0.0), click.0, click.1).expect("命中按钮");
+        assert!(
+            chain[0].0.on_click_fn.is_some(),
+            "最深命中应是按钮，而非文本框"
+        );
+
+        let mut event = PointerEvent::new(click.0, click.1);
+        dispatch_click_nodes(&nodes, click.0, click.1, &mut event);
+        assert!(*clicked.borrow(), "按钮应被点击，而不是被下方文本框截获");
+    }
 }

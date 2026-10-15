@@ -57,6 +57,26 @@ pub struct TextFieldOpts {
     pub focus_border_color: Color,
     /// 密码模式（掩码显示）。
     pub password: bool,
+    /// 动态颜色覆盖：非空时在**绘制期**求值，优先于上方的静态颜色。
+    ///
+    /// 用于主题切换等场景——颜色随信号变化时，绘制期重新读取即触发重绘，
+    /// 无需重建节点树（静态字段只在构建期读取一次）。
+    pub colors_fn: Option<Rc<TextFieldColors>>,
+}
+
+/// 绘制期求值的动态颜色集合（主题等）。各字段在每帧绘制时调用。
+#[derive(Clone)]
+pub struct TextFieldColors {
+    /// 文本颜色。
+    pub text_color: Rc<dyn Fn() -> Color>,
+    /// 占位符颜色。
+    pub placeholder_color: Rc<dyn Fn() -> Color>,
+    /// 背景色。
+    pub bg_color: Rc<dyn Fn() -> Color>,
+    /// 常规边框色。
+    pub border_color: Rc<dyn Fn() -> Color>,
+    /// 聚焦边框色。
+    pub focus_border_color: Rc<dyn Fn() -> Color>,
 }
 
 impl Default for TextFieldOpts {
@@ -72,6 +92,7 @@ impl Default for TextFieldOpts {
             border_color: Color::rgba(180, 180, 180, 255),
             focus_border_color: Color::rgba(0, 120, 212, 255),
             password: false,
+            colors_fn: None,
         }
     }
 }
@@ -238,12 +259,30 @@ pub fn text_field_opts(
             let s = shared.borrow();
             // 追踪内核状态变化（Parley 光标/选区/组合态非信号，经 state_rev 桥接）
             let _state_rev = s.state_rev.get();
+            // 动态颜色覆盖（主题等）：绘制期求值，优先于静态字段
+            let (bg_color, border_color, focus_border_color, text_color, placeholder_color) =
+                match &opts.colors_fn {
+                    Some(c) => (
+                        (c.bg_color)(),
+                        (c.border_color)(),
+                        (c.focus_border_color)(),
+                        (c.text_color)(),
+                        (c.placeholder_color)(),
+                    ),
+                    None => (
+                        opts.bg_color,
+                        opts.border_color,
+                        opts.focus_border_color,
+                        opts.text_color,
+                        opts.placeholder_color,
+                    ),
+                };
             let border = if s.focused.get() {
-                opts.focus_border_color
+                focus_border_color
             } else {
-                opts.border_color
+                border_color
             };
-            scene.fill_rect(Rect::new(0.0, 0.0, opts.width, opts.height), opts.bg_color);
+            scene.fill_rect(Rect::new(0.0, 0.0, opts.width, opts.height), bg_color);
             scene.stroke_round_rect(
                 Rect::new(0.0, 0.0, opts.width, opts.height),
                 4.0,
@@ -266,9 +305,9 @@ pub fn text_field_opts(
 
             // 文本或占位符
             let (shown, color) = if display.is_empty() && !opts.placeholder.is_empty() {
-                (opts.placeholder.as_str(), opts.placeholder_color)
+                (opts.placeholder.as_str(), placeholder_color)
             } else {
-                (display.as_str(), opts.text_color)
+                (display.as_str(), text_color)
             };
             if !shown.is_empty() {
                 scene.draw_text(Point::new(PAD_X, top), shown, opts.font_size, color);
@@ -292,7 +331,7 @@ pub fn text_field_opts(
                 let cb = wy_render::text_measure::caret_box(&display, opts.font_size, cursor);
                 scene.fill_rect(
                     Rect::new(PAD_X + cb.x, top + cb.top, 2.0, cb.height),
-                    opts.text_color,
+                    text_color,
                 );
             }
 
@@ -324,7 +363,12 @@ pub fn text_field_opts(
         })
     };
 
-    let hit_test_fn = Rc::new(move |_x: f32, _y: f32| true);
+    let hit_test_fn = {
+        let opts = Rc::clone(&opts);
+        Rc::new(move |x: f32, y: f32| {
+            (0.0..opts.width).contains(&x) && (0.0..opts.height).contains(&y)
+        })
+    };
 
     // --- 点击：聚焦 + 多击手势（单击定位 / 双击选词+拖词 / 三击选段） ---
     let on_down_fn = {
@@ -945,5 +989,20 @@ mod tests {
 
     fn default_opts() -> TextFieldOpts {
         TextFieldOpts::default()
+    }
+
+    // --- 命中测试边界（对齐 Kotlin LayoutNode.acceptHit） ---
+
+    #[test]
+    fn hit_test_is_bounded_to_size() {
+        // 默认 240x34。命中必须限制在自身尺寸内，否则嵌套布局里会“越界抢点击”
+        // （文本字段会截获其下方/相邻按钮的点击，焦点错乱）。
+        let n = text_field(String::new, |_| {});
+        assert!(n.run_hit_test(10.0, 10.0), "内部命中");
+        assert!(n.run_hit_test(239.0, 33.0), "右下内缘命中");
+        assert!(!n.run_hit_test(-1.0, 10.0), "左侧越界不命中");
+        assert!(!n.run_hit_test(10.0, -1.0), "上方越界不命中");
+        assert!(!n.run_hit_test(241.0, 10.0), "右侧越界不命中");
+        assert!(!n.run_hit_test(10.0, 1000.0), "下方越界不命中");
     }
 }

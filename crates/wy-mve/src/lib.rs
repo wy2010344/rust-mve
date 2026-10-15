@@ -47,7 +47,7 @@ pub use node::{
     ImeEvent, Key, KeyEvent, Layout, Node, PointerEvent,
 };
 pub use rich_text::{rich_editable_opts, rich_text, rich_text_opts, RichTextOpts};
-pub use text_field::{text_field, text_field_opts, TextFieldOpts};
+pub use text_field::{text_field, text_field_opts, TextFieldColors, TextFieldOpts};
 
 /// `rsx!` 声明式 UI 宏（见 `wy-mve-macros`）。
 pub use wy_mve_macros::rsx;
