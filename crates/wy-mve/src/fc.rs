@@ -390,6 +390,41 @@ mod macro_alias {
 
 pub use macro_alias::*;
 
+/// 追加动态区域：按条件信号切换分支（[`Slot`] 版，供 `rsx!` 使用）。
+///
+/// 反应式的 `if cond { A } else { B }`：`cond` 变化 → 旧分支销毁、新分支重建。
+/// `branch(cond_value, cx)` 只在切换到该分支时执行一次，把该分支子节点注入 `cx`。
+///
+/// # Examples
+///
+/// ```
+/// use wy_mve::{vbox, when, label};
+/// use wy_signal::{create_signal, GetValue};
+/// let show = create_signal(true);
+/// let node = vbox([
+///     when(
+///         move || show.get(),
+///         |c, cx| {
+///             if c {
+///                 cx.child(label(|| "有".into()).into_node());
+///             } else {
+///                 cx.child(label(|| "无".into()).into_node());
+///             }
+///         },
+///     ),
+/// ]);
+/// # let _ = node;
+/// ```
+#[must_use]
+pub fn when(
+    cond: impl Fn() -> bool + 'static,
+    branch: impl Fn(bool, &mut NodeContext) + 'static,
+) -> Slot {
+    Slot::Many(ChildArg::new(move |cx| {
+        cx.render_when(cond, branch);
+    }))
+}
+
 /// 按 `render_for_each` 展开列表子节点（keyed diff）。
 ///
 /// 返回 [`ChildArg`] 而非 `Node`：动态区域（`GetNodes` slot）**直接注入父容器**。
@@ -463,6 +498,31 @@ mod tests {
         };
         let kids = collect([slot]);
         assert_eq!(kids.len(), 1);
+    }
+
+    /// `when(cond) { A } else { B }`：条件信号翻转 → 分支重建（反应式，非构建期 if）。
+    #[test]
+    fn rsx_when_swaps_branch_on_signal() {
+        use crate::rsx;
+        use wy_signal::{create_signal, SetValue};
+        let show = create_signal(false);
+        let slot = rsx! {
+            vbox {
+                when(show.get()) {
+                    label("A")
+                    label("A2")
+                } else {
+                    label("B")
+                }
+            }
+        };
+        let node = slot.into_node();
+        let kids = collect([node]);
+        assert_eq!(children_nodes(&kids[0]).len(), 1, "初始 else 分支 1 个");
+        show.set(true);
+        assert_eq!(children_nodes(&kids[0]).len(), 2, "翻转后 then 分支 2 个");
+        show.set(false);
+        assert_eq!(children_nodes(&kids[0]).len(), 1, "再翻转回 else");
     }
 
     /// 元素块内混入 `let`：按出现顺序求值（先克隆后绑进按钮闭包），不产出节点。

@@ -84,7 +84,7 @@ pub fn dashboard(app: &App) -> Node {
                     theme,
                     |t| t.foreground,
                 ),
-                badge(theme, "v0.1.0", 3),
+                badge(theme, || String::from("v0.1.0"), || 3),
             }
 
             spacer(0.0, 20.0)

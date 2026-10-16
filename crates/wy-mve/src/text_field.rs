@@ -707,9 +707,26 @@ fn editable_handle_ime(s: &mut SharedState, event: &ImeEvent) -> bool {
             }
             true
         }
-        ImeEvent::Commit(_text) => {
-            // parley 组合已把文本并入 buffer；finish_compose 标记提交（选区不动）。
-            s.editable.with_driver(|mut drv| drv.finish_compose());
+        ImeEvent::Commit(text) => {
+            // 各平台提交序列不同：
+            // - 组合态仍在（Preedit 后直接 Commit）：结束组合即可（缓冲已含组合文本）；
+            //   提交文本与组合文本不一致时，以平台提交文本为准（丢弃组合带重插）。
+            // - 组合已被空 Preedit 清除（macOS/Windows 常见 `Preedit("") → Commit(text)`）：
+            //   组合缓冲已空，必须把提交文本显式写入正文，否则提交丢失。
+            if s.editable.is_composing() {
+                if s.editable.composing_text() == *text {
+                    s.editable.with_driver(|mut drv| drv.finish_compose());
+                } else {
+                    s.editable.with_driver(|mut drv| drv.clear_compose());
+                    if !text.is_empty() {
+                        s.editable
+                            .with_driver(|mut drv| drv.insert_or_replace_selection(text.as_str()));
+                    }
+                }
+            } else if !text.is_empty() {
+                s.editable
+                    .with_driver(|mut drv| drv.insert_or_replace_selection(text.as_str()));
+            }
             true
         }
     }
@@ -867,6 +884,46 @@ mod tests {
         assert_eq!(s.editable.text(), "a中");
         // a(1) + 中(3) = 4 字节，光标在组合带末尾
         assert_eq!(s.editable.cursor(), 4);
+    }
+
+    /// macOS/Windows 常见提交序列：`Preedit(文本) → Preedit("") → Commit(文本)`。
+    /// 空 preedit 会清除组合带，提交文本必须显式写入正文（否则提交丢失）。
+    #[test]
+    fn ime_commit_after_empty_preedit_inserts_text() {
+        let mut s = shared("a", 14.0);
+        s.editable.with_driver(|mut drv| drv.move_to_byte(1));
+        let ev = ImeEvent::Preedit {
+            text: "中".into(),
+            cursor: Some((3, 3)),
+        };
+        assert!(editable_handle_ime(&mut s, &ev));
+        let ev = ImeEvent::Preedit {
+            text: String::new(),
+            cursor: None,
+        };
+        assert!(editable_handle_ime(&mut s, &ev));
+        assert_eq!(s.editable.text(), "a", "空 preedit 清除组合带");
+        let ev = ImeEvent::Commit("中".into());
+        assert!(editable_handle_ime(&mut s, &ev));
+        assert_eq!(s.editable.text(), "a中", "提交文本写入正文");
+        // a(1) + 中(3) = 4 字节
+        assert_eq!(s.editable.cursor(), 4);
+    }
+
+    /// 组合态仍在但提交文本与组合文本不一致：丢弃组合带，以提交文本为准。
+    #[test]
+    fn ime_commit_replaces_mismatched_preedit() {
+        let mut s = shared("", 14.0);
+        let ev = ImeEvent::Preedit {
+            text: "nihao".into(),
+            cursor: None,
+        };
+        assert!(editable_handle_ime(&mut s, &ev));
+        assert_eq!(s.editable.raw_text(), "nihao");
+        let ev = ImeEvent::Commit("你好".into());
+        assert!(editable_handle_ime(&mut s, &ev));
+        assert_eq!(s.editable.text(), "你好", "提交文本替换组合带");
+        assert!(!s.editable.is_composing());
     }
 
     #[test]

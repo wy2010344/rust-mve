@@ -19,12 +19,14 @@
 //! - [`vbox`] / [`hbox`] — 竖排 / 横排容器
 //! - [`group`] / [`focusable`] / [`focus_trap`] — 分组与焦点容器
 //! - [`for_each`] — keyed 列表
+//! - [`when`] — 按条件信号切换分支的动态区域
 //! - [`ChildArg`] — 需要 `cx` 的子节点写法
 //! - [`collect`] — 摊平子节点参数
 //! - [`text`] / [`button`] — 同名于 `components`，此处语义等价
 
 pub mod clipboard;
 pub mod components;
+mod cond;
 mod context;
 pub mod fc;
 mod foreach;
@@ -36,10 +38,11 @@ pub mod text_util;
 pub use components::{
     button, column, column_at, row, row_at, spacer, text, text_signal, text_styled,
 };
+pub use cond::render_when;
 pub use context::{render_root, NodeContext, Root};
 pub use fc::{
     btn, collect, focus_trap, focusable, for_each, group, hbox, hbox_at, hbox_gap, hidden, label,
-    vbox, vbox_at, vbox_gap, ChildArg, Children, Slot,
+    vbox, vbox_at, vbox_gap, when, ChildArg, Children, Slot,
 };
 pub use foreach::render_for_each;
 pub use node::{

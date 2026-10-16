@@ -39,30 +39,50 @@ pub fn card(theme: Theme, w: f32, h: f32, children: Vec<Node>) -> Node {
 }
 
 /// shadcn 徽章：小圆角标签。variant 0=default 1=secondary 2=destructive 3=outline。
-pub fn badge(theme: Theme, text: &str, variant: u8) -> Node {
-    let text = text.to_string();
-    let w = wy_render::text_measure::measure_text(&text, 12.0).0 + 16.0;
+///
+/// `text` / `variant` 均为**绘制期**求值的闭包（信号驱动），故徽章可随信号
+/// 动态改文案与配色，无需重建节点。
+pub fn badge(
+    theme: Theme,
+    text: impl Fn() -> String + 'static,
+    variant: impl Fn() -> u8 + 'static,
+) -> Node {
+    let text = Rc::new(text);
+    let variant = Rc::new(variant);
     let h = 20.0;
     let mut n = wy_mve::text({
-        let text = text.clone();
-        move || text.clone()
+        let text = Rc::clone(&text);
+        move || text()
     });
-    n.width = w;
-    n.height = h;
-    n.draw_fn = Rc::new(move |scene| {
-        if let Some(s) = scene.downcast_mut::<Scene>() {
-            let t = theme.tokens();
-            let (bg, fg, border) = match variant {
-                2 => (t.destructive, t.destructive_fg, None),
-                3 => (Color::TRANSPARENT, t.foreground, Some(t.border)),
-                1 => (t.muted, t.muted_fg, None),
-                _ => (t.accent, t.foreground, None),
-            };
-            s.fill_round_rect(Rect::new(0.0, 0.0, w, h), 4.0, bg);
-            if let Some(b) = border {
-                s.stroke_round_rect(Rect::new(0.0, 0.0, w, h), 4.0, b, 1.0);
+    n.measure_fn = Some(Rc::new({
+        let text = Rc::clone(&text);
+        move || {
+            (
+                wy_render::text_measure::measure_text(&text(), 12.0).0 + 16.0,
+                h,
+            )
+        }
+    }));
+    n.draw_fn = Rc::new({
+        let text = Rc::clone(&text);
+        let variant = Rc::clone(&variant);
+        move |scene| {
+            if let Some(s) = scene.downcast_mut::<Scene>() {
+                let t = theme.tokens();
+                let text = text();
+                let w = wy_render::text_measure::measure_text(&text, 12.0).0 + 16.0;
+                let (bg, fg, border) = match variant() {
+                    2 => (t.destructive, t.destructive_fg, None),
+                    3 => (Color::TRANSPARENT, t.foreground, Some(t.border)),
+                    1 => (t.muted, t.muted_fg, None),
+                    _ => (t.accent, t.foreground, None),
+                };
+                s.fill_round_rect(Rect::new(0.0, 0.0, w, h), 4.0, bg);
+                if let Some(b) = border {
+                    s.stroke_round_rect(Rect::new(0.0, 0.0, w, h), 4.0, b, 1.0);
+                }
+                s.draw_text(Point::new(8.0, 4.0), &text, 12.0, fg);
             }
-            s.draw_text(Point::new(8.0, 4.0), &text, 12.0, fg);
         }
     });
     n
@@ -157,12 +177,12 @@ fn shade(c: Color, f: f32) -> Color {
 
 /// shadcn 文本（自绘，可定字号/颜色）。
 ///
-/// `color` 是 token 选择器，在绘制期对当前主题求值。
+/// `color` 是 token 选择器（闭包），在绘制期对当前主题求值——可捕获信号做动态配色。
 pub fn text_label(
     content: impl Fn() -> String + 'static,
     size: f32,
     theme: Theme,
-    color: fn(&Tokens) -> Color,
+    color: impl Fn(&Tokens) -> Color + 'static,
 ) -> Node {
     let content = Rc::new(content);
     let mut n = wy_mve::text({

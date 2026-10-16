@@ -83,11 +83,17 @@ enum Node {
     Text(LitStr),
     /// 动态组件/文本调用：`label(expr)`
     Dynamic(Expr),
-    /// 条件：`if cond { .. } else { .. }`
+    /// 条件：`if cond { .. } else { .. }`（**构建期**静态分支）
     Conditional {
         cond: Expr,
         then_branch: Vec<Node>,
         else_branch: Option<Vec<Node>>,
+    },
+    /// 反应式条件分支：`when(cond) { .. } else { .. }`（`cond` 为信号读取，动态切换）
+    When {
+        cond: Expr,
+        then_branch: Vec<Node>,
+        else_branch: Vec<Node>,
     },
     /// 列表：`for_each(list, key_fn) { |item, cx| { body } }`
     ForEach {
@@ -169,6 +175,41 @@ impl Parse for Node {
                 params,
                 prelude,
                 body,
+            });
+        }
+
+        // when(cond) { A } else { B }：反应式条件分支（cond 为信号读取）
+        if name == "when" {
+            let args = if input.peek(syn::token::Paren) {
+                parse_paren_args(input)?
+            } else {
+                return Err(syn::Error::new(
+                    name.span(),
+                    "when 需要 `when(cond) { .. } else { .. }`",
+                ));
+            };
+            if args.len() != 1 {
+                return Err(syn::Error::new(
+                    name.span(),
+                    "when 只接受一个条件：`when(cond) { .. } else { .. }`",
+                ));
+            }
+            let then_branch = parse_nodes_block(input)?;
+            let else_branch = if input.peek(Token![else]) {
+                let _: Token![else] = input.parse()?;
+                if input.peek(syn::token::Brace) {
+                    parse_nodes_block(input)?
+                } else {
+                    // `else if ..` / `else when(..)`：单节点子分支
+                    vec![input.parse::<Node>()?]
+                }
+            } else {
+                Vec::new()
+            };
+            return Ok(Node::When {
+                cond: args[0].clone(),
+                then_branch,
+                else_branch,
             });
         }
 
@@ -386,6 +427,31 @@ fn gen_child(node: &Node) -> syn::Result<TokenStream2> {
             prelude,
             body,
         } => gen_for_each(source, key_fn, params, prelude, body),
+        Node::When {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            let then_expr = gen_children_vec(then_branch)?;
+            let else_expr = if else_branch.is_empty() {
+                quote! { ::std::vec::Vec::<#m::fc::Slot>::new() }
+            } else {
+                gen_children_vec(else_branch)?
+            };
+            Ok(quote! {
+                #m::fc::when(
+                    move || #cond,
+                    move |__cond, __cx| {
+                        let __slots: ::std::vec::Vec<#m::fc::Slot> = if __cond {
+                            #then_expr
+                        } else {
+                            #else_expr
+                        };
+                        #m::fc::push_all(__slots, __cx);
+                    },
+                )
+            })
+        }
         Node::Container {
             name,
             fields,

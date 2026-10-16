@@ -63,6 +63,20 @@ impl NodeContext {
         render_for_each(&mut self.slots, for_each, creater);
     }
 
+    /// 追加动态区域：按条件信号切换分支。
+    ///
+    /// 对应反应式的 `if cond { A } else { B }`。见 [`crate::cond::render_when`]。
+    ///
+    /// - `cond` 在区域 memo 求值时执行，读取条件信号（自动追踪）。
+    /// - `branch(cond_value, cx)` 仅在切换到该分支时执行一次，注入该分支子节点。
+    pub fn render_when(
+        &mut self,
+        cond: impl Fn() -> bool + 'static,
+        branch: impl Fn(bool, &mut NodeContext) + 'static,
+    ) {
+        crate::cond::render_when(&mut self.slots, cond, branch);
+    }
+
     /// 提供值：构建该节点子树时可供兄弟节点通过 [`Self::consume`] 读取。
     pub fn provide<T: 'static>(&mut self, value: T) {
         self.provided.push((TypeId::of::<T>(), Box::new(value)));

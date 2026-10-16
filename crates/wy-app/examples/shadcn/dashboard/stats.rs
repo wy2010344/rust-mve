@@ -25,7 +25,7 @@ pub(super) fn stat_card(
             hbox(vec![
                 text_label(value, 22.0, theme, |t| t.foreground),
                 spacer(6.0, 0.0),
-                badge(theme, &delta, 1),
+                badge(theme, move || delta.clone(), || 1),
             ]),
         ],
     )

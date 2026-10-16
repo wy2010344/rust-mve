@@ -1,5 +1,6 @@
 //! 待办清单卡片：新待办输入 + 添加按钮 + 带 `for_each` 的列表 / 空态提示。
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use wy_mve::{for_each, hbox, spacer, vbox, Node, Slot};
@@ -11,10 +12,10 @@ use crate::widgets::{badge, button, button_sized, card, text_label, Btn};
 
 use super::{input_field, CARD2_H, CARD2_W};
 
-fn todo_row(theme: Theme, todos: Signal<Vec<Todo>>, todo: Todo) -> Node {
-    let id = todo.id;
-    let text = todo.text.clone();
-    let done = todo.done;
+/// 单行待办：徽章 + 文本都经闭包在绘制期读**活动 item**（`Rc<RefCell<Todo>>`），
+/// 而非构建期快照——`for_each` 只对新增 key 建一次 holder，复用项靠这些 lambda 刷新。
+fn todo_row(theme: Theme, todos: Signal<Vec<Todo>>, todo: Rc<RefCell<Todo>>) -> Node {
+    let id = todo.borrow().id;
     let del = button_sized(
         theme,
         move || String::from("删除"),
@@ -27,19 +28,36 @@ fn todo_row(theme: Theme, todos: Signal<Vec<Todo>>, todo: Todo) -> Node {
             todos.set(l);
         },
     );
-    let fg: fn(&crate::tokens::Tokens) -> wy_render::Color = if done {
-        |t| t.muted_fg
-    } else {
-        |t| t.foreground
-    };
+
+    let badge_text = Rc::clone(&todo);
+    let badge_variant = Rc::clone(&todo);
+    let label_text = Rc::clone(&todo);
+    let label_fg = Rc::clone(&todo);
     hbox(vec![
         badge(
             theme,
-            if done { "完成" } else { "进行中" },
-            if done { 1 } else { 0 },
+            move || {
+                if badge_text.borrow().done {
+                    String::from("完成")
+                } else {
+                    String::from("进行中")
+                }
+            },
+            move || if badge_variant.borrow().done { 1 } else { 0 },
         ),
         spacer(8.0, 0.0),
-        text_label(move || text.clone(), 14.0, theme, fg),
+        text_label(
+            move || label_text.borrow().text.clone(),
+            14.0,
+            theme,
+            move |t| {
+                if label_fg.borrow().done {
+                    t.muted_fg
+                } else {
+                    t.foreground
+                }
+            },
+        ),
         del,
     ])
 }
@@ -108,8 +126,7 @@ pub(super) fn todos_card(theme: Theme, app: &App) -> Node {
                         }
                     },
                     move |_k, todo_rc, _cx| {
-                        let todo = todo_rc.borrow().clone();
-                        _cx.child(todo_row(theme, todos, todo));
+                        _cx.child(todo_row(theme, todos, todo_rc));
                         _cx.child(spacer(0.0, 6.0));
                     },
                 ));

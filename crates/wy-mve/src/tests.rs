@@ -213,6 +213,33 @@ fn hidden_child_does_not_occupy_layout() {
     assert_eq!(offs[1].1, 0.0, "隐藏项不推进主轴游标");
 }
 
+/// renderWhen：条件翻转 → 分支 holder 销毁/重建，区域节点数实时变化。
+#[test]
+fn render_when_tracks_condition() {
+    let show = create_signal(false);
+    let root = render_root(move |cx| {
+        cx.render_when(
+            move || show.get(),
+            |cond, b| {
+                if cond {
+                    b.child(text(|| "A".into()));
+                    b.child(text(|| "A2".into()));
+                } else {
+                    b.child(text(|| "B".into()));
+                }
+            },
+        );
+    });
+
+    assert_eq!(root.nodes().len(), 1, "false → else 分支 1 个");
+
+    show.set(true);
+    assert_eq!(root.nodes().len(), 2, "true → then 分支 2 个");
+
+    show.set(false);
+    assert_eq!(root.nodes().len(), 1, "翻转回 else");
+}
+
 /// renderForEach：增删列表 → 区域节点数实时变化（复刻 Kotlin DemoList）。
 #[test]
 fn render_for_each_tracks_signal_changes() {
