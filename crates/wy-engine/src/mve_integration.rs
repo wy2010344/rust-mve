@@ -10,6 +10,7 @@
 //!   信号变化只触发受影响区域重算 → 局部重绘，与 Kotlin 行为一致。
 
 use std::cell::UnsafeCell;
+use std::rc::Rc;
 
 use wy_mve::{children_nodes, has_handler, layout_offsets, render_root, Node, NodeContext};
 use wy_render::{Point, Scene};
@@ -202,6 +203,31 @@ impl MveApp {
     pub fn focus_path(&self) -> &FocusPath {
         self.focus.path()
     }
+
+    /// 设置焦点并把得失变化派发给节点（驱动聚焦视觉）。
+    ///
+    /// 比对旧/新焦点**叶子身份**（`Rc::ptr_eq`——`FocusPath` 的 `==` 是值比较，
+    /// 恒真不可用）：变化时先对旧叶子 `run_blur`、再对新叶子 `run_focus`。
+    fn apply_focus(&mut self, new_path: FocusPath) {
+        let nodes = self.root.nodes();
+        let old_leaf = locate(self.focus.path(), &nodes).and_then(|c| c.into_iter().next());
+        let new_leaf = locate(&new_path, &nodes).and_then(|c| c.into_iter().next());
+        let unchanged = match (&old_leaf, &new_leaf) {
+            (Some(a), Some(b)) => Rc::ptr_eq(&a.identity, &b.identity),
+            (None, None) => true,
+            _ => false,
+        };
+        self.focus.set_focus(new_path);
+        if unchanged {
+            return;
+        }
+        if let Some(n) = old_leaf {
+            n.run_blur();
+        }
+        if let Some(n) = new_leaf {
+            n.run_focus();
+        }
+    }
 }
 
 impl crate::runner::WyApp for MveApp {
@@ -259,7 +285,8 @@ impl crate::runner::WyApp for MveApp {
                 // 存捕获链：move/up 沿链派发（即使移出节点也继续）
                 self.capture = Some(chain.clone());
                 let node_chain: Vec<Node> = chain.iter().map(|(n, _)| n.clone()).collect();
-                self.focus.focus_on_click(&node_chain);
+                let path = FocusManager::click_focus_path(&node_chain);
+                self.apply_focus(path);
                 let mut mve_event = wy_mve::PointerEvent::new(x, y);
                 mve_event.shift = self.modifiers.shift_key();
                 dispatch_click_chain(&chain, &mut mve_event);
@@ -289,7 +316,7 @@ impl crate::runner::WyApp for MveApp {
             crate::event::Key::Tab if event.pressed => {
                 // Tab / Shift+Tab 焦点遍历
                 let new_focus = tab_navigate(&nodes, self.focus.path(), forward, true);
-                self.focus.set_focus(new_focus);
+                self.apply_focus(new_focus);
             }
             _ if event.pressed => {
                 let mut mve_event = wy_mve::KeyEvent {
@@ -644,6 +671,167 @@ mod tests {
         // 清除焦点 → 无光标盒
         app.focus.clear_focus();
         assert_eq!(app.ime_cursor_area(), None);
+    }
+
+    #[test]
+    fn click_then_tab_between_nested_text_fields() {
+        let a = Signal::new(String::new());
+        let b = Signal::new(String::new());
+        let (a1, a2) = (a, a);
+        let (b1, b2) = (b, b);
+        let mut app = MveApp::new(move |cx: &mut wy_mve::NodeContext| {
+            cx.child(wy_mve::vbox(vec![wy_mve::vbox_at(
+                24.0,
+                24.0,
+                vec![
+                    wy_mve::text_field(move || a1.get(), move |t| a2.set(t)),
+                    wy_mve::text_field(move || b1.get(), move |t| b2.set(t)),
+                ],
+            )]));
+        });
+
+        let mut scene = Scene::new();
+        app.draw(&mut scene, 400.0, 200.0);
+
+        // 点击第一个字段（偏移 24,24 内的点）
+        let nodes = app.root.nodes();
+        let chain = hit_test_node(&nodes[0], (0.0, 0.0), 74.0, 40.0)
+            .expect("应命中文本字段")
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect::<Vec<_>>();
+        app.focus.focus_on_click(&chain);
+        assert_eq!(app.ime_allowed(), Some(true), "点击后允许 IME");
+
+        let focusables = crate::focus::focusable_nodes(&nodes);
+        assert_eq!(focusables.len(), 2, "应有两个可聚焦文本字段");
+        let leaf = Rc::clone(app.focus.path().first().expect("应聚焦"));
+        assert!(
+            Rc::ptr_eq(&leaf, &focusables[0][0].identity),
+            "点击后应聚焦第一个字段"
+        );
+
+        // Tab → 焦点应移到第二个字段
+        app.handle_key_event(&crate::event::KeyEvent {
+            key: crate::event::Key::Tab,
+            pressed: true,
+            ctrl: false,
+            shift: false,
+            alt: false,
+            meta: false,
+        });
+        let leaf2 = Rc::clone(app.focus.path().first().expect("应聚焦"));
+        assert!(
+            Rc::ptr_eq(&leaf2, &focusables[1][0].identity),
+            "Tab 应聚焦第二个字段"
+        );
+
+        // 输入字符 → 进入第二个字段
+        app.handle_key_event(&crate::event::KeyEvent {
+            key: crate::event::Key::Char('x'),
+            pressed: true,
+            ctrl: false,
+            shift: false,
+            alt: false,
+            meta: false,
+        });
+        assert_eq!(b.get(), "x", "字符应进入 Tab 后的第二个字段");
+    }
+
+    #[test]
+    fn click_input_inside_padded_card() {
+        let s = Signal::new(String::new());
+        let (s1, s2) = (s, s);
+        let mut app = MveApp::new(move |cx: &mut wy_mve::NodeContext| {
+            // 模拟 card(): vbox[size_fn] > inner(vbox x=16,y=16) > text_field
+            let mut inner = wy_mve::vbox(vec![wy_mve::text_field(
+                move || s1.get(),
+                move |t| s2.set(t),
+            )]);
+            inner.x = 16.0;
+            inner.y = 16.0;
+            let mut card = wy_mve::vbox(vec![inner]);
+            card.size_fn = Some(Rc::new(|| (300.0, 100.0)));
+            cx.child(wy_mve::vbox_at(24.0, 24.0, vec![card]));
+        });
+
+        let mut scene = Scene::new();
+        app.draw(&mut scene, 400.0, 200.0);
+
+        // 字段绝对原点 ≈ (24+16, 24+16) = (40,40)
+        let nodes = app.root.nodes();
+        let hit = hit_test_node(&nodes[0], (0.0, 0.0), 60.0, 50.0)
+            .expect("应命中卡片内输入框")
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect::<Vec<_>>();
+        app.focus.focus_on_click(&hit);
+        assert_eq!(app.ime_allowed(), Some(true), "点击卡片内输入框应允许 IME");
+    }
+
+    /// 焦点变化派发 `on_blur`/`on_focus`：点击/ Tab 切换都会触发。
+    #[test]
+    fn focus_change_fires_on_focus_and_on_blur() {
+        let log: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let app = MveApp::new({
+            let log = Rc::clone(&log);
+            move |cx: &mut wy_mve::NodeContext| {
+                let make = |tag: &'static str, x: f32| {
+                    let lf = Rc::clone(&log);
+                    let lb = Rc::clone(&log);
+                    Node {
+                        x,
+                        width: 50.0,
+                        height: 32.0,
+                        focusable: true,
+                        hit_test_fn: Rc::new(|px, py| {
+                            (0.0..50.0).contains(&px) && (0.0..32.0).contains(&py)
+                        }),
+                        // has_handler 需要事件回调才算可命中
+                        on_click_fn: Some(Rc::new(|_| {})),
+                        on_focus_fn: Some(Rc::new(move || {
+                            lf.borrow_mut().push(format!("focus:{tag}"))
+                        })),
+                        on_blur_fn: Some(Rc::new(move || {
+                            lb.borrow_mut().push(format!("blur:{tag}"))
+                        })),
+                        ..Node::default()
+                    }
+                };
+                cx.child(make("1", 0.0));
+                cx.child(make("2", 60.0));
+            }
+        });
+
+        let mut app = app;
+        let mut scene = Scene::new();
+        app.draw(&mut scene, 200.0, 100.0);
+
+        let cursor = |x: f64, y: f64| winit::event::WindowEvent::CursorMoved {
+            device_id: winit::event::DeviceId::dummy(),
+            position: winit::dpi::PhysicalPosition::new(x, y),
+        };
+        let press = || winit::event::WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state: winit::event::ElementState::Pressed,
+            button: winit::event::MouseButton::Left,
+        };
+
+        // 点击节点 1 → focus:1
+        app.handle_event(&cursor(25.0, 16.0));
+        app.handle_event(&press());
+        assert_eq!(&*log.borrow(), &["focus:1"]);
+
+        // Tab → 焦点移向节点 2 → blur:1, focus:2
+        app.handle_key_event(&crate::event::KeyEvent {
+            key: crate::event::Key::Tab,
+            pressed: true,
+            ctrl: false,
+            shift: false,
+            alt: false,
+            meta: false,
+        });
+        assert_eq!(&*log.borrow(), &["focus:1", "blur:1", "focus:2"]);
     }
 
     #[test]

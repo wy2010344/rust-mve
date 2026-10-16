@@ -14,6 +14,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::context::NodeContext;
+use wy_layout::{AlignItem, DirectionJustify};
 
 type ArgChildrenFn = Rc<dyn Fn(&mut NodeContext)>;
 type DrawFn = Rc<dyn Fn(&mut dyn std::any::Any)>;
@@ -24,6 +25,8 @@ type KeyFn = Rc<dyn Fn(&mut KeyEvent) -> bool>;
 type ImeFn = Rc<dyn Fn(&mut ImeEvent) -> bool>;
 /// IME 候选窗定位：光标盒 `(x, y, w, h)`（节点局部坐标）。
 type ImeCursorFn = Rc<dyn Fn() -> (f32, f32, f32, f32)>;
+/// 焦点获得/失去回调（引擎在焦点链变化时调用，供节点驱动聚焦视觉）。
+type FocusFn = Rc<dyn Fn()>;
 /// 测量节点自然尺寸（宽高像素）。文本等内容撑开型节点用它提供 intrinsic 尺寸，
 /// 供容器布局消费（复刻 Kotlin `RichTextNode.argWidth/argHeight`）。
 type MeasureFn = Rc<dyn Fn() -> (f32, f32)>;
@@ -66,6 +69,10 @@ pub struct Node {
     /// 引擎换算为窗口绝对坐标后喂给 `Window::set_ime_cursor_area`，
     /// 对齐 Kotlin `EditableTextNode.inputOverlay` 的候选窗跟随。
     pub ime_cursor_fn: Option<ImeCursorFn>,
+    /// 获得焦点回调（焦点链叶子变为本节点时由引擎调用）。
+    pub on_focus_fn: Option<FocusFn>,
+    /// 失去焦点回调（焦点链叶子从本节点转走时由引擎调用）。
+    pub on_blur_fn: Option<FocusFn>,
     /// 是否可聚焦。
     pub focusable: bool,
     /// 是否隐藏（不参与布局和命中测试）。
@@ -88,6 +95,16 @@ pub struct Node {
     pub height: f32,
     /// 间距（复刻 Kotlin `FlexParam.gap`：容器属性而非布局配置，布局期读取）。
     pub gap: f32,
+    /// 内边距（统一，后续可扩展为四方向）。
+    pub padding: f32,
+    /// Flex grow（子节点在主轴上的伸展权重）。
+    pub grow: f32,
+    /// 交叉轴对齐（子节点自身对齐）。
+    pub align_self: Option<AlignItem>,
+    /// 容器主轴对齐（容器属性）。
+    pub justify: DirectionJustify,
+    /// 容器交叉轴对齐（容器属性）。
+    pub align_items: AlignItem,
     /// 动态位置 X（覆盖 `x`，对应 Kotlin `override fun argPosition(Direction.x)`）。
     pub x_fn: Option<DynNum>,
     /// 动态位置 Y（覆盖 `y`）。
@@ -126,6 +143,8 @@ impl Clone for Node {
             key_fn: self.key_fn.as_ref().map(Rc::clone),
             ime_fn: self.ime_fn.as_ref().map(Rc::clone),
             ime_cursor_fn: self.ime_cursor_fn.as_ref().map(Rc::clone),
+            on_focus_fn: self.on_focus_fn.as_ref().map(Rc::clone),
+            on_blur_fn: self.on_blur_fn.as_ref().map(Rc::clone),
             focusable: self.focusable,
             hidden: self.hidden,
             skip_draw: self.skip_draw,
@@ -138,6 +157,11 @@ impl Clone for Node {
             width: self.width,
             height: self.height,
             gap: self.gap,
+            padding: self.padding,
+            grow: self.grow,
+            align_self: self.align_self,
+            justify: self.justify,
+            align_items: self.align_items,
             x_fn: self.x_fn.as_ref().map(Rc::clone),
             y_fn: self.y_fn.as_ref().map(Rc::clone),
             width_fn: self.width_fn.as_ref().map(Rc::clone),
@@ -188,6 +212,8 @@ impl Default for Node {
             key_fn: None,
             ime_fn: None,
             ime_cursor_fn: None,
+            on_focus_fn: None,
+            on_blur_fn: None,
             focusable: false,
             hidden: false,
             skip_draw: false,
@@ -200,6 +226,11 @@ impl Default for Node {
             width: 0.0,
             height: 0.0,
             gap: 8.0,
+            padding: 0.0,
+            grow: 0.0,
+            align_self: None,
+            justify: DirectionJustify::Grow,
+            align_items: AlignItem::Center,
             x_fn: None,
             y_fn: None,
             width_fn: None,
@@ -274,6 +305,20 @@ impl Node {
     /// 查询光标盒（节点局部坐标），供 IME 候选窗定位。
     pub fn run_ime_cursor_rect(&self) -> Option<(f32, f32, f32, f32)> {
         self.ime_cursor_fn.as_ref().map(|f| f())
+    }
+
+    /// 触发获得焦点回调（若存在）。
+    pub fn run_focus(&self) {
+        if let Some(f) = &self.on_focus_fn {
+            f();
+        }
+    }
+
+    /// 触发失去焦点回调（若存在）。
+    pub fn run_blur(&self) {
+        if let Some(f) = &self.on_blur_fn {
+            f();
+        }
     }
 
     pub fn is_focusable(&self) -> bool {
@@ -451,6 +496,9 @@ pub fn children_nodes(node: &Node) -> Vec<Node> {
 
 /// 节点内容的尺寸：布局容器按实时子节点计算，普通节点用自身宽高。
 ///
+/// 隐藏子节点（`is_hidden`）**不占布局空间**（对齐 Kotlin `hide` 的子节点
+/// 不参与 flex 排布）；这样 `hide_fn` 可用于动态条件展示并触发重排。
+///
 /// 对应 Kotlin `FlexParam` 在布局期的尺寸派生。优先级（贴近 Kotlin
 /// `RectNode.argSize` 的推导链）：
 /// 1. `size_fn`（显式覆盖，对应 Kotlin `override fun argSize`）
@@ -468,14 +516,19 @@ pub fn node_size(node: &Node) -> (f32, f32) {
             let children = children_nodes(node);
             let mut x = 0.0;
             let mut h = 0.0;
+            let mut count = 0;
             for c in &children {
+                if c.is_hidden() {
+                    continue;
+                }
                 let (cw, ch) = node_size(c);
                 x += cw + gap;
                 if ch > h {
                     h = ch;
                 }
+                count += 1;
             }
-            let w = if children.is_empty() { 0.0 } else { x - gap };
+            let w = if count == 0 { 0.0 } else { x - gap };
             (w, h)
         }
         Some(Layout::Column) => {
@@ -483,14 +536,19 @@ pub fn node_size(node: &Node) -> (f32, f32) {
             let children = children_nodes(node);
             let mut y = 0.0;
             let mut w = 0.0;
+            let mut count = 0;
             for c in &children {
+                if c.is_hidden() {
+                    continue;
+                }
                 let (cw, ch) = node_size(c);
                 y += ch + gap;
                 if cw > w {
                     w = cw;
                 }
+                count += 1;
             }
-            let h = if children.is_empty() { 0.0 } else { y - gap };
+            let h = if count == 0 { 0.0 } else { y - gap };
             (w, h)
         }
         None => {
@@ -518,7 +576,9 @@ pub fn layout_offsets(layout: Layout, gap: f32, children: &[Node]) -> Vec<(f32, 
                 .iter()
                 .map(|c| {
                     let o = (x, 0.0);
-                    x += node_size(c).0 + gap;
+                    if !c.is_hidden() {
+                        x += node_size(c).0 + gap;
+                    }
                     o
                 })
                 .collect()
@@ -529,7 +589,9 @@ pub fn layout_offsets(layout: Layout, gap: f32, children: &[Node]) -> Vec<(f32, 
                 .iter()
                 .map(|c| {
                     let o = (0.0, y);
-                    y += node_size(c).1 + gap;
+                    if !c.is_hidden() {
+                        y += node_size(c).1 + gap;
+                    }
                     o
                 })
                 .collect()

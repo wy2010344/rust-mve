@@ -7,6 +7,8 @@
 //!   非字面量表达式由宏包成 `move || expr` 闭包，求值发生在布局/绘制期，
 //!   读信号自动追踪（复刻 Kotlin「属性是 getter」的形态）。
 //! - 组件：`btn { label: "x", on_click: move || { ... } }` —— 字段语法绑事件
+//! - 自定义组件：`#[component] fn foo(..)` 后写 `foo { field: v, .. }`
+//!   会展开为 `foo(FooProps { field: v, .. })`（见 [`component`]）
 //! - 动态文本：`label(expr)` —— 自动包 `move || expr.to_string()`，
 //!   draw 期求值，信号变化自动追踪重绘
 //! - 列表：`for_each(list, key_fn) { |item, cx| { ... } }`
@@ -717,29 +719,14 @@ fn gen_component(
         }});
     }
 
-    // 未注册组件：旧规则（label 闭包 / 无参），未知字段报错
-    let mut label_expr = None;
-    for (n, e) in fields {
-        if n == "label" {
-            label_expr = Some(e.clone());
-        } else {
-            return Err(syn::Error::new(
-                n.span(),
-                format!(
-                    "组件 `{name}` 不支持参数 `{n}`；已注册组件：btn, button, text_field, rich_text。\
-                     自定义组件请用函数调用语法 `{name}(...)`"
-                ),
-            ));
-        }
-    }
-
-    let f = format_ident!("fc__{}", name);
-    let call = if let Some(l) = label_expr {
-        let ltok = to_label_closure(&l);
-        quote! { #m::fc::#f(#ltok) }
-    } else {
-        quote! { #m::fc::#f() }
-    };
+    // 未注册组件：按 `#[component]` 约定调用用户组件。
+    //
+    // `#[component] fn stat_card(..)` 会生成 `struct StatCardProps` + 同名函数
+    // `fn stat_card(props: StatCardProps) -> Slot`。故 `statCard { .. }` 展开为
+    // `stat_card(StatCardProps { .. })`。字段名/类型由用户签名的 Props 决定。
+    let props_name = format_ident!("{}Props", to_pascal_case(&fname));
+    let assigns = fields.iter().map(|(n, e)| quote! { #n: #e });
+    let call = quote! { #name(#props_name { #(#assigns,)* }) };
 
     if stmts.is_empty() {
         return Ok(call);
@@ -748,6 +735,22 @@ fn gen_component(
         #(#stmts)*
         #call
     }})
+}
+
+/// `snake_case` → `PascalCase`（用于组件名 → Props 结构体名）。
+///
+/// 例：`stat_card` → `StatCard`，`text_field` → `TextField`。
+fn to_pascal_case(s: &str) -> String {
+    s.split('_')
+        .filter(|seg| !seg.is_empty())
+        .map(|seg| {
+            let mut chars = seg.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
 }
 
 /// 必填参数 → 闭包：`label`/`value` 走字符串字面量优化，其余透传闭包。
@@ -843,4 +846,137 @@ impl Parse for RsxRoot {
         let node = input.parse::<Node>()?;
         Ok(RsxRoot { stmts, node })
     }
+}
+
+// ============================================================================
+// #[component] 属性宏
+// ============================================================================
+
+/// 把普通函数包装成可在 `rsx!` 中按 `name { field: value, .. }` 使用的组件。
+///
+/// 生成两部分：
+/// - `struct <Name>Props { .. }`：字段来自函数参数（同名同类型，`pub`）。
+/// - `fn <name>(props: <Name>Props) -> Slot`：解构 Props 后执行原函数体，
+///   返回值经 `Into<Slot>` 转换，故原函数可返回 `Node` 或 `Slot`。
+///
+/// `rsx!` 里写 `stat_card { title: "x", value: 1.0, children: vec![..] }`
+/// 会展开为 `stat_card(StatCardProps { title: "x", value: 1.0, children: vec![..] })`。
+///
+/// # 约束
+/// - 参数须有**具体类型**（不支持 `impl Trait`/泛型/生命周期）；闭包请用
+///   `Rc<dyn Fn() -> String>` 之类具体类型。
+/// - 不支持 `self`、`async`、`const`、`unsafe`、泛型。
+/// - `rsx!` 组件语法无「裸子节点」，children 需作为字段显式传入
+///   （如 `children: vec![label("x")]`）。
+///
+/// # Examples
+///
+/// ```ignore
+/// use wy_mve::{component, rsx, vbox, Node, Slot};
+///
+/// #[component]
+/// fn stat_card(title: String, value: f32, children: Vec<Slot>) -> Node {
+///     let mut row = vbox(children);
+///     row.gap = value;
+///     row
+/// }
+///
+/// let ui = rsx! {
+///     stat_card {
+///         title: "总访问".to_string(),
+///         value: 8.0,
+///         children: Vec::<Slot>::new(),
+///     }
+/// };
+/// ```
+#[proc_macro_attribute]
+pub fn component(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    match expand_component(item.into()) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+fn expand_component(item: TokenStream2) -> syn::Result<TokenStream2> {
+    let m = mve();
+    let func: syn::ItemFn = syn::parse2(item)?;
+    let sig = &func.sig;
+
+    if sig.asyncness.is_some() {
+        return Err(syn::Error::new_spanned(
+            sig,
+            "#[component] 不支持 async 函数",
+        ));
+    }
+    if sig.constness.is_some() {
+        return Err(syn::Error::new_spanned(
+            sig,
+            "#[component] 不支持 const 函数",
+        ));
+    }
+    if sig.unsafety.is_some() {
+        return Err(syn::Error::new_spanned(
+            sig,
+            "#[component] 不支持 unsafe 函数",
+        ));
+    }
+    if !sig.generics.params.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &sig.generics,
+            "#[component] 不支持泛型/生命周期参数；请用具体类型",
+        ));
+    }
+
+    let vis = &func.vis;
+    let name = &sig.ident;
+    let props_name = format_ident!("{}Props", to_pascal_case(&name.to_string()));
+
+    // 收集参数：字段名 + 类型（拒绝 self / impl Trait / 复杂模式）。
+    let mut field_names: Vec<Ident> = Vec::new();
+    let mut field_tys: Vec<syn::Type> = Vec::new();
+    for arg in &sig.inputs {
+        let pat_ty = match arg {
+            syn::FnArg::Receiver(r) => {
+                return Err(syn::Error::new_spanned(
+                    r,
+                    "#[component] 不支持 self 参数（组件是自由函数）",
+                ));
+            }
+            syn::FnArg::Typed(pt) => pt,
+        };
+        let ident = match &*pat_ty.pat {
+            syn::Pat::Ident(pi) if pi.subpat.is_none() => pi.ident.clone(),
+            other => {
+                return Err(syn::Error::new_spanned(
+                    other,
+                    "#[component] 参数须是简单标识符（如 `title: String`）",
+                ));
+            }
+        };
+        if matches!(&*pat_ty.ty, syn::Type::ImplTrait(_)) {
+            return Err(syn::Error::new_spanned(
+                &pat_ty.ty,
+                "#[component] 暂不支持 `impl Trait` 参数；请改用具体类型\
+                 （如 `Rc<dyn Fn() -> String>`）",
+            ));
+        }
+        field_names.push(ident);
+        field_tys.push((*pat_ty.ty).clone());
+    }
+
+    let attrs = &func.attrs;
+    let body = &func.block;
+
+    Ok(quote! {
+        #(#attrs)*
+        #vis struct #props_name {
+            #( pub #field_names: #field_tys, )*
+        }
+
+        #(#attrs)*
+        #vis fn #name(props: #props_name) -> #m::Slot {
+            let #props_name { #(#field_names),* } = props;
+            ::core::convert::Into::<#m::Slot>::into(#body)
+        }
+    })
 }

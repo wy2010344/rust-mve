@@ -507,6 +507,23 @@ pub fn text_field_opts(
         })
     };
 
+    // --- 聚焦视觉：引擎焦点变化 → 驱动内部 `focused` 信号（Tab 聚焦也高亮） ---
+    // `Signal` 是 Copy，先取出句柄再 set，避免持有 RefCell 借用时触发重绘。
+    let on_focus_fn = {
+        let shared = Rc::clone(&shared);
+        Rc::new(move || {
+            let focused = shared.borrow().focused;
+            focused.set(true);
+        })
+    };
+    let on_blur_fn = {
+        let shared = Rc::clone(&shared);
+        Rc::new(move || {
+            let focused = shared.borrow().focused;
+            focused.set(false);
+        })
+    };
+
     Node {
         draw_fn,
         hit_test_fn,
@@ -516,6 +533,8 @@ pub fn text_field_opts(
         key_fn: Some(key_fn),
         ime_fn: Some(ime_fn),
         ime_cursor_fn: Some(ime_cursor_fn),
+        on_focus_fn: Some(on_focus_fn),
+        on_blur_fn: Some(on_blur_fn),
         focusable: true,
         width: opts.width,
         height: opts.height,
@@ -726,6 +745,19 @@ mod tests {
             alt: false,
             meta: false,
         }
+    }
+
+    /// 文本框暴露焦点回调：引擎焦点变化据此驱动 `focused`（Tab 聚焦也高亮）。
+    #[test]
+    fn text_field_wires_focus_callbacks() {
+        let v = Signal::new(String::new());
+        let value = v;
+        let node = text_field(move || value.get(), |_| {});
+        assert!(node.on_focus_fn.is_some(), "应有 on_focus_fn");
+        assert!(node.on_blur_fn.is_some(), "应有 on_blur_fn");
+        // 直接触发不应 panic（内部 set 信号）
+        node.run_focus();
+        node.run_blur();
     }
 
     #[test]

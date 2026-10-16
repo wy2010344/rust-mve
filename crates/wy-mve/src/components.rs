@@ -10,6 +10,7 @@ use std::rc::Rc;
 use crate::context::NodeContext;
 use crate::node::{Layout, Node};
 use wy_render::{Color, Point, Rect, Scene};
+use wy_signal::{GetValue, SetValue, Signal};
 
 /// 文本组件：闭包返回文本内容。
 ///
@@ -103,6 +104,12 @@ pub fn button(label: impl Fn() -> String + 'static, on_click: impl Fn() + 'stati
     let label2 = label.clone();
     let on_click2 = on_click.clone();
 
+    // 聚焦视觉：引擎焦点变化驱动 `focused`，draw 期读它画高亮边框（Tab 聚焦也可见）。
+    let focused = Signal::new(false);
+    let draw_focused = focused;
+    let focus_on = focused;
+    let focus_off = focused;
+
     Node {
         focusable: true,
         width: 90.0,
@@ -111,9 +118,14 @@ pub fn button(label: impl Fn() -> String + 'static, on_click: impl Fn() + 'stati
         draw_fn: Rc::new(move |scene| {
             if let Some(scene) = scene.downcast_mut::<Scene>() {
                 let bg = Color::from_u32(0xFF_DCDCDC);
-                let border = Color::from_u32(0xFF_B0B0B0);
+                let border = if draw_focused.get() {
+                    Color::rgba(0, 120, 212, 255)
+                } else {
+                    Color::from_u32(0xFF_B0B0B0)
+                };
+                let width = if draw_focused.get() { 2.0 } else { 1.5 };
                 scene.fill_round_rect(Rect::new(0.0, 0.0, 90.0, 32.0), 6.0, bg);
-                scene.stroke_round_rect(Rect::new(0.0, 0.0, 90.0, 32.0), 6.0, border, 1.5);
+                scene.stroke_round_rect(Rect::new(0.0, 0.0, 90.0, 32.0), 6.0, border, width);
                 let t = label2();
                 scene.draw_text(Point::new(10.0, 8.0), &t, 14.0, Color::BLACK);
             }
@@ -122,6 +134,8 @@ pub fn button(label: impl Fn() -> String + 'static, on_click: impl Fn() + 'stati
             on_click2();
             event.stop_propagation();
         })),
+        on_focus_fn: Some(Rc::new(move || focus_on.set(true))),
+        on_blur_fn: Some(Rc::new(move || focus_off.set(false))),
         ..Node::default()
     }
 }
@@ -194,6 +208,16 @@ mod tests {
         let t = text(|| "hello".into());
         assert!(!t.focusable);
         assert!(t.on_click_fn.is_none());
+    }
+
+    #[test]
+    fn button_wires_focus_callbacks() {
+        let btn = button(|| "x".into(), || {});
+        assert!(btn.on_focus_fn.is_some(), "按钮应有 on_focus_fn");
+        assert!(btn.on_blur_fn.is_some(), "按钮应有 on_blur_fn");
+        // 直接触发不应 panic
+        btn.run_focus();
+        btn.run_blur();
     }
 
     #[test]

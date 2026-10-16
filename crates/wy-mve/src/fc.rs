@@ -568,6 +568,32 @@ mod tests {
         let _ = slot.into_node();
     }
 
+    /// `#[component]`：普通函数包装为组件，rsx! 以 `name { field: .. }` 调用。
+    #[test]
+    fn rsx_component_attribute_macro() {
+        use crate::{component, rsx};
+
+        #[component]
+        fn stat_card(title: String, value: f32, children: Vec<Slot>) -> Node {
+            let _ = title;
+            let mut n = vbox(children);
+            n.gap = value;
+            n
+        }
+
+        let slot = rsx! {
+            stat_card {
+                title: "总访问".to_string(),
+                value: 8.0,
+                children: Vec::<Slot>::new(),
+            }
+        };
+        let node = slot.into_node();
+        assert_eq!(node.gap(), 8.0, "组件参数 value 传入并生效");
+        let kids = collect([node]);
+        assert!(children_nodes(&kids[0]).is_empty(), "children 为空");
+    }
+
     #[test]
     fn rsx_static_attrs_assign_fields() {
         use crate::rsx;

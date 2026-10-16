@@ -178,6 +178,41 @@ fn layout_offsets_row_and_column() {
     );
 }
 
+/// 隐藏子节点不占布局空间：容器尺寸排除它，后续兄弟不上移游标。
+/// 对齐 Kotlin `hide` 子节点不参与 flex 排布——这是动态条件展示的基础。
+#[test]
+fn hidden_child_does_not_occupy_layout() {
+    let vis = wy_signal::Signal::new(false);
+    let v = vis;
+    let hidden = Node {
+        width: 100.0,
+        height: 40.0,
+        hide_fn: Some(Rc::new(move || !v.get())),
+        ..Node::default()
+    };
+    let shown = Node {
+        width: 50.0,
+        height: 10.0,
+        ..Node::default()
+    };
+    let col = column({
+        let (hidden, shown) = (hidden, shown);
+        move |cx| {
+            cx.add_node(hidden.clone());
+            cx.add_node(shown.clone());
+        }
+    });
+
+    // 隐藏项不撑高度：仅 shown 的 10
+    assert_eq!(node_size(&col).1, 10.0, "隐藏子节点不占高度");
+
+    let kids = children_nodes(&col);
+    let offs = layout_offsets(Layout::Column, col.gap(), &kids);
+    // 隐藏项拿到当前游标 (0,0)，但不推进；shown 也在 (0,0)
+    assert_eq!(offs[0].1, 0.0);
+    assert_eq!(offs[1].1, 0.0, "隐藏项不推进主轴游标");
+}
+
 /// renderForEach：增删列表 → 区域节点数实时变化（复刻 Kotlin DemoList）。
 #[test]
 fn render_for_each_tracks_signal_changes() {

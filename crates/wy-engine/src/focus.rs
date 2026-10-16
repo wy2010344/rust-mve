@@ -51,15 +51,22 @@ impl FocusManager {
     ///
     /// 命中链是子→根（`hit_test_node` 输出），返回其身份链（已叶子在前）。
     pub fn focus_on_click(&mut self, hit_chain: &[Node]) {
+        self.set_focus(Self::click_focus_path(hit_chain));
+    }
+
+    /// 计算点击应聚焦的身份链（命中链中**最深可聚焦**节点 → 叶→根）。
+    ///
+    /// 纯函数、不改状态：供引擎在设置焦点前后比对旧/新叶子以派发
+    /// `on_blur`/`on_focus` 回调。无 focusable → 空链（清焦点）。
+    pub fn click_focus_path(hit_chain: &[Node]) -> FocusPath {
         // hit_chain 子在前（深→浅）。找第一个 focusable。
         if let Some(idx) = hit_chain.iter().position(|n| n.focusable) {
-            let path: FocusPath = hit_chain[idx..]
+            hit_chain[idx..]
                 .iter()
                 .map(|n| Rc::clone(&n.identity))
-                .collect();
-            self.set_focus(path);
+                .collect()
         } else {
-            self.clear_focus();
+            FocusPath::new()
         }
     }
 
