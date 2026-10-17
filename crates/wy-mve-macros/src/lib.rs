@@ -71,12 +71,14 @@ enum Node {
         fields: Vec<(Ident, Expr)>,
         children: Vec<Node>,
     },
-    /// 组件：`btn { label: "...", on_click: ... }`
+    /// 组件：`badge { text: ..., children }`（`#[component]` 用户组件）。
     ///
+    /// `children` 是块内**裸子节点**，路由到组件的 `children` 插槽；
     /// `stmts` 是块内混入的 `let` 等语句（不产出节点，组件调用前求值）。
     Component {
         name: Ident,
         fields: Vec<(Ident, Expr)>,
+        children: Vec<Node>,
         stmts: Vec<Stmt>,
     },
     /// 静态文本节点（裸字面量）
@@ -114,6 +116,12 @@ enum Node {
 impl Parse for Node {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         skip_junk(input);
+
+        // `{ expr }`：块表达式子节点（Dioxus 风格），其求值结果须为 `Node`。
+        if input.peek(syn::token::Brace) {
+            let block: syn::ExprBlock = input.parse()?;
+            return Ok(Node::Dynamic(syn::Expr::Block(block)));
+        }
 
         // if cond { .. } else { .. }
         if input.peek(Token![if]) {
@@ -216,8 +224,11 @@ impl Parse for Node {
         // `Tag(args)`
         if input.peek(syn::token::Paren) {
             let args = parse_paren_args(input)?;
-            // 后跟 `{` → 带定位参数的容器（如 `vbox_at(1.0, 2.0) { .. }`）
-            if input.peek(syn::token::Brace) {
+            // 后跟 `{` **且是内置容器名** → 带定位参数的容器（如 `vbox_at(1.0, 2.0) { .. }`）。
+            //
+            // 限定为内置容器，避免把 `spacer(..)` 之后的 `{ expr }` 块表达式子节点
+            // 误当成该调用的容器体（`spacer(..) { list }` 的歧义）。
+            if input.peek(syn::token::Brace) && is_builtin_container(&name.to_string()) {
                 let (fields, children) = parse_element_block(input)?;
                 return Ok(Node::PositionalContainer {
                     name,
@@ -226,41 +237,36 @@ impl Parse for Node {
                     children,
                 });
             }
-            return Ok(Node::Dynamic(if args.is_empty() {
-                syn::parse_quote!(#name)
-            } else {
-                syn::parse_quote!(#name(#(#args),*))
-            }));
+            return Ok(Node::Dynamic(syn::parse_quote!(#name(#(#args),*))));
         }
 
         // `Tag { .. }`
         if input.peek(syn::token::Brace) {
             let (fields, children) = parse_element_block(input)?;
-            // 分离 let 等原始语句：只有真子节点参与 Component/Container 判定
-            let mut real_children = Vec::new();
-            let mut stmts = Vec::new();
-            for c in &children {
-                match c {
-                    Node::Raw(s) => stmts.extend(s.iter().cloned()),
-                    other => real_children.push(other),
-                }
-            }
-            // 无真子节点且有字段 → 组件（btn/label 的字段语法）；
-            // 否则 → 容器（字段是通用布局属性，可与子节点共存）
-            if real_children.is_empty() && !fields.is_empty() {
-                Ok(Node::Component {
-                    name,
-                    fields,
-                    stmts,
-                })
-            } else {
-                // 容器路径：语句保持在 children 中的原位（已按序落盘）
-                Ok(Node::Container {
+            // 内置容器（vbox/hbox/..）：字段是通用布局属性，children 是子节点。
+            if is_builtin_container(&name.to_string()) {
+                return Ok(Node::Container {
                     name,
                     fields,
                     children,
-                })
+                });
             }
+            // 其余名字按 `#[component]` 用户组件处理：分离 `let` 语句，
+            // 真子节点路由到组件的 `children` 插槽（Dioxus 风格）。
+            let mut real_children = Vec::new();
+            let mut stmts = Vec::new();
+            for c in children {
+                match c {
+                    Node::Raw(s) => stmts.extend(s),
+                    other => real_children.push(other),
+                }
+            }
+            Ok(Node::Component {
+                name,
+                fields,
+                children: real_children,
+                stmts,
+            })
         } else {
             Err(syn::Error::new(
                 name.span(),
@@ -290,9 +296,10 @@ fn parse_nodes_block(input: ParseStream) -> syn::Result<Vec<Node>> {
             raw.push(content.parse::<Stmt>()?);
             continue;
         }
-        // 节点起始：if / 字面量 / `Ident {` / `Ident (` / `Ident:`
+        // 节点起始：if / 字面量 / `Ident {` / `Ident (` / `Ident:` / `{ expr }`
         let is_node = content.peek(Token![if])
             || content.peek(LitStr)
+            || content.peek(syn::token::Brace)
             || (content.peek(Ident)
                 && (content.peek2(syn::token::Brace)
                     || content.peek2(syn::token::Paren)
@@ -486,8 +493,9 @@ fn gen_child(node: &Node) -> syn::Result<TokenStream2> {
         Node::Component {
             name,
             fields,
+            children,
             stmts,
-        } => gen_component(name, fields, stmts),
+        } => gen_component(name, fields, children, stmts),
         // 原始 Rust 语句块：求值后不产出节点
         Node::Raw(stmts) => {
             let m = mve();
@@ -696,10 +704,29 @@ struct ComponentSpec {
     opts_ty: Option<&'static str>,
 }
 
+/// 内置容器元素名（走 `fc__<name>(children)` 路径）。
+///
+/// 其余 `Name { .. }` 一律按 `#[component]` 用户组件处理（builder 调用），
+/// 这是宏在无类型信息下区分"元素/组件"的约定。
+fn is_builtin_container(name: &str) -> bool {
+    matches!(
+        name,
+        "vbox"
+            | "hbox"
+            | "vbox_gap"
+            | "hbox_gap"
+            | "vbox_at"
+            | "hbox_at"
+            | "group"
+            | "focusable"
+            | "focus_trap"
+    )
+}
+
 /// 组件名 → 规格。未注册的标签仍按旧规则（label 闭包 / 无参）生成。
 fn component_spec(name: &str) -> Option<ComponentSpec> {
     match name {
-        "btn" | "button" => Some(ComponentSpec {
+        "btn" => Some(ComponentSpec {
             required: &["label", "on_click"],
             opts_ty: None,
         }),
@@ -719,11 +746,13 @@ fn component_spec(name: &str) -> Option<ComponentSpec> {
 ///
 /// - 已注册组件（[`component_spec`]）：按规格收集必填位置参数与 opts 记录字段；
 ///   未知字段报编译错误（不再静默丢弃）。
-/// - 未注册组件：旧规则（有 `label` 则传 label 闭包，否则无参），未知字段报错。
+/// - 未注册组件（`#[component]` 用户组件）：`Name { .. }` 展开为
+///   `name(NameProps::builder()<setters>.children(..).build())`，省略字段走默认值。
 /// - `stmts` 是块内混入的 `let` 等语句，先求值再构造组件。
 fn gen_component(
     name: &Ident,
     fields: &[(Ident, Expr)],
+    children: &[Node],
     stmts: &[Stmt],
 ) -> syn::Result<TokenStream2> {
     let m = mve();
@@ -737,8 +766,8 @@ fn gen_component(
 
         for req in spec.required {
             let Some((_, expr)) = fields.iter().find(|(n, _)| n == req) else {
-                // btn/button 历史兼容：缺 label/on_click 用空闭包兜底
-                if matches!(fname.as_str(), "btn" | "button") {
+                // btn 历史兼容：缺 label/on_click 用空闭包兜底
+                if fname == "btn" {
                     positionals.push(match *req {
                         "label" => quote! { || ::std::string::String::new() },
                         "on_click" => quote! { || {} },
@@ -785,14 +814,24 @@ fn gen_component(
         }});
     }
 
-    // 未注册组件：按 `#[component]` 约定调用用户组件。
+    // 未注册组件：按 `#[component]` 约定，经 [`wy_mve::fc::__component`] 调用。
     //
-    // `#[component] fn stat_card(..)` 会生成 `struct StatCardProps` + 同名函数
-    // `fn stat_card(props: StatCardProps) -> Slot`。故 `statCard { .. }` 展开为
-    // `stat_card(StatCardProps { .. })`。字段名/类型由用户签名的 Props 决定。
-    let props_name = format_ident!("{}Props", to_pascal_case(&fname));
-    let assigns = fields.iter().map(|(n, e)| quote! { #n: #e });
-    let call = quote! { #name(#props_name { #(#assigns,)* }) };
+    // `#[component] fn badge(..)` 生成 `struct BadgeProps` + `BadgeProps::builder()`
+    // + `impl Props for BadgeProps { type Builder = BadgePropsBuilder }`
+    // + 同名函数 `fn badge(props: BadgeProps) -> Slot`。故 `badge { .. }` 展开为
+    // `__component(badge, |b| b.field(v).. .build())`——由组件函数反推 Props，
+    // **调用处无需写出/导入 `Props` 类型**（避免跨模块可见性负担）。
+    // 省略字段由 builder 填默认值，裸子节点路由到 `.children(vec![..])`。
+    let setters = fields.iter().map(|(n, e)| quote! { .#n(#e) });
+    let children_setter = if children.is_empty() {
+        quote! {}
+    } else {
+        let arr = gen_children_vec(children)?;
+        quote! { .children(#arr) }
+    };
+    let call = quote! {
+        #m::fc::__component(#name, |__b| __b #(#setters)* #children_setter .build())
+    };
 
     if stmts.is_empty() {
         return Ok(call);
@@ -920,20 +959,29 @@ impl Parse for RsxRoot {
 
 /// 把普通函数包装成可在 `rsx!` 中按 `name { field: value, .. }` 使用的组件。
 ///
-/// 生成两部分：
+/// 生成四部分（`<Name>` 为函数名的 PascalCase）：
 /// - `struct <Name>Props { .. }`：字段来自函数参数（同名同类型，`pub`）。
+/// - `struct <Name>PropsBuilder { .. }`：每个字段以 `Option<T>` 存储，提供
+///   `#[must_use]` setter；`build()` 时可选字段填默认值、必填字段缺失则 panic。
+/// - `impl wy_mve::fc::Props for <Name>Props { type Builder = <Name>PropsBuilder }`。
 /// - `fn <name>(props: <Name>Props) -> Slot`：解构 Props 后执行原函数体，
 ///   返回值经 `Into<Slot>` 转换，故原函数可返回 `Node` 或 `Slot`。
 ///
-/// `rsx!` 里写 `stat_card { title: "x", value: 1.0, children: vec![..] }`
-/// 会展开为 `stat_card(StatCardProps { title: "x", value: 1.0, children: vec![..] })`。
+/// 参数约定：
+/// - `impl Fn(..) -> ..` → `Rc<dyn Fn(..) -> ..>`（绘制期求值，可捕获信号）。
+/// - `children: Vec<Slot>`（或 `impl Children`）→ **插槽**，可选，默认空。
+///   对应 `rsx!` 里的裸子节点。
+/// - `#[props(default)]` / `#[props(default = expr)]` → 字段可选，缺省用该默认值。
+/// - `Option<T>` → 可选，缺省 `None`。
+/// - 其余具体类型 → 必填。
+///
+/// `rsx!` 里 `badge { theme: t, text: || "x".into() }` 展开为
+/// `wy_mve::fc::__component(badge, |b| b.theme(t).text(..).build())`——
+/// 由组件函数反推 Props 类型，**调用处无需写出/导入 Props 类型**；
+/// 省略字段走默认值，裸子节点路由到 `.children(vec![..])`。
 ///
 /// # 约束
-/// - 参数须有**具体类型**（不支持 `impl Trait`/泛型/生命周期）；闭包请用
-///   `Rc<dyn Fn() -> String>` 之类具体类型。
-/// - 不支持 `self`、`async`、`const`、`unsafe`、泛型。
-/// - `rsx!` 组件语法无「裸子节点」，children 需作为字段显式传入
-///   （如 `children: vec![label("x")]`）。
+/// - 不支持 `self`、`async`、`const`、`unsafe`、泛型/生命周期参数。
 ///
 /// # Examples
 ///
@@ -941,17 +989,23 @@ impl Parse for RsxRoot {
 /// use wy_mve::{component, rsx, vbox, Node, Slot};
 ///
 /// #[component]
-/// fn stat_card(title: String, value: f32, children: Vec<Slot>) -> Node {
+/// fn stat_card(
+///     title: String,
+///     #[props(default = 13.0f32)] size: f32,
+///     value: impl Fn() -> String,
+///     children: Vec<Slot>,
+/// ) -> Node {
 ///     let mut row = vbox(children);
-///     row.gap = value;
+///     row.gap = size;
 ///     row
 /// }
 ///
 /// let ui = rsx! {
 ///     stat_card {
 ///         title: "总访问".to_string(),
-///         value: 8.0,
-///         children: Vec::<Slot>::new(),
+///         value: move || count.get().to_string(),
+///         // size 省略 → 用默认 13.0；裸子节点 → children
+///         label("详情")
 ///     }
 /// };
 /// ```
@@ -997,9 +1051,22 @@ fn expand_component(item: TokenStream2) -> syn::Result<TokenStream2> {
     let name = &sig.ident;
     let props_name = format_ident!("{}Props", to_pascal_case(&name.to_string()));
 
-    // 收集参数：字段名 + 类型（拒绝 self / impl Trait / 复杂模式）。
-    let mut field_names: Vec<Ident> = Vec::new();
-    let mut field_tys: Vec<syn::Type> = Vec::new();
+    // 每个参数 → 一条字段规格（Props 字段类型 + setter 形态 + 是否可选 + 默认值）。
+    enum Setter {
+        /// setter 直接收字段类型。
+        Plain,
+        /// 闭包字段：Props 存 `Rc<dyn Bound>`，setter 泛型收 `impl Bound`。
+        Closure(syn::TypeParamBound),
+    }
+    struct FieldSpec {
+        ident: Ident,
+        prop_ty: syn::Type,
+        setter: Setter,
+        optional: bool,
+        default: TokenStream2,
+    }
+
+    let mut specs: Vec<FieldSpec> = Vec::new();
     for arg in &sig.inputs {
         let pat_ty = match arg {
             syn::FnArg::Receiver(r) => {
@@ -1019,24 +1086,137 @@ fn expand_component(item: TokenStream2) -> syn::Result<TokenStream2> {
                 ));
             }
         };
-        if matches!(&*pat_ty.ty, syn::Type::ImplTrait(_)) {
-            return Err(syn::Error::new_spanned(
-                &pat_ty.ty,
-                "#[component] 暂不支持 `impl Trait` 参数；请改用具体类型\
-                 （如 `Rc<dyn Fn() -> String>`）",
-            ));
-        }
-        field_names.push(ident);
-        field_tys.push((*pat_ty.ty).clone());
+        let is_children = ident == "children";
+        // `#[props(default)]` / `#[props(default = expr)]`
+        let props_default = parse_props_default(&pat_ty.attrs)?;
+
+        let (prop_ty, setter, auto_children) = match &*pat_ty.ty {
+            // `impl Fn(..) -> ..` → `Rc<dyn Fn(..) -> ..>`
+            syn::Type::ImplTrait(it) => {
+                let mut trait_bounds = it.bounds.iter().filter_map(|b| match b {
+                    syn::TypeParamBound::Trait(_) => Some(b.clone()),
+                    _ => None,
+                });
+                let first = trait_bounds.next().ok_or_else(|| {
+                    syn::Error::new_spanned(&pat_ty.ty, "#[component] 不支持该 `impl Trait` 参数")
+                })?;
+                let is_children_trait = matches!(&first,
+                    syn::TypeParamBound::Trait(tb) if tb.path.is_ident("Children"));
+                if is_children_trait {
+                    (
+                        syn::parse_quote!(::std::vec::Vec<#m::Slot>),
+                        Setter::Plain,
+                        true,
+                    )
+                } else {
+                    let prop_ty: syn::Type = syn::parse_quote!(::std::rc::Rc<dyn #first>);
+                    (prop_ty, Setter::Closure(first), false)
+                }
+            }
+            // `children: Vec<Slot>` → 可选插槽
+            _ if is_children => (
+                syn::parse_quote!(::std::vec::Vec<#m::Slot>),
+                Setter::Plain,
+                true,
+            ),
+            other => ((*other).clone(), Setter::Plain, false),
+        };
+
+        // children / impl Children 默认空槽；`#[props(default)]` 显式默认；`Option<T>` 自动 None。
+        let (optional, default) = if auto_children {
+            (true, quote! { ::std::vec::Vec::new() })
+        } else if let Some(d) = props_default {
+            (true, d)
+        } else if is_option_type(&pat_ty.ty) {
+            (true, quote! { ::core::option::Option::None })
+        } else {
+            (false, quote! {})
+        };
+
+        specs.push(FieldSpec {
+            ident,
+            prop_ty,
+            setter,
+            optional,
+            default,
+        });
     }
 
     let attrs = &func.attrs;
     let body = &func.block;
+    let props_pascal = to_pascal_case(&name.to_string());
+    let builder_name = format_ident!("{}Builder", props_name);
+
+    let props_fields = specs.iter().map(|s| {
+        let (n, t) = (&s.ident, &s.prop_ty);
+        quote! { pub #n: #t }
+    });
+    let builder_fields = specs.iter().map(|s| {
+        let (n, t) = (&s.ident, &s.prop_ty);
+        quote! { #n: ::core::option::Option<#t> }
+    });
+    let setters = specs.iter().map(|s| {
+        let n = &s.ident;
+        match &s.setter {
+            Setter::Plain => {
+                let t = &s.prop_ty;
+                quote! {
+                    #[must_use]
+                    pub fn #n(mut self, v: #t) -> Self {
+                        self.#n = ::core::option::Option::Some(v);
+                        self
+                    }
+                }
+            }
+            Setter::Closure(bound) => quote! {
+                #[must_use]
+                pub fn #n<__F: #bound + 'static>(mut self, v: __F) -> Self {
+                    self.#n = ::core::option::Option::Some(::std::rc::Rc::new(v));
+                    self
+                }
+            },
+        }
+    });
+    let build_fields = specs.iter().map(|s| {
+        let n = &s.ident;
+        if s.optional {
+            let d = &s.default;
+            quote! { #n: self.#n.unwrap_or(#d) }
+        } else {
+            let msg = format!("{props_pascal} 缺少必填 prop `{n}`");
+            quote! { #n: self.#n.expect(#msg) }
+        }
+    });
+    let field_names = specs.iter().map(|s| &s.ident);
 
     Ok(quote! {
         #(#attrs)*
         #vis struct #props_name {
-            #( pub #field_names: #field_tys, )*
+            #( #props_fields, )*
+        }
+
+        impl #props_name {
+            /// 创建组件 props builder（rsx! / 手动调用均可用）。
+            #[must_use]
+            pub fn builder() -> #builder_name {
+                <#builder_name as ::core::default::Default>::default()
+            }
+        }
+
+        /// `#props_name` 的 builder：可选字段缺省走默认值，必填字段缺失在 `build()` 时报错。
+        #[derive(::core::default::Default)]
+        #vis struct #builder_name {
+            #( #builder_fields, )*
+        }
+
+        impl #builder_name {
+            #( #setters )*
+
+            /// 构建 props：缺省字段用默认值，必填字段缺失则 panic（附字段名）。
+            #[must_use]
+            pub fn build(self) -> #props_name {
+                #props_name { #( #build_fields, )* }
+            }
         }
 
         #(#attrs)*
@@ -1044,5 +1224,48 @@ fn expand_component(item: TokenStream2) -> syn::Result<TokenStream2> {
             let #props_name { #(#field_names),* } = props;
             ::core::convert::Into::<#m::Slot>::into(#body)
         }
+
+        impl #m::fc::Props for #props_name {
+            type Builder = #builder_name;
+        }
     })
+}
+
+/// 解析参数上的 `#[props(default)]` / `#[props(default = expr)]`。
+///
+/// 返回 `Some(默认值表达式)`；无该属性返回 `None`。
+fn parse_props_default(attrs: &[syn::Attribute]) -> syn::Result<Option<TokenStream2>> {
+    for attr in attrs {
+        if !attr.path().is_ident("props") {
+            continue;
+        }
+        let meta = attr.parse_args::<syn::Meta>()?;
+        match meta {
+            syn::Meta::Path(p) if p.is_ident("default") => {
+                return Ok(Some(quote! { ::core::default::Default::default() }));
+            }
+            syn::Meta::NameValue(nv) if nv.path.is_ident("default") => {
+                let e = nv.value;
+                return Ok(Some(quote! { #e }));
+            }
+            other => {
+                return Err(syn::Error::new_spanned(
+                    other,
+                    "#[component] 仅支持 `#[props(default)]` / `#[props(default = expr)]`",
+                ));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// `Option<T>` 检测（用于自动可选字段）。
+fn is_option_type(ty: &syn::Type) -> bool {
+    let syn::Type::Path(tp) = ty else {
+        return false;
+    };
+    tp.path
+        .segments
+        .last()
+        .is_some_and(|seg| seg.ident == "Option")
 }

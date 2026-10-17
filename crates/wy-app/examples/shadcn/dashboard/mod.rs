@@ -72,19 +72,19 @@ pub fn dashboard(app: &App) -> Node {
 
             hbox {
                 gap: 12.0,
-                text_label(
-                    move || {
+                text_label {
+                    content: move || {
                         if theme.dark.get() {
                             String::from("深色主题")
                         } else {
                             String::from("浅色主题")
                         }
                     },
-                    20.0,
-                    theme,
-                    |t| t.foreground,
-                ),
-                badge(theme, || String::from("v0.1.0"), || 3),
+                    size: 20.0,
+                    theme: theme,
+                    color: |t| t.foreground,
+                }
+                badge { theme: theme, text: || String::from("v0.1.0"), variant: || 3 }
             }
 
             spacer(0.0, 20.0)
@@ -96,9 +96,9 @@ pub fn dashboard(app: &App) -> Node {
                     gap: 16.0,
                     hbox {
                         gap: STAT_GAP,
-                        stat_card(theme, "总访问", move || visits.get().to_string(), "+12%"),
-                        stat_card(theme, "活跃用户", move || "42".to_string(), "+4%"),
-                        stat_card(theme, "转化率", move || "7%".to_string(), "-1%"),
+                        stat_card { theme: theme, title: String::from("总访问"), value: move || visits.get().to_string(), delta: String::from("+12%") }
+                        stat_card { theme: theme, title: String::from("活跃用户"), value: move || String::from("42"), delta: String::from("+4%") }
+                        stat_card { theme: theme, title: String::from("转化率"), value: move || String::from("7%"), delta: String::from("-1%") }
                     },
                     hbox {
                         gap: 16.0,

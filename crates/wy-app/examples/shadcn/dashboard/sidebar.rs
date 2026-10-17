@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use wy_mve::{spacer, Node};
+use wy_mve::{rsx, spacer, Node, Slot};
 use wy_render::{Point, Rect, Scene};
 use wy_signal::{GetValue, SetValue};
 
@@ -16,14 +16,9 @@ const NAV: [&str; 4] = ["仪表盘", "项目", "设置", "关于"];
 
 pub(super) fn sidebar(theme: Theme, app: &App) -> Node {
     let nav = app.theme_dark;
-    let mut v: Vec<Node> = vec![
-        text_label(
-            move || String::from("▲ shadcn-mve"),
-            17.0,
-            theme,
-            |t| t.foreground,
-        ),
-        spacer(0.0, 16.0),
+    let mut v: Vec<Slot> = vec![
+        rsx! { text_label { content: move || String::from("▲ shadcn-mve"), size: 17.0, theme: theme, color: |t| t.foreground } },
+        spacer(0.0, 16.0).into(),
     ];
     for name in NAV {
         let name = name.to_string();
@@ -45,22 +40,24 @@ pub(super) fn sidebar(theme: Theme, app: &App) -> Node {
                 s.draw_text(Point::new(12.0, 9.0), &name, 14.0, t.muted_fg);
             }
         });
-        v.push(item);
+        v.push(item.into());
     }
-    v.push(spacer(0.0, 16.0));
-    // 主题按钮：文案与配色都在绘制期读信号
-    v.push(button(
-        theme,
-        move || {
-            if nav.get() {
-                String::from("切换到浅色")
-            } else {
-                String::from("切换到深色")
-            }
-        },
-        Btn::Ghost,
-        move || nav.set(!nav.get()),
-    ));
+    v.push(spacer(0.0, 16.0).into());
+    // 主题按钮：文案与配色都在绘制期读信号（组件版）
+    v.push(rsx! {
+        button {
+            theme: theme,
+            label: move || {
+                if nav.get() {
+                    String::from("切换到浅色")
+                } else {
+                    String::from("切换到深色")
+                }
+            },
+            variant: Btn::Ghost,
+            on_click: move || nav.set(!nav.get()),
+        }
+    });
     let mut n = wy_mve::vbox(v);
     n.gap = 4.0;
     n

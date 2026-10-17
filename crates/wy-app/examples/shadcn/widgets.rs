@@ -1,25 +1,27 @@
 //! 样式组件：卡片 / 徽章 / 按钮 / 文本。
 //!
-//! `Node` 无样式字段，样式全部写在 `draw_fn` 里。
-//! 颜色一律经 [`Theme::tokens`] 在**绘制期**求值——节点树只构建一次，
+//! 全部是 `#[component]` 组件：字段有**缺省值**、`children` 为**插槽**、
+//! 动态属性是**闭包**（绘制期求值）。`Node` 无样式字段，样式全部写在 `draw_fn` 里；
+//! 颜色一律经 [`Theme::tokens`] 在绘制期求值——节点树只构建一次，
 //! 主题切换靠 draw 期读信号触发局部重绘（信号模型，非瀑布重建）。
 
 use std::rc::Rc;
 
-use wy_mve::Node;
+use wy_mve::{component, Node};
 use wy_render::{Color, Point, Rect, Scene};
-use wy_signal::{GetValue, SetValue, Signal};
+use wy_signal::{GetValue, SetValue};
 
 use crate::tokens::{Theme, Tokens};
 
 /// 卡片内边距。
 pub const CARD_PAD: f32 = 16.0;
 
-/// shadcn 卡片：底色 + 边框 + 圆角 8，内含子节点（Column 排布，带内边距）。
+/// shadcn 卡片：底色 + 边框 + 圆角 8，内含 `children` 插槽（Column 排布，带内边距）。
 ///
 /// 固定尺寸走 `size_fn`——布局容器默认按子节点累加算尺寸、会忽略 `width/height`，
 /// 那样兄弟节点定位会错乱。内边距用一层偏移容器实现（内容整体下移/右移 [`CARD_PAD`]）。
-pub fn card(theme: Theme, w: f32, h: f32, children: Vec<Node>) -> Node {
+#[component]
+pub fn card(theme: Theme, w: f32, h: f32, children: Vec<Slot>) -> Node {
     let mut inner = wy_mve::vbox(children);
     inner.gap = 0.0;
     inner.x = CARD_PAD;
@@ -42,13 +44,8 @@ pub fn card(theme: Theme, w: f32, h: f32, children: Vec<Node>) -> Node {
 ///
 /// `text` / `variant` 均为**绘制期**求值的闭包（信号驱动），故徽章可随信号
 /// 动态改文案与配色，无需重建节点。
-pub fn badge(
-    theme: Theme,
-    text: impl Fn() -> String + 'static,
-    variant: impl Fn() -> u8 + 'static,
-) -> Node {
-    let text = Rc::new(text);
-    let variant = Rc::new(variant);
+#[component]
+pub fn badge(theme: Theme, text: impl Fn() -> String, variant: impl Fn() -> u8) -> Node {
     let h = 20.0;
     let mut n = wy_mve::text({
         let text = Rc::clone(&text);
@@ -65,7 +62,6 @@ pub fn badge(
     }));
     n.draw_fn = Rc::new({
         let text = Rc::clone(&text);
-        let variant = Rc::clone(&variant);
         move |scene| {
             if let Some(s) = scene.downcast_mut::<Scene>() {
                 let t = theme.tokens();
@@ -89,8 +85,9 @@ pub fn badge(
 }
 
 /// 按钮变体。
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Default)]
 pub enum Btn {
+    #[default]
     Primary,
     Secondary,
     Destructive,
@@ -99,35 +96,48 @@ pub enum Btn {
 
 /// shadcn 按钮：四变体 + hover/pressed 反馈（Signal 驱动重绘）。
 ///
-/// `label` 为闭包（绘制期求值），故文案可随信号变化（如主题切换按钮）。
+/// `label` 为闭包（绘制期求值），故文案可随信号变化；`variant` 缺省 `Primary`。
+#[component]
 pub fn button(
     theme: Theme,
-    label: impl Fn() -> String + 'static,
-    variant: Btn,
-    on_click: impl Fn() + 'static,
+    label: impl Fn() -> String,
+    #[props(default)] variant: Btn,
+    on_click: impl Fn(),
 ) -> Node {
-    button_sized(theme, label, variant, 96.0, 36.0, on_click)
+    make_button(theme, label, variant, 96.0, 36.0, on_click)
 }
 
 /// 指定尺寸的按钮（如列表内窄按钮）。
+#[component]
 pub fn button_sized(
     theme: Theme,
-    label: impl Fn() -> String + 'static,
+    label: impl Fn() -> String,
+    #[props(default)] variant: Btn,
+    w: f32,
+    h: f32,
+    on_click: impl Fn(),
+) -> Node {
+    make_button(theme, label, variant, w, h, on_click)
+}
+
+/// `button` / `button_sized` 共用的构建逻辑。
+fn make_button(
+    theme: Theme,
+    label: Rc<dyn Fn() -> String>,
     variant: Btn,
     w: f32,
     h: f32,
-    on_click: impl Fn() + 'static,
+    on_click: Rc<dyn Fn()>,
 ) -> Node {
-    let label = Rc::new(label);
-    let pressed = Signal::new(false);
-    let hover = Signal::new(false);
+    let pressed = wy_signal::Signal::new(false);
+    let hover = wy_signal::Signal::new(false);
 
     let mut n = wy_mve::button(
         {
             let label = Rc::clone(&label);
             move || label()
         },
-        on_click,
+        move || on_click(),
     );
     n.width = w;
     n.height = h;
@@ -177,14 +187,15 @@ fn shade(c: Color, f: f32) -> Color {
 
 /// shadcn 文本（自绘，可定字号/颜色）。
 ///
-/// `color` 是 token 选择器（闭包），在绘制期对当前主题求值——可捕获信号做动态配色。
+/// `content` 与 `color` 均为绘制期求值的闭包（可捕获信号做动态配色）；
+/// `size` 缺省 `13.0`。
+#[component]
 pub fn text_label(
-    content: impl Fn() -> String + 'static,
-    size: f32,
+    content: impl Fn() -> String,
+    #[props(default = 13.0f32)] size: f32,
     theme: Theme,
-    color: impl Fn(&Tokens) -> Color + 'static,
+    color: impl Fn(&Tokens) -> Color,
 ) -> Node {
-    let content = Rc::new(content);
     let mut n = wy_mve::text({
         let content = Rc::clone(&content);
         move || content()

@@ -1,4 +1,4 @@
-﻿//! FC 风格 DSL：结构化组件声明，取代「回调 + `cx`」样板。
+//! FC 风格 DSL：结构化组件声明，取代「回调 + `cx`」样板。
 //!
 //! 动机：OOC 侧的 `dom` / `forEach` 用**剩余参数**接收子节点，
 //! 组件作者写 `button(on_click, text(...))` 而不是 `button(..., |cx| cx.child(...))`。
@@ -425,6 +425,27 @@ pub fn when(
     }))
 }
 
+/// `#[component]` 生成的 Props 结构体需实现的 trait：暴露其 builder 类型。
+///
+/// 让 `rsx!` 无需在调用处写出 `Props` 类型名——经 [`__component`] 由组件函数
+/// 反推 `Props`，从而避免「必须额外 import 组件的 Props 类型」这一负担。
+pub trait Props: Sized {
+    /// 该 Props 对应的 builder 类型（`#[component]` 生成，`Default` 可建）。
+    type Builder: Default;
+}
+
+/// `rsx!` 内部使用：给定组件函数与其 builder 闭包，构造并调用组件。
+///
+/// `f` 的签名 `fn(P) -> R` 令编译器从组件函数反推出 `P`（Props），
+/// 进而确定闭包参数类型 `P::Builder`，于是调用处无需命名 `Props`。
+#[doc(hidden)]
+pub fn __component<P, R>(f: fn(P) -> R, build: impl FnOnce(P::Builder) -> P) -> R
+where
+    P: Props,
+{
+    f(build(P::Builder::default()))
+}
+
 /// 按 `render_for_each` 展开列表子节点（keyed diff）。
 ///
 /// 返回 [`ChildArg`] 而非 `Node`：动态区域（`GetNodes` slot）**直接注入父容器**。
@@ -652,6 +673,138 @@ mod tests {
         assert_eq!(node.gap(), 8.0, "组件参数 value 传入并生效");
         let kids = collect([node]);
         assert!(children_nodes(&kids[0]).is_empty(), "children 为空");
+    }
+
+    /// `#[component]` 的缺省参数与 `impl Fn` 参数（setter 泛型收闭包）。
+    #[test]
+    fn rsx_component_defaults_and_closure_param() {
+        use crate::{component, rsx};
+
+        #[component]
+        fn chip(text: impl Fn() -> String, #[props(default)] variant: u8) -> Node {
+            let _ = text;
+            let mut n = vbox(Vec::<Slot>::new());
+            n.gap = variant as f32;
+            n
+        }
+
+        // 省略 variant → 走默认值 0；text 为必填闭包。
+        let slot = rsx! {
+            chip { text: || "hi".to_string() }
+        };
+        let node = slot.into_node();
+        assert_eq!(node.gap(), 0.0, "variant 缺省为 0");
+
+        // 显式提供 variant。
+        let slot = rsx! {
+            chip { text: || "hi".to_string(), variant: 5 }
+        };
+        assert_eq!(slot.into_node().gap(), 5.0, "variant 显式传入");
+    }
+
+    /// `#[props(default = expr)]` 显式默认值。
+    #[test]
+    fn rsx_component_explicit_default() {
+        use crate::{component, rsx};
+
+        #[component]
+        fn box_gap(#[props(default = 7i32)] gap: i32) -> Node {
+            let mut n = vbox(Vec::<Slot>::new());
+            n.gap = gap as f32;
+            n
+        }
+
+        let slot = rsx! {
+            box_gap {}
+        };
+        assert_eq!(slot.into_node().gap(), 7.0, "显式默认值生效");
+    }
+
+    /// `children` 插槽：块内**裸子节点**经 `.children(vec![..])` 路由。
+    #[test]
+    fn rsx_component_children_slot_routes_bare_nodes() {
+        use crate::{component, rsx};
+
+        #[component]
+        fn wrap(children: Vec<Slot>) -> Node {
+            vbox(children)
+        }
+
+        let slot = rsx! {
+            wrap {
+                label("a")
+                label("b")
+            }
+        };
+        let node = slot.into_node();
+        let kids = collect([node]);
+        assert_eq!(
+            children_nodes(&kids[0]).len(),
+            2,
+            "子节点路由到 children 插槽"
+        );
+    }
+
+    #[test]
+    #[allow(unused_braces)]
+    fn rsx_brace_expr_child() {
+        use crate::rsx;
+
+        let inner = vbox([label(|| "a".into())]);
+        let slot = rsx! {
+            vbox {
+                { inner }
+            }
+        };
+        let node = slot.into_node();
+        let kids = collect([node]);
+        assert_eq!(
+            children_nodes(&kids[0]).len(),
+            1,
+            "`{{ expr }}` 块表达式子节点"
+        );
+    }
+
+    #[test]
+    #[allow(unused_braces)]
+    fn rsx_brace_expr_child_in_component() {
+        use crate::{component, rsx};
+
+        #[component]
+        fn wrap2(children: Vec<Slot>) -> Node {
+            vbox(children)
+        }
+
+        let inner = vbox([label(|| "a".into())]);
+        let slot = rsx! {
+            wrap2 {
+                { inner }
+            }
+        };
+        let node = slot.into_node();
+        let kids = collect([node]);
+        assert_eq!(
+            children_nodes(&kids[0]).len(),
+            1,
+            "组件内 `{{ expr }}` 子节点"
+        );
+    }
+
+    /// 缺省字段缺省、必填字段缺失 → `build()` panic（附字段名）。
+    #[test]
+    #[should_panic(expected = "缺少必填 prop")]
+    fn rsx_component_missing_required_panics() {
+        use crate::{component, rsx};
+
+        #[component]
+        fn need(x: i32) -> Node {
+            let _ = x;
+            vbox(Vec::<Slot>::new())
+        }
+
+        let _ = rsx! {
+            need {}
+        };
     }
 
     #[test]
