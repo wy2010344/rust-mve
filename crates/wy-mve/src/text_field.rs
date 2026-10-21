@@ -566,6 +566,8 @@ fn editable_handle_key(s: &mut SharedState, opts: &TextFieldOpts, event: &KeyEve
 
     let _ = opts;
     match event.key {
+        // 控制字符（含 `'\0'`，如未映射键/IME 消费键的兜底）不入正文。
+        Key::Char(ch) if ch.is_control() => false,
         Key::Char(ch) => {
             // winit 在 Shift+字母时给大写字母，直接插入即可
             s.editable.with_driver(|mut drv| {
@@ -794,6 +796,20 @@ mod tests {
         let ev = key(Key::Char('A'), false, true);
         assert!(editable_handle_key(&mut s, &default_opts(), &ev));
         assert_eq!(s.editable.text(), "A");
+    }
+
+    /// 控制字符（如 `'\0'`，来自未映射键 / Windows IME 消费键的兜底翻译）
+    /// 不得写入正文——否则会渲染成方块。
+    #[test]
+    fn control_char_is_not_inserted() {
+        let mut s = shared("ab", 14.0);
+        s.editable.with_driver(|mut drv| drv.move_to_byte(2));
+        let ev = key(Key::Char('\0'), false, false);
+        assert!(!editable_handle_key(&mut s, &default_opts(), &ev));
+        assert_eq!(s.editable.text(), "ab");
+        let ev = key(Key::Char('\t'), false, false);
+        assert!(!editable_handle_key(&mut s, &default_opts(), &ev));
+        assert_eq!(s.editable.text(), "ab");
     }
 
     #[test]

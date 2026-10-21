@@ -45,7 +45,7 @@ pub fn translate_window_event(
         winit::event::WindowEvent::KeyboardInput {
             event: key_event, ..
         } => {
-            let key = translate_key(&key_event.logical_key);
+            let key = translate_key(&key_event.logical_key)?;
             let pressed = matches!(key_event.state, winit::event::ElementState::Pressed);
             let m = translate_modifiers(modifiers);
             let e = KeyEvent::new(key, pressed).with_modifiers(
@@ -85,7 +85,7 @@ pub fn translate_key_event(
     key_event: &winit::event::KeyEvent,
     modifiers: winit::keyboard::ModifiersState,
 ) -> Option<crate::event::KeyEvent> {
-    let key = translate_key(&key_event.logical_key);
+    let key = translate_key(&key_event.logical_key)?;
     let pressed = matches!(key_event.state, winit::event::ElementState::Pressed);
     let m = translate_modifiers(&modifiers);
     Some(crate::event::KeyEvent::new(key, pressed).with_modifiers(
@@ -97,9 +97,14 @@ pub fn translate_key_event(
 }
 
 /// 将 winit `Key` 翻译为统一 `Key` 枚举。
-fn translate_key(key: &winit::keyboard::Key) -> Key {
+///
+/// 返回 `None` 表示该键不产生可插入字符，应整条忽略：
+/// - `NamedKey::Process`（Windows `VK_PROCESSKEY`）：按键已被输入法消费，
+///   不能当作字符插入（否则会插入 `'\0'` 渲染成方块）。
+/// - 其它未映射的功能键 / 多字符 `Character`（死键、组合键）等。
+fn translate_key(key: &winit::keyboard::Key) -> Option<Key> {
     use winit::keyboard::{Key as WKey, NamedKey};
-    match key {
+    Some(match key {
         WKey::Named(NamedKey::Tab) => Key::Tab,
         WKey::Named(NamedKey::Enter) => Key::Enter,
         WKey::Named(NamedKey::Escape) => Key::Escape,
@@ -115,20 +120,46 @@ fn translate_key(key: &winit::keyboard::Key) -> Key {
         WKey::Named(NamedKey::PageUp) => Key::PageUp,
         WKey::Named(NamedKey::PageDown) => Key::PageDown,
         WKey::Character(c) => {
-            let s = c.as_ref();
-            if s.len() == 1 {
-                Key::Char(s.chars().next().unwrap())
-            } else {
-                Key::Char('\0')
+            let mut chars = c.as_ref().chars();
+            match (chars.next(), chars.next()) {
+                (Some(ch), None) => Key::Char(ch),
+                _ => return None,
             }
         }
-        _ => Key::Char('\0'),
-    }
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 测试辅助：期望按键被翻译为某个统一键码。
+    fn tk(key: &winit::keyboard::Key) -> Key {
+        translate_key(key).expect("key should be translated")
+    }
+
+    /// Windows IME 消费按键时 winit 上报 `Named(Process)`（`VK_PROCESSKEY`）：
+    /// 必须翻译为 `None`，否则会被当作 `'\0'` 插入正文，渲染成方块。
+    #[test]
+    fn translate_key_process_is_none() {
+        let key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::Process);
+        assert_eq!(translate_key(&key), None);
+    }
+
+    /// 未映射的功能键同样不产生字符。
+    #[test]
+    fn translate_key_unmapped_is_none() {
+        let key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::F1);
+        assert_eq!(translate_key(&key), None);
+    }
+
+    /// 多字符 `Character`（死键/组合串）不产生单个字符。
+    #[test]
+    fn translate_key_multichar_is_none() {
+        let key = winit::keyboard::Key::Character("ab".into());
+        assert_eq!(translate_key(&key), None);
+    }
 
     #[test]
     fn translate_modifiers_none() {
@@ -149,13 +180,13 @@ mod tests {
     #[test]
     fn translate_key_enter() {
         let key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter);
-        assert_eq!(translate_key(&key), Key::Enter);
+        assert_eq!(tk(&key), Key::Enter);
     }
 
     #[test]
     fn translate_key_char() {
         let key = winit::keyboard::Key::Character("a".into());
-        assert_eq!(translate_key(&key), Key::Char('a'));
+        assert_eq!(tk(&key), Key::Char('a'));
     }
 
     #[test]
@@ -201,13 +232,13 @@ mod tests {
     #[test]
     fn translate_key_backspace() {
         let key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::Backspace);
-        assert_eq!(translate_key(&key), Key::Backspace);
+        assert_eq!(tk(&key), Key::Backspace);
     }
 
     #[test]
     fn translate_key_escape() {
         let key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape);
-        assert_eq!(translate_key(&key), Key::Escape);
+        assert_eq!(tk(&key), Key::Escape);
     }
 
     // ===== 对齐 Kotlin Engine 更多按键翻译 =====
@@ -215,67 +246,67 @@ mod tests {
     #[test]
     fn translate_key_tab() {
         let key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::Tab);
-        assert_eq!(translate_key(&key), Key::Tab);
+        assert_eq!(tk(&key), Key::Tab);
     }
 
     #[test]
     fn translate_key_delete() {
         let key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::Delete);
-        assert_eq!(translate_key(&key), Key::Delete);
+        assert_eq!(tk(&key), Key::Delete);
     }
 
     #[test]
     fn translate_key_arrow_up() {
         let key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowUp);
-        assert_eq!(translate_key(&key), Key::ArrowUp);
+        assert_eq!(tk(&key), Key::ArrowUp);
     }
 
     #[test]
     fn translate_key_arrow_down() {
         let key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowDown);
-        assert_eq!(translate_key(&key), Key::ArrowDown);
+        assert_eq!(tk(&key), Key::ArrowDown);
     }
 
     #[test]
     fn translate_key_arrow_left() {
         let key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowLeft);
-        assert_eq!(translate_key(&key), Key::ArrowLeft);
+        assert_eq!(tk(&key), Key::ArrowLeft);
     }
 
     #[test]
     fn translate_key_arrow_right() {
         let key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowRight);
-        assert_eq!(translate_key(&key), Key::ArrowRight);
+        assert_eq!(tk(&key), Key::ArrowRight);
     }
 
     #[test]
     fn translate_key_home() {
         let key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::Home);
-        assert_eq!(translate_key(&key), Key::Home);
+        assert_eq!(tk(&key), Key::Home);
     }
 
     #[test]
     fn translate_key_end() {
         let key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::End);
-        assert_eq!(translate_key(&key), Key::End);
+        assert_eq!(tk(&key), Key::End);
     }
 
     #[test]
     fn translate_key_page_up() {
         let key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::PageUp);
-        assert_eq!(translate_key(&key), Key::PageUp);
+        assert_eq!(tk(&key), Key::PageUp);
     }
 
     #[test]
     fn translate_key_page_down() {
         let key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::PageDown);
-        assert_eq!(translate_key(&key), Key::PageDown);
+        assert_eq!(tk(&key), Key::PageDown);
     }
 
     #[test]
     fn translate_key_space() {
         let key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::Space);
-        assert_eq!(translate_key(&key), Key::Char(' '));
+        assert_eq!(tk(&key), Key::Char(' '));
     }
 
     #[test]

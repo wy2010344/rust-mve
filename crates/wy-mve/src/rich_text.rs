@@ -673,6 +673,8 @@ fn editable_handle_key(core: &mut EditCore, event: &KeyEvent) -> bool {
     }
 
     match event.key {
+        // 控制字符（含 `'\0'`，如未映射键/IME 消费键的兜底）不入正文。
+        Key::Char(ch) if ch.is_control() => false,
         Key::Char(ch) => {
             core.insert_text(&ch.to_string());
             true
