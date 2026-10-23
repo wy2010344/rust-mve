@@ -222,22 +222,24 @@ fn normal_layout(full: Signal<bool>) -> Node {
 
     // 行级实测尺寸写进 row_probe，供分割条换算（原 `with_probe` 已内联为 hbox 自身
     // 的 `draw:`，不额外增加节点层级，树结构与改写前一致）
-    let body = fill(rsx! {
-        hbox {
-            gap: 0.0,
-            align_items: AlignItem::Stretch,
-            draw: move |_s: &mut Scene| {
-                let b = wy_mve::current_box();
-                row_probe.set((b.width, b.height));
-            },
-            { left }
-            { g1 }
-            { center }
-            { g2 }
-            { right }
+    let body = fill(
+        rsx! {
+            hbox {
+                gap: 0.0,
+                align_items: AlignItem::Stretch,
+                draw: move |_s: &mut Scene| {
+                    let b = wy_mve::current_box();
+                    row_probe.set((b.width, b.height));
+                },
+                { left }
+                { g1 }
+                { center }
+                { g2 }
+                { right }
+            }
         }
-    }
-    .into_node());
+        .into_node(),
+    );
 
     // ---- 顶栏 ----
     let bar = rsx! {
