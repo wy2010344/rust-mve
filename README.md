@@ -147,6 +147,7 @@ cargo run -p wy-app --example counter
 | | |
 |---|---|
 | [DESIGN.md](DESIGN.md) | **取舍记录**——为什么这样而不那样（面试官更想看这个） |
+| [docs/node-layer-gaps.md](docs/node-layer-gaps.md) | Node 层与 Kotlin 上游的复刻偏差及补齐方案 |
 | [docs/02-组件写法范式.md](docs/02-组件写法范式.md) | 组件写法与常见坑 |
 | [docs/01-ooc与rust-mve写法对照.md](docs/01-ooc与rust-mve写法对照.md) | 两种声明式写法的对照 |
 | [docs/00-Rust-UI框架调研报告.md](docs/00-Rust-UI框架调研报告.md) | 生态调研 |
