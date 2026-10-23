@@ -220,7 +220,12 @@ pub fn panel_with(
         hbox {
             gap: 6.0,
             height: HEADER_H,
-            padding: 12.0,
+            // 四向内边距：左右 12（对齐行文 PAD）、上下 0。
+            // 旧写法 `padding: 12.0` 是四向同值——20 高的标题栏内区被压成
+            // 0（20-24<0），文字靠 Center 的负偏移"碰巧"落进栏内；
+            // 现在内区高就是 HEADER_H，文字真正居中。
+            pad_x: PAD,
+            pad_y: 0.0,
             align_items: AlignItem::Center,
             skip_draw: true,
             ..header_items
