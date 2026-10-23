@@ -1498,8 +1498,9 @@ mod tests {
                 move || s1.get(),
                 move |t| s2.set(t),
             )]);
-            inner.x = 16.0;
-            inner.y = 16.0;
+            // 显式定位用 x_fn/y_fn（P1-4：判据是 fn 存在性，不是静态值非 0）
+            inner.x_fn = Some(Rc::new(|| 16.0));
+            inner.y_fn = Some(Rc::new(|| 16.0));
             let mut card = wy_mve::vbox(vec![inner]);
             card.size_fn = Some(Rc::new(|| (300.0, 100.0)));
             cx.child(wy_mve::vbox_at(24.0, 24.0, vec![card]));

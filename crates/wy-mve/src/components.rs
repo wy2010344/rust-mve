@@ -154,11 +154,13 @@ pub fn row(children: impl Fn(&mut NodeContext) + 'static) -> Node {
 /// 水平排列容器（带绝对位置）。
 pub fn row_at(x: f32, y: f32, children: impl Fn(&mut NodeContext) + 'static) -> Node {
     Node {
-        x,
-        y,
         layout: Some(Layout::Row),
         arg_children_fn: Rc::new(move |cx| children(cx)),
         gap: 8.0,
+        // 显式定位用 x_fn/y_fn（常量闭包）：静态 x/y 是"简写"，
+        // 不触发显式定位判据（对齐 Kotlin Position 对象的存在性语义）
+        x_fn: Some(Rc::new(move || x)),
+        y_fn: Some(Rc::new(move || y)),
         ..Node::default()
     }
 }
@@ -176,11 +178,13 @@ pub fn column(children: impl Fn(&mut NodeContext) + 'static) -> Node {
 /// 垂直排列容器（带绝对位置）。
 pub fn column_at(x: f32, y: f32, children: impl Fn(&mut NodeContext) + 'static) -> Node {
     Node {
-        x,
-        y,
         layout: Some(Layout::Column),
         arg_children_fn: Rc::new(move |cx| children(cx)),
         gap: 8.0,
+        // 显式定位用 x_fn/y_fn（常量闭包）：静态 x/y 是"简写"，
+        // 不触发显式定位判据（对齐 Kotlin Position 对象的存在性语义）
+        x_fn: Some(Rc::new(move || x)),
+        y_fn: Some(Rc::new(move || y)),
         ..Node::default()
     }
 }

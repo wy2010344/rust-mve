@@ -537,9 +537,10 @@ fn align_center_is_default_and_explicit_position_wins() {
     let boxes = layout_boxes(&row, (200.0, 100.0), &[a]);
     assert_eq!(boxes[0].y, 40.0);
 
-    // 有显式 y：自己定位，不参与自动对齐
+    // 有显式 y_fn：自己定位，不参与自动对齐
+    // （判据是 fn 存在性，不是静态值非 0——见 P1-4）
     let mut b = fixed(50.0, 20.0);
-    b.y = 5.0;
+    b.y_fn = Some(Rc::new(|| 5.0));
     let row = crate::hbox_gap(0.0, vec![b.clone()]);
     let boxes = layout_boxes(&row, (200.0, 100.0), &[b]);
     assert_eq!(boxes[0].y, 0.0);

@@ -1179,11 +1179,14 @@ pub fn layout_boxes(node: &Node, avail: (f32, f32), children: &[Node]) -> Vec<La
             }
         };
 
-        // 交叉轴：对齐策略。显式声明了交叉轴位置（`x`/`y` 或对应动态属性）的节点
-        // 由自己定位，不参与自动对齐——对应 Kotlin 里 `argPosition` 覆盖 `align` 的行为。
+        // 交叉轴：对齐策略。**显式定位过交叉轴位置**的节点由自己定位，不参与
+        // 自动对齐——对应 Kotlin 里 `argPosition`（Position 对象）覆盖 `align`
+        // 的行为。判据是「x_fn/y_fn **存在**」（Option 即显式），不是「值非 0」：
+        // 静态 `x: 0.0` 的显式贴齐与「不定位」由此可区分（对齐 Kotlin Position
+        // 对象的存在性语义）。静态 `x`/`y` 字段降级为简写。
         let explicit_cross = match layout {
-            Layout::Row => child.y_fn.is_some() || child.y != 0.0,
-            Layout::Column => child.x_fn.is_some() || child.x != 0.0,
+            Layout::Row => child.y_fn.is_some(),
+            Layout::Column => child.x_fn.is_some(),
         };
         let align = child.align_self.unwrap_or(node.align_items);
         let (cross_len, cross_pos) = if explicit_cross {
@@ -1476,6 +1479,60 @@ mod tests {
         };
         assert_eq!(n.effective_width(), 220.0, "外包宽 = 200 + 10×2");
         assert_eq!(n.effective_height(), 60.0, "上下无 padding，外包高即内容高");
+    }
+
+    #[test]
+    fn explicit_position_judged_by_fn_presence_not_value() {
+        // P1-4：交叉轴显式定位判据 = x_fn/y_fn **存在**（对齐 Kotlin
+        // Position 对象的存在性语义）。`x_fn: Some(|| 0.0)` 是显式贴齐 0，
+        // 与「不定位」可区分；静态 `x: 0.0` 不触发显式定位。
+        let child = Node {
+            width: 50.0,
+            height: 20.0,
+            // 显式贴齐交叉轴 0（Row 的交叉轴是 y）
+            y_fn: Some(Rc::new(|| 0.0)),
+            ..Node::default()
+        };
+        let row = Node {
+            layout: Some(Layout::Row),
+            width: 200.0,
+            height: 100.0,
+            align_items: AlignItem::Center,
+            arg_children_fn: Rc::new(move |cx| {
+                cx.add_node(child.clone());
+            }),
+            ..Node::default()
+        };
+        let children = children_nodes(&row);
+        let boxes = layout_boxes(&row, (200.0, 100.0), &children);
+        // 显式定位：y = 0（贴顶），不居中；宽用自然尺寸（不 stretch）
+        assert_eq!(boxes[0].y, 0.0, "y_fn 存在 = 显式定位，贴齐 0");
+        assert_eq!(boxes[0].width, 50.0, "显式定位不参与 Stretch");
+    }
+
+    #[test]
+    fn static_zero_position_does_not_count_as_explicit() {
+        // 静态 x/y（含 0）不触发显式定位——「不定位」与「贴齐 0」由
+        // x_fn/y_fn 的存在性区分（本项 P1-4 的核心语义）。
+        let child = Node {
+            width: 50.0,
+            height: 20.0,
+            ..Node::default()
+        };
+        let row = Node {
+            layout: Some(Layout::Row),
+            width: 200.0,
+            height: 100.0,
+            align_items: AlignItem::Center,
+            arg_children_fn: Rc::new(move |cx| {
+                cx.add_node(child.clone());
+            }),
+            ..Node::default()
+        };
+        let children = children_nodes(&row);
+        let boxes = layout_boxes(&row, (200.0, 100.0), &children);
+        // 无显式定位：Center 居中 → y = (100-20)/2 = 40
+        assert_eq!(boxes[0].y, 40.0, "静态 0 不触发显式定位，仍走自动对齐");
     }
 
     #[test]
