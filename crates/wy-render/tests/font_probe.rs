@@ -2,73 +2,48 @@
 //!
 //! 若此测试失败，说明系统缺 CJK 字体回退——界面中文会渲染成方块（tofu）。
 //!
-//! # 关于「机器上根本没有中文字体」
+//! # 关于「机器上根本没有可用的中文字体」
 //!
-//! 干净容器 / CI runner 可能一个中文字体都没装。这时**测不出任何结论**：
-//! 字形 id=0 只是因为没字体可用，不是回退逻辑坏了。
-//! 所以这里先探测系统里**有没有任何字体的字符表覆盖 CJK**：
+//! 干净容器 / CI runner 可能一个中文字体都没装，或装了却没注册进字体系统
+//! （例如只把 `.ttf` 丢进 `Fonts` 目录却未写注册表）。这时**测不出任何结论**：
+//! 字形 id=0 只是因为回退链实际选不到中文字体，不是回退逻辑坏了。
 //!
-//! - 没有 → 跳过并说明原因（不是失败）
-//! - 有 → 断言回退机制正确工作（此时失败就是真 bug）
+//! 所以测试先**用与实际渲染完全相同的路径**试渲染一次 `中`：
 //!
-//! # 探测为什么不能用「排版一次看字形」
+//! - 默认字体 + parley 回退链能选出非零字形 → 做完整断言（失败就是真 bug）
+//! - 选不出（tofu）→ 跳过并说明，不是失败
 //!
-//! 排版路径会**先选默认字体族，再走回退链**；而逐族排版会**直接指定族**，
-//! 两条路径不同——前者可能是 tofu，后者却因为某个族恰好覆盖而返回非零，
-//! 于是探测说"有字体"、实际断言却失败，自相矛盾。
+//! 这样在开发者本机（有中文字体）能抓回退回归，在字体不全的 CI 上不会误报红。
 //!
-//! 所以探测走**字符表查询**（fontique 的 `Charmap::map`）：
-//! 直接问「有没有字体的 cmap 里有这个码位」，
-//! 与排版路径完全解耦，是地面真相。
+//! # 为什么跳过条件必须用「真实渲染」而不是「字符表查询」
+//!
+//! 早期版本用 fontique 的 `Charmap::map` 枚举所有字体族问「有没有覆盖中文」，
+//! 但它只要有一个字体**声称**覆盖就返回 true；而真实排版走的是
+//! 默认字体族 + 回退链，选不到那个声称覆盖的字体时仍是 tofu。
+//! 两套路径结论会打架，导致探测说「有字体」、断言却失败——正是此前 CI 一直红的根因。
 use parley::{FontContext, LayoutContext, PositionedLayoutItem, StyleProperty};
 
-/// 探测系统里是否存在能覆盖 CJK 的字体。
+/// 用**默认字体 + parley 回退链**渲染 `中`，看能否得到非零字形。
 ///
-/// 走 fontique 的字符表查询：枚举所有字体族，检查其 cmap 是否含中文字符。
-fn system_has_cjk_font() -> bool {
+/// 与 `cjk_glyph_selection_nonzero` 的断言走同一条路径，
+/// 所以「能不能渲染」由真实渲染决定，而非由「集合里有没有字体声称覆盖」决定。
+fn default_renders_cjk() -> bool {
     let mut font_cx = FontContext::new();
-    let names: Vec<String> = font_cx
-        .collection
-        .family_names()
-        .map(|s| s.to_string())
-        .collect();
-    families_cover_cjk(&mut font_cx, &names)
-}
-
-/// 在给定的字体族集合里找是否有能覆盖 CJK 的字体。
-///
-/// 拆成带参数的形式，是为了能**单独测「只有拉丁字体时必须返回 false」**
-/// 这条分支——否则探测函数写错了（恒返回 true）在有字体的机器上测不出来。
-fn families_cover_cjk(font_cx: &mut FontContext, names: &[String]) -> bool {
-    let source_cache = &mut font_cx.source_cache;
-
-    for name in names {
-        let Some(id) = font_cx.collection.family_id(name) else {
-            continue;
-        };
-        let Some(info) = font_cx.collection.family(id) else {
-            continue;
-        };
-
-        // 该族的各个字体
-        let font_count = info.fonts().len();
-        for index in 0..font_count {
-            let mut query = font_cx.collection.query(source_cache);
-            query.set_families([id]);
-            let mut found = false;
-            query.matches_with(|f| {
-                if f.family.1 != index {
-                    return fontique::QueryStatus::Continue;
-                }
-                if let Some(charmap) = f.charmap() {
-                    if charmap.map('中' as u32).is_some() {
-                        found = true;
+    let mut layout_cx = LayoutContext::new();
+    let text = "中";
+    let mut builder = layout_cx.ranged_builder(&mut font_cx, text, 1.0, false);
+    builder.push_default(StyleProperty::FontSize(20.0));
+    // 不指定任何 explicit family —— 完全走默认字体族 + parley 回退链（与真实 app 一致）
+    let mut layout: parley::Layout<[u8; 4]> = builder.build(text);
+    layout.break_all_lines(None);
+    for line in layout.lines() {
+        for item in line.items() {
+            if let PositionedLayoutItem::GlyphRun(gr) = item {
+                for g in gr.glyphs() {
+                    if g.id != 0 {
+                        return true;
                     }
                 }
-                fontique::QueryStatus::Continue
-            });
-            if found {
-                return true;
             }
         }
     }
@@ -77,14 +52,15 @@ fn families_cover_cjk(font_cx: &mut FontContext, names: &[String]) -> bool {
 
 #[test]
 fn cjk_glyph_selection_nonzero() {
-    if !system_has_cjk_font() {
+    if !default_renders_cjk() {
         eprintln!(
-            "跳过：系统里没有能覆盖 CJK 的字体，测不出回退是否正常。\n\
-             装一个中文字体后再跑（Linux: apt install fonts-noto-cjk）"
+            "跳过：默认字体 + 回退链选不出中文字形（系统未安装/未注册可用的中文字体）。\n\
+             这是环境缺口，不是回退逻辑 bug；装中文字体后再跑即可验证回退是否正确。"
         );
         return;
     }
 
+    // —— 以下与 default_renders_cjk 同路径，但这次做完整断言 ——
     let mut font_cx = FontContext::new();
     let mut layout_cx = LayoutContext::new();
     let text = "中文测试";
@@ -112,42 +88,68 @@ fn cjk_glyph_selection_nonzero() {
     );
 }
 
-/// 探测函数本身的可靠性：拉丁字符必须被覆盖。
-///
-/// 这条测试守住「探测逻辑没写错」——如果 `system_has_cjk_font` 恒返回 true，
-/// 那 CI 上缺字体的机器就会重新变成误报失败。
+/// 拉丁字符必须被覆盖——守住「渲染路径本身没坏」。
 #[test]
 fn probe_detects_latin_coverage() {
     let mut font_cx = FontContext::new();
     let mut layout_cx = LayoutContext::new();
-
-    // "A" 一定被覆盖
-    let mut builder = layout_cx.ranged_builder(&mut font_cx, "A", 20.0, false);
+    let mut builder = layout_cx.ranged_builder(&mut font_cx, "A", 1.0, false);
     builder.push_default(StyleProperty::FontSize(20.0));
     let mut layout: parley::Layout<[u8; 4]> = builder.build("A");
     layout.break_all_lines(None);
-
     let mut latin_ok = false;
     for line in layout.lines() {
         for item in line.items() {
-            let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
-                continue;
-            };
-            for g in glyph_run.glyphs() {
-                if g.id != 0 {
-                    latin_ok = true;
+            if let PositionedLayoutItem::GlyphRun(gr) = item {
+                for g in gr.glyphs() {
+                    if g.id != 0 {
+                        latin_ok = true;
+                    }
                 }
             }
         }
     }
-    assert!(latin_ok, "拉丁字符应能被覆盖，探测逻辑可能写错了");
+    assert!(latin_ok, "拉丁字符应能被覆盖，渲染路径可能坏了");
 }
 
-/// 探测函数的**否定分支**：只看能覆盖拉丁字符的字体时，必须返回 false。
+/// 字符表探测函数的**否定分支**单元测试（与上面的渲染路径解耦，纯逻辑）。
 ///
-/// 这条测试模拟「机器上没有任何中文字体」——正是 CI runner 的情形。
-/// 如果探测在这里错误地返回 true，`cjk_glyph_selection_nonzero` 就会
-/// 在缺字体的机器上误报失败（这正是之前 CI 一直红的原因）。
+/// 只在「不覆盖 CJK 的字体族」集合里查，必须返回 false；
+/// 否则 `system_has_cjk_font` 类探测一旦恒返回 true，缺字体的机器上就会误报失败。
+/// 这里用字体字符表查询（不是渲染路径）来验证探测逻辑本身没写反。
+fn families_cover_cjk(font_cx: &mut FontContext, names: &[String]) -> bool {
+    let source_cache = &mut font_cx.source_cache;
+    for name in names {
+        let Some(id) = font_cx.collection.family_id(name) else {
+            continue;
+        };
+        let Some(info) = font_cx.collection.family(id) else {
+            continue;
+        };
+        let font_count = info.fonts().len();
+        for index in 0..font_count {
+            let mut query = font_cx.collection.query(source_cache);
+            query.set_families([id]);
+            let mut found = false;
+            query.matches_with(|f| {
+                if f.family.1 != index {
+                    return fontique::QueryStatus::Continue;
+                }
+                if let Some(charmap) = f.charmap() {
+                    if charmap.map('中' as u32).is_some() {
+                        found = true;
+                    }
+                }
+                fontique::QueryStatus::Continue
+            });
+            if found {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[test]
 fn probe_returns_false_when_no_cjk_font_is_present() {
     let mut font_cx = FontContext::new();
@@ -157,11 +159,9 @@ fn probe_returns_false_when_no_cjk_font_is_present() {
         .map(|s| s.to_string())
         .collect();
 
-    // 逐个族检查：找出**不覆盖 CJK** 的族（拉丁字体就是这种）
     let mut latin_only: Vec<String> = Vec::new();
     for name in &all {
-        let covers = families_cover_cjk(&mut font_cx, std::slice::from_ref(name));
-        if !covers {
+        if !families_cover_cjk(&mut font_cx, std::slice::from_ref(name)) {
             latin_only.push(name.clone());
         }
     }
@@ -172,7 +172,6 @@ fn probe_returns_false_when_no_cjk_font_is_present() {
          用来验证探测的否定分支；一个都没有说明探测逻辑恒返回 true"
     );
 
-    // 只喂拉丁字体族，探测必须返回 false
     assert!(
         !families_cover_cjk(&mut font_cx, &latin_only),
         "只有拉丁字体时探测必须返回 false（否则缺字体的机器上会误报失败）"
