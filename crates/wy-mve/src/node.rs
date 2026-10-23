@@ -140,6 +140,13 @@ pub struct Node {
     pub gap: f32,
     /// 内边距（统一，后续可扩展为四方向）。
     pub padding: f32,
+    /// 内边距-横向覆写（对齐 Kotlin 四向 `argPadding(direction, startEnd)`）。
+    ///
+    /// `None` = 用 `padding` 简写值；`Some(v)` = 左右都用 `v`。
+    /// 生效规则：`padding` 四向同值是底，`pad_x`/`pad_y` 覆写对应方向。
+    pub pad_x: Option<f32>,
+    /// 内边距-纵向覆写。`None` = 用 `padding`；`Some(v)` = 上下都用 `v`。
+    pub pad_y: Option<f32>,
     /// Flex grow（子节点在主轴上的伸展权重）。
     pub grow: f32,
     /// 交叉轴对齐（子节点自身对齐）。
@@ -245,6 +252,8 @@ impl Clone for Node {
             height: self.height,
             gap: self.gap,
             padding: self.padding,
+            pad_x: self.pad_x,
+            pad_y: self.pad_y,
             grow: self.grow,
             align_self: self.align_self,
             justify: self.justify,
@@ -328,6 +337,8 @@ impl Default for Node {
             // 需要间距的简写组件（row/column）在各自定义里显式设 8.0。
             gap: 0.0,
             padding: 0.0,
+            pad_x: None,
+            pad_y: None,
             grow: 0.0,
             align_self: None,
             justify: DirectionJustify::Grow,
@@ -468,6 +479,16 @@ impl Node {
         } else {
             self.gap
         }
+    }
+
+    /// 横向内边距生效值（`pad_x` 覆写 `padding`；复刻 Kotlin 四向 padding）。
+    pub fn pad_x_eff(&self) -> f32 {
+        self.pad_x.unwrap_or(self.padding).max(0.0)
+    }
+
+    /// 纵向内边距生效值（`pad_y` 覆写 `padding`）。
+    pub fn pad_y_eff(&self) -> f32 {
+        self.pad_y.unwrap_or(self.padding).max(0.0)
     }
 
     /// 伸展权重（动态 `grow_fn` 优先，回落静态 `grow`）。
@@ -769,7 +790,7 @@ pub fn node_size(node: &Node) -> (f32, f32) {
 /// 不取"非对齐子节点的最大尺寸"。主轴（内容顺排方向）不受影响。
 fn natural_size_of(layout: Layout, node: &Node) -> (f32, f32) {
     let gap = node.gap();
-    let pad = node.padding.max(0.0);
+    let (pad_x, pad_y) = (node.pad_x_eff(), node.pad_y_eff());
     let children = children_nodes(node);
     let mut main = 0.0f32;
     let mut cross = 0.0f32;
@@ -803,8 +824,8 @@ fn natural_size_of(layout: Layout, node: &Node) -> (f32, f32) {
     // 因内容高度不同而出现高度不齐、视觉间隔不均。这里补全 padding，让嵌套容器
     // 的尺寸语义与 `layout_boxes`（父分配时先扣自身 padding 再给子节点）一致。
     match layout {
-        Layout::Row => (main + pad * 2.0, cross + pad * 2.0),
-        Layout::Column => (cross + pad * 2.0, main + pad * 2.0),
+        Layout::Row => (main + pad_x * 2.0, cross + pad_y * 2.0),
+        Layout::Column => (cross + pad_x * 2.0, main + pad_y * 2.0),
     }
 }
 
@@ -916,10 +937,10 @@ pub fn layout_boxes(node: &Node, avail: (f32, f32), children: &[Node]) -> Vec<La
     if children.is_empty() {
         return Vec::new();
     }
-    let pad = node.padding.max(0.0);
+    let (pad_x, pad_y) = (node.pad_x_eff(), node.pad_y_eff());
     let gap = node.gap();
-    let inner_w = (avail.0 - pad * 2.0).max(0.0);
-    let inner_h = (avail.1 - pad * 2.0).max(0.0);
+    let inner_w = (avail.0 - pad_x * 2.0).max(0.0);
+    let inner_h = (avail.1 - pad_y * 2.0).max(0.0);
     let (main_avail, cross_avail) = match layout {
         Layout::Row => (inner_w, inner_h),
         Layout::Column => (inner_h, inner_w),
@@ -1041,8 +1062,8 @@ pub fn layout_boxes(node: &Node, avail: (f32, f32), children: &[Node]) -> Vec<La
         };
 
         out.push(match layout {
-            Layout::Row => LayoutBox::new(pad + main_pos, pad + cross_pos, main_len, cross_len),
-            Layout::Column => LayoutBox::new(pad + cross_pos, pad + main_pos, cross_len, main_len),
+            Layout::Row => LayoutBox::new(pad_x + main_pos, pad_y + cross_pos, main_len, cross_len),
+            Layout::Column => LayoutBox::new(pad_x + cross_pos, pad_y + main_pos, cross_len, main_len),
         });
     }
     out
@@ -1213,6 +1234,58 @@ mod tests {
         let boxes = layout_boxes(&col, (200.0, 100.0), &children);
         assert_eq!(boxes.len(), 1);
         assert_eq!(boxes[0].width, 200.0, "Stretch 子节点交叉轴拿父分配内区");
+    }
+
+    #[test]
+    fn pad_xy_overrides_padding_shorthand() {
+        // 复刻 Kotlin 四向 padding：`padding` 是同值简写（底），
+        // `pad_x`/`pad_y` 覆写对应方向。
+        let n = Node {
+            padding: 10.0,
+            ..Node::default()
+        };
+        assert_eq!((n.pad_x_eff(), n.pad_y_eff()), (10.0, 10.0));
+        let n = Node {
+            padding: 10.0,
+            pad_x: Some(4.0),
+            ..Node::default()
+        };
+        assert_eq!((n.pad_x_eff(), n.pad_y_eff()), (4.0, 10.0), "pad_x 覆写、pad_y 回落简写");
+        let n = Node {
+            padding: 10.0,
+            pad_y: Some(0.0),
+            ..Node::default()
+        };
+        assert_eq!((n.pad_x_eff(), n.pad_y_eff()), (10.0, 0.0), "pad_y: 0 是显式覆写而非缺省");
+    }
+
+    #[test]
+    fn pad_xy_splits_inner_area() {
+        // 布局内区按方向分别扣：左右 4 / 上下 0（"左右 12、上下 0"的诉求）
+        let child = Node {
+            width: 10.0,
+            height: 10.0,
+            ..Node::default()
+        };
+        let col = Node {
+            layout: Some(Layout::Column),
+            padding: 12.0,
+            pad_y: Some(0.0),
+            align_items: AlignItem::Stretch,
+            arg_children_fn: Rc::new(move |cx| {
+                cx.add_node(child.clone());
+            }),
+            ..Node::default()
+        };
+        let children = children_nodes(&col);
+        let boxes = layout_boxes(&col, (100.0, 40.0), &children);
+        // 内区 = 100 - 2*12 = 76 宽；高不扣（pad_y=0）。
+        // 注意 Column 的主轴是 Y：Stretch 只拉伸交叉轴（宽），
+        // 主轴高度仍是 flex 自然尺寸（10）——不因 align 改变。
+        assert_eq!(boxes[0].width, 76.0, "左右各扣 12，交叉轴 stretch 到内区");
+        assert_eq!(boxes[0].height, 10.0, "主轴高度是 flex 自然尺寸，不吃满");
+        assert_eq!(boxes[0].x, 12.0, "偏移加回左 padding");
+        assert_eq!(boxes[0].y, 0.0, "偏移不加回纵向 padding");
     }
 
     #[test]

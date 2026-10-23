@@ -684,6 +684,9 @@ fn gen_attr_assign(fname: &Ident, value: &Expr) -> Option<TokenStream2> {
         // 写成静态值的话拖动永远看不出变化。
         "grow" => Some(num_attr(quote! { grow }, quote! { grow_fn }, value)),
         "padding" => Some(quote! { __n.padding = #value; }),
+        // 四向内边距覆写（对齐 Kotlin 四向 argPadding）：None = 用 padding 简写
+        "pad_x" => Some(quote! { __n.pad_x = ::core::option::Option::Some(#value); }),
+        "pad_y" => Some(quote! { __n.pad_y = ::core::option::Option::Some(#value); }),
         "justify" => Some(quote! { __n.justify = #value; }),
         "align_items" => Some(quote! { __n.align_items = #value; }),
         "align_self" => Some(quote! { __n.align_self = ::core::option::Option::Some(#value); }),
@@ -857,6 +860,8 @@ fn layout_field(fname: &str) -> Option<(&'static str, Option<&'static str>)> {
         "grow" => ("grow", Some("grow_fn")),
         "hide" => ("hidden", Some("hide_fn")),
         "padding" => ("padding", None),
+        "pad_x" => ("pad_x", None),
+        "pad_y" => ("pad_y", None),
         "justify" => ("justify", None),
         "align_items" => ("align_items", None),
         "align_self" => ("align_self", None),
