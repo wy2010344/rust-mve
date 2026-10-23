@@ -1,0 +1,63 @@
+//! 24h 统计面板：若干"标签 —— 值"行。
+//!
+//! 行组件自己撑满宽度，值与配色在绘制期读信号求值。整页只有一份 `model`，
+//! 两个取值助手把「读 ticker → 取字段 → 缺省空串」这段样板收掉，
+//! 于是下面每个 `kv_row` 只声明**取哪一列**。
+
+use std::rc::Rc;
+
+use wy_mve::{component, rsx};
+use wy_render::Color;
+use wy_signal::GetValue;
+
+use super::widgets::{kv_row, panel};
+use crate::market::{format_compact, format_percent, format_price, Ticker};
+use crate::{theme, Model};
+
+/// 取数助手：把 `fn(&Ticker) -> String` 变成绘制期求值的 `Fn() -> String`。
+fn cell(model: Rc<Model>, f: fn(&Ticker) -> String) -> impl Fn() -> String {
+    move || model.ticker.get().map(|t| f(&t)).unwrap_or_default()
+}
+
+/// 配色助手：同 [`cell`]，缺省为 `MUTED`。
+fn tone_of(model: Rc<Model>, f: fn(&Ticker) -> Color) -> impl Fn() -> Color {
+    move || model.ticker.get().map(|t| f(&t)).unwrap_or(theme::MUTED)
+}
+
+#[component]
+pub fn stats_panel(ctx: &mut NodeContext) {
+    // 只读行情：从上下文取，不需要调用方把 model 一路传下来
+    let model = ctx
+        .consume::<Rc<Model>>()
+        .cloned()
+        .expect("dashboard 应 provide 了 Rc<Model>");
+    let up = |t: &Ticker| theme::tone(t.up());
+    let spread = |t: &Ticker| format_price((t.ask - t.bid).max(0.0));
+    let volume = |t: &Ticker| {
+        // 只写 "76" 看不出是什么单位，补上基础币种
+        format!(
+            "{} {}",
+            format_compact(t.volume),
+            t.symbol.trim_end_matches("USDT")
+        )
+    };
+
+    ctx.child(rsx! {
+        panel {
+            title: "MARKET STATS",
+            badge: "24H",
+            // 直接作为 panel 的 children：panel 内部已是一个 `grow:1 + Stretch` 的
+            // 纵向 flex，再包一层 vbox 只会多一层壳（上一轮就是这么塌成 0 高的）。
+            kv_row { label: "HIGH",      value: cell(model.clone(), |t: &Ticker| format_price(t.high)),  tone: theme::TEXT, grow: 1.0 }
+            kv_row { label: "LOW",       value: cell(model.clone(), |t: &Ticker| format_price(t.low)),   tone: theme::TEXT, grow: 1.0 }
+            kv_row { label: "OPEN",      value: cell(model.clone(), |t: &Ticker| format_price(t.open)),  tone: theme::MUTED, grow: 1.0 }
+            kv_row { label: "CHANGE",    value: cell(model.clone(), |t: &Ticker| format_price(t.change)), tone: tone_of(model.clone(), up), grow: 1.0 }
+            kv_row { label: "CHANGE %",  value: cell(model.clone(), |t: &Ticker| format_percent(t.change_percent)), tone: tone_of(model.clone(), up), grow: 1.0 }
+            kv_row { label: "VOLUME",    value: cell(model.clone(), volume),     tone: theme::MUTED, grow: 1.0 }
+            kv_row { label: "QUOTE VOL", value: cell(model.clone(), |t: &Ticker| format_compact(t.quote_volume)), tone: theme::MUTED, grow: 1.0 }
+            kv_row { label: "BEST BID",  value: cell(model.clone(), |t: &Ticker| format_price(t.bid)),   tone: theme::UP, grow: 1.0 }
+            kv_row { label: "BEST ASK",  value: cell(model.clone(), |t: &Ticker| format_price(t.ask)),   tone: theme::DOWN, grow: 1.0 }
+            kv_row { label: "SPREAD",    value: cell(model.clone(), spread),    tone: theme::FAINT, grow: 1.0 }
+        }
+    });
+}
