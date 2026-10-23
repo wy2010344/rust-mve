@@ -25,6 +25,22 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # GitHub 的 windows runner 不自带 CJK 字体，
+      # `font_probe` 测试（专门抓「中文渲染成豆腐块」）会因此误报。
+      #
+      # 直接放进系统 Fonts 目录即可——DirectWrite 每次启动都会扫这个目录，
+      # 不需要改注册表（改 HKLM 需要管理员权限，容易在别的 runner 镜像上翻车）。
+      # 这步允许失败：font_probe 测试自己会探测「有没有中文字体」，
+      # 没有就跳过并说明原因，不会让 CI 变红。
+      - name: 安装中文字体（可选）
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $url = "https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf"
+          $dest = "$env:WINDIR\Fonts\NotoSansCJKsc-Regular.otf"
+          Invoke-WebRequest -Uri $url -OutFile $dest
+          Write-Host "已安装 $dest"
+
       - name: 格式检查
         run: cargo fmt --all -- --check
 
@@ -45,10 +61,17 @@ jobs:
 
       # fontique 在 Linux 上走 fontconfig 绑定，缺 fontconfig 会在
       # 构建期报 `yeslogic-fontconfig-sys` 失败——不是代码问题，是系统依赖。
+      #
+      # 同时装中文字体：`font_probe` 测试专门抓「CJK 渲染成豆腐块」，
+      # 机器上没有中文字体时它测不出真实结论（会误报成字形 id=0）。
       - name: 安装系统依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y libfontconfig1-dev libfreetype6-dev pkg-config
+          sudo apt-get install -y \
+            libfontconfig1-dev \
+            libfreetype6-dev \
+            pkg-config \
+            fonts-noto-cjk
 
       - name: 安装 Rust 工具链
         run: rustup show active-toolchain
