@@ -757,6 +757,23 @@ fn gen_attr_assign(fname: &Ident, value: &Expr) -> Option<TokenStream2> {
                 );
             }
         }),
+        // 双击（400ms/5px 判定在引擎；不吞单击）+ 右键菜单（不走 Down/Click）
+        "on_double_click" => Some(quote! {
+            {
+                let __f = #m::fc::__fn_ptr(#value);
+                __n.on_double_click_fn = ::core::option::Option::Some(
+                    ::std::rc::Rc::new(move |__ev: &mut _| __f(__ev))
+                );
+            }
+        }),
+        "on_context_menu" => Some(quote! {
+            {
+                let __f = #m::fc::__fn_ptr(#value);
+                __n.on_context_menu_fn = ::core::option::Option::Some(
+                    ::std::rc::Rc::new(move |__ev: &mut _| __f(__ev))
+                );
+            }
+        }),
         "on_drag_move" => Some(quote! {
             {
                 let __f = #m::fc::__fn_ptr(#value);
@@ -893,6 +910,8 @@ fn layout_rc_field(fname: &str) -> Option<&'static str> {
         "on_move" => "on_hover_move_fn",
         "on_down" => "on_down_fn",
         "on_up" => "on_up_fn",
+        "on_double_click" => "on_double_click_fn",
+        "on_context_menu" => "on_context_menu_fn",
         "on_drag_move" => "on_move_fn",
         "on_key" => "key_fn",
         "on_click_ev" => "on_click_fn",

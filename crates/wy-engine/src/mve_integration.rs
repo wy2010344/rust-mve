@@ -11,12 +11,18 @@
 
 use std::cell::UnsafeCell;
 use std::rc::Rc;
+use std::time::Instant;
 
 use wy_mve::{children_nodes, has_handler, render_root, Node, NodeContext};
 use wy_render::{Point, Rect, Scene};
 use wy_signal::{GetValue, SetValue, Signal};
 
 use crate::focus::{locate, tab_navigate, FocusManager, FocusPath};
+
+/// 双击判定参数（对齐 Kotlin `Renderer.DoubleClickDetector` 默认值）。
+const DOUBLE_CLICK_INTERVAL_MS: u128 = 400;
+/// 双击落点距离阈值（px）：超过则不算同一次双击。
+const DOUBLE_CLICK_DIST: f32 = 5.0;
 
 /// 顶层节点遍历（`avail` 为窗口逻辑尺寸，作为根容器的主轴可用空间）。
 fn draw_nodes(nodes: &[Node], scene: &mut Scene, avail: (f32, f32)) {
@@ -282,6 +288,30 @@ fn dispatch_wheel_chain(chain: &[(Node, (f32, f32))], x: f32, y: f32, wheel: f32
     false
 }
 
+/// 沿命中链分发双击（叶→根）。判定参数见 [`DOUBLE_CLICK_INTERVAL_MS`]。
+fn dispatch_double_click_chain(chain: &[(Node, (f32, f32))], event: &mut wy_mve::PointerEvent) {
+    for (node, pos) in chain {
+        event.x = event.root_x - pos.0;
+        event.y = event.root_y - pos.1;
+        node.run_on_double_click(event);
+        if event.stopped {
+            return;
+        }
+    }
+}
+
+/// 沿命中链分发右键菜单（叶→根；右键不走 Down/Click）。
+fn dispatch_context_menu_chain(chain: &[(Node, (f32, f32))], event: &mut wy_mve::PointerEvent) {
+    for (node, pos) in chain {
+        event.x = event.root_x - pos.0;
+        event.y = event.root_y - pos.1;
+        node.run_on_context_menu(event);
+        if event.stopped {
+            return;
+        }
+    }
+}
+
 /// 焦点链未消费时的兜底广播：按文档序（根→叶）把按键派给树内声明了
 /// `key_fn` 的节点，任一消费即止。
 ///
@@ -311,6 +341,9 @@ pub struct MveApp {
     focus: FocusManager,
     /// 按下捕获链（叶→根，携带绝对原点）：按下建立，move 沿链派发，松开清空。
     capture: Option<Vec<(Node, (f32, f32))>>,
+    /// 上一次点击（时间 + 落点）：双击候选。判定复刻 Kotlin
+    /// `DoubleClickDetector`（400ms / 5px，构成双击即消费候选）。
+    last_click: Option<(Instant, f32, f32)>,
     /// 当前修饰键（winit ModifiersChanged 同步；按下时填入 PointerEvent.shift）。
     modifiers: winit::keyboard::ModifiersState,
     /// 当前视口逻辑尺寸：flex 根容器的主轴可用空间（`draw`/`on_resize` 更新）。
@@ -326,6 +359,26 @@ pub struct MveApp {
 }
 
 impl MveApp {
+    /// 记录一次点击，返回是否构成双击。
+    ///
+    /// 复刻 Kotlin `DoubleClickDetector.onClick`：间隔
+    /// [`DOUBLE_CLICK_INTERVAL_MS`] 内 + 落点 [`DOUBLE_CLICK_DIST`] 内。
+    /// 构成双击即**消费候选**（连点序列中双击只触发一次——三连击
+    /// 只触发一次双击，与 Kotlin `pending = !isDouble` 一致）。
+    fn note_click(&mut self, x: f32, y: f32) -> bool {
+        let now = Instant::now();
+        let is_double = match self.last_click {
+            Some((t, lx, ly)) => {
+                now.duration_since(t).as_millis() <= DOUBLE_CLICK_INTERVAL_MS
+                    && (x - lx).abs() <= DOUBLE_CLICK_DIST
+                    && (y - ly).abs() <= DOUBLE_CLICK_DIST
+            }
+            None => false,
+        };
+        self.last_click = if is_double { None } else { Some((now, x, y)) };
+        is_double
+    }
+
     /// 创建 MVE 应用：`callback` 构建根订阅树（只执行一次）。
     ///
     /// callback 内可用 `cx.child(...)` 添加顶层节点、`cx.render_for_each(...)`
@@ -337,6 +390,7 @@ impl MveApp {
             cursor: UnsafeCell::new((0.0, 0.0)),
             focus: FocusManager::default(),
             capture: None,
+            last_click: None,
             modifiers: winit::keyboard::ModifiersState::empty(),
             viewport: Signal::new((0.0, 0.0)),
             hover: Vec::new(),
@@ -531,6 +585,13 @@ impl crate::runner::WyApp for MveApp {
                 ..
             } => {
                 let (x, y) = unsafe { *self.cursor.get() };
+                // 与上次点击候选落点过远 → 取消候选（复刻 Kotlin onPointerDown：
+                // 用户转到别处，此前的单击不再可能与后续单击构成双击）
+                if let Some((_, lx, ly)) = self.last_click {
+                    if (x - lx).abs() > DOUBLE_CLICK_DIST || (y - ly).abs() > DOUBLE_CLICK_DIST {
+                        self.last_click = None;
+                    }
+                }
                 let nodes = self.root.nodes();
                 let avail = self.viewport.get();
                 // 顶层倒序（与 hover_chain 一致）：后声明的浮层优先命中
@@ -551,7 +612,38 @@ impl crate::runner::WyApp for MveApp {
                 let mut mve_event = wy_mve::PointerEvent::new(x, y);
                 mve_event.shift = self.modifiers.shift_key();
                 dispatch_click_chain(&chain, &mut mve_event);
+                // 双击**不吞**单击：click 先派发，构成双击再补发
+                // （复刻 Kotlin Renderer「先派发 Click，构成双击再补发
+                // DoubleClick」的注释语义）
+                if self.note_click(x, y) {
+                    let mut dbl = wy_mve::PointerEvent::new(x, y);
+                    dbl.shift = self.modifiers.shift_key();
+                    dbl.button = wy_mve::PointerButton::Left;
+                    dispatch_double_click_chain(&chain, &mut dbl);
+                }
                 mve_event.stopped
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => {
+                // 右键只派发 ContextMenu（复刻 Kotlin：右键**不派发** Down/Click，
+                // 避免误启文本拖选/滑块拖动）；也不建捕获、不动焦点。
+                let (x, y) = unsafe { *self.cursor.get() };
+                let nodes = self.root.nodes();
+                let avail = self.viewport.get();
+                let chain = nodes
+                    .iter()
+                    .rev()
+                    .find_map(|node| hit_test_node(node, (0.0, 0.0), x, y, avail));
+                let Some(chain) = chain else {
+                    return false;
+                };
+                let mut ev = wy_mve::PointerEvent::new(x, y);
+                ev.button = wy_mve::PointerButton::Right;
+                dispatch_context_menu_chain(&chain, &mut ev);
+                ev.stopped
             }
             WindowEvent::MouseInput {
                 state: ElementState::Released,
@@ -787,6 +879,164 @@ mod tests {
                 "move:70".to_string(),
                 "up".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn double_click_fires_once_per_pair() {
+        // 双击**不吞**单击（复刻 Kotlin）：click 先派发，构成双击再补发
+        // DoubleClick；构成双击即消费候选——三连击只触发一次双击。
+        let log = Rc::new(RefCell::new(Vec::<String>::new()));
+        let l_click = Rc::clone(&log);
+        let l_dbl = Rc::clone(&log);
+        let mut app = MveApp::new(move |cx| {
+            let l_click = Rc::clone(&l_click);
+            let l_dbl = Rc::clone(&l_dbl);
+            cx.child(Node {
+                width: 100.0,
+                height: 100.0,
+                hit_test_fn: Rc::new(|_, _| true),
+                on_click_fn: Some(Rc::new(move |_ev| {
+                    l_click.borrow_mut().push("click".to_string());
+                })),
+                on_double_click_fn: Some(Rc::new(move |_ev| {
+                    l_dbl.borrow_mut().push("dbl".to_string());
+                })),
+                ..Node::default()
+            });
+        });
+        let mut scene = Scene::new();
+        app.draw(&mut scene, 200.0, 200.0);
+
+        let cursor = |x: f64, y: f64| winit::event::WindowEvent::CursorMoved {
+            device_id: winit::event::DeviceId::dummy(),
+            position: winit::dpi::PhysicalPosition::new(x, y),
+        };
+        let mouse = |state: winit::event::ElementState| winit::event::WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state,
+            button: winit::event::MouseButton::Left,
+        };
+        let pressed = winit::event::ElementState::Pressed;
+        let released = winit::event::ElementState::Released;
+
+        app.handle_event(&cursor(50.0, 50.0));
+        app.handle_event(&mouse(pressed)); // 第 1 次：click + 记候选
+        app.handle_event(&mouse(released));
+        app.handle_event(&mouse(pressed)); // 第 2 次（同点同时隔内）：click + dbl，候选消费
+        app.handle_event(&mouse(released));
+        app.handle_event(&mouse(pressed)); // 第 3 次：只 click，不再触发双击
+        app.handle_event(&mouse(released));
+
+        assert_eq!(
+            *log.borrow(),
+            vec![
+                "click".to_string(),
+                "click".to_string(),
+                "dbl".to_string(),
+                "click".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn far_apart_clicks_do_not_form_double_click() {
+        // 落点超过 5px 不构成双击（对齐 Kotlin distancePx）
+        let log = Rc::new(RefCell::new(Vec::<String>::new()));
+        let l_dbl = Rc::clone(&log);
+        let mut app = MveApp::new(move |cx| {
+            let l_dbl = Rc::clone(&l_dbl);
+            cx.child(Node {
+                width: 100.0,
+                height: 100.0,
+                hit_test_fn: Rc::new(|_, _| true),
+                on_double_click_fn: Some(Rc::new(move |_ev| {
+                    l_dbl.borrow_mut().push("dbl".to_string());
+                })),
+                ..Node::default()
+            });
+        });
+        let mut scene = Scene::new();
+        app.draw(&mut scene, 200.0, 200.0);
+
+        let cursor = |x: f64, y: f64| winit::event::WindowEvent::CursorMoved {
+            device_id: winit::event::DeviceId::dummy(),
+            position: winit::dpi::PhysicalPosition::new(x, y),
+        };
+        let mouse = |state: winit::event::ElementState| winit::event::WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state,
+            button: winit::event::MouseButton::Left,
+        };
+        let pressed = winit::event::ElementState::Pressed;
+        let released = winit::event::ElementState::Released;
+
+        app.handle_event(&cursor(50.0, 50.0));
+        app.handle_event(&mouse(pressed));
+        app.handle_event(&mouse(released));
+        app.handle_event(&cursor(90.0, 50.0)); // 远距离第二次点击
+        app.handle_event(&mouse(pressed));
+        app.handle_event(&mouse(released));
+
+        assert!(log.borrow().is_empty(), "远距离连点不应触发双击");
+    }
+
+    #[test]
+    fn right_click_fires_context_menu_not_click() {
+        // 右键只派发 ContextMenu，**不派发** Down/Click（复刻 Kotlin：
+        // 避免误启文本拖选/滑块拖动）；左键路径不受影响。
+        let log = Rc::new(RefCell::new(Vec::<String>::new()));
+        let l_click = Rc::clone(&log);
+        let l_down = Rc::clone(&log);
+        let l_menu = Rc::clone(&log);
+        let mut app = MveApp::new(move |cx| {
+            let l_click = Rc::clone(&l_click);
+            let l_down = Rc::clone(&l_down);
+            let l_menu = Rc::clone(&l_menu);
+            cx.child(Node {
+                width: 100.0,
+                height: 100.0,
+                hit_test_fn: Rc::new(|_, _| true),
+                on_click_fn: Some(Rc::new(move |_ev| {
+                    l_click.borrow_mut().push("click".to_string());
+                })),
+                on_down_fn: Some(Rc::new(move |_ev| {
+                    l_down.borrow_mut().push("down".to_string());
+                })),
+                on_context_menu_fn: Some(Rc::new(move |_ev| {
+                    l_menu.borrow_mut().push("menu".to_string());
+                })),
+                ..Node::default()
+            });
+        });
+        let mut scene = Scene::new();
+        app.draw(&mut scene, 200.0, 200.0);
+
+        let cursor = |x: f64, y: f64| winit::event::WindowEvent::CursorMoved {
+            device_id: winit::event::DeviceId::dummy(),
+            position: winit::dpi::PhysicalPosition::new(x, y),
+        };
+        let mouse_btn = |state: winit::event::ElementState, button: winit::event::MouseButton| {
+            winit::event::WindowEvent::MouseInput {
+                device_id: winit::event::DeviceId::dummy(),
+                state,
+                button,
+            }
+        };
+        let pressed = winit::event::ElementState::Pressed;
+        let released = winit::event::ElementState::Released;
+
+        app.handle_event(&cursor(50.0, 50.0));
+        app.handle_event(&mouse_btn(pressed, winit::event::MouseButton::Right));
+        assert_eq!(*log.borrow(), vec!["menu".to_string()], "右键只触发菜单");
+
+        // 左键照常：down 先、click 后（capture 正常建立/释放）
+        app.handle_event(&mouse_btn(pressed, winit::event::MouseButton::Left));
+        app.handle_event(&mouse_btn(released, winit::event::MouseButton::Left));
+        assert_eq!(
+            *log.borrow(),
+            vec!["menu".to_string(), "down".to_string(), "click".to_string()],
+            "左键路径不受右键影响"
         );
     }
 

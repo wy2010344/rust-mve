@@ -77,6 +77,12 @@ pub struct Node {
     pub on_down_fn: Option<ClickFn>,
     /// 释放事件。
     pub on_up_fn: Option<ClickFn>,
+    /// 双击回调（400ms 内同点 5px 内的第二次点击；双击**不吞**单击——
+    /// click 先派发，构成双击再补发，对齐 Kotlin `onPointerDoubleClick`）。
+    pub on_double_click_fn: Option<ClickFn>,
+    /// 右键菜单回调（右键按下触发；右键**不派发** Down/Click，
+    /// 对齐 Kotlin `onPointerContextMenu`）。
+    pub on_context_menu_fn: Option<ClickFn>,
     /// 指针移动事件（**按下捕获期间**派发：拖选、拖拽）。
     ///
     /// 不按键的悬停移动走 [`Node::on_hover_move_fn`]，两者语义不同，
@@ -235,6 +241,8 @@ impl Clone for Node {
             on_click_fn: self.on_click_fn.as_ref().map(Rc::clone),
             on_down_fn: self.on_down_fn.as_ref().map(Rc::clone),
             on_up_fn: self.on_up_fn.as_ref().map(Rc::clone),
+            on_double_click_fn: self.on_double_click_fn.as_ref().map(Rc::clone),
+            on_context_menu_fn: self.on_context_menu_fn.as_ref().map(Rc::clone),
             on_move_fn: self.on_move_fn.as_ref().map(Rc::clone),
             on_hover_move_fn: self.on_hover_move_fn.as_ref().map(Rc::clone),
             on_wheel_fn: self.on_wheel_fn.as_ref().map(Rc::clone),
@@ -317,6 +325,8 @@ impl Default for Node {
             on_click_fn: None,
             on_down_fn: None,
             on_up_fn: None,
+            on_double_click_fn: None,
+            on_context_menu_fn: None,
             on_move_fn: None,
             on_hover_move_fn: None,
             on_wheel_fn: None,
@@ -401,6 +411,20 @@ impl Node {
 
     pub fn run_on_up(&self, event: &mut PointerEvent) {
         if let Some(f) = &self.on_up_fn {
+            f(event);
+        }
+    }
+
+    /// 双击回调（引擎判定构成双击后沿命中链调用）。
+    pub fn run_on_double_click(&self, event: &mut PointerEvent) {
+        if let Some(f) = &self.on_double_click_fn {
+            f(event);
+        }
+    }
+
+    /// 右键菜单回调（右键按下沿命中链调用；不走 Down/Click）。
+    pub fn run_on_context_menu(&self, event: &mut PointerEvent) {
+        if let Some(f) = &self.on_context_menu_fn {
             f(event);
         }
     }
@@ -606,6 +630,19 @@ impl Clone for ChildSlot {
     }
 }
 
+/// 鼠标按键（复刻 Kotlin `PointerEvent` 的 button 位；右键不派发
+/// Down/Click，只派发 ContextMenu——避免误启文本拖选/滑块拖动）。
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum PointerButton {
+    /// 左键（默认）。
+    #[default]
+    Left,
+    /// 右键（按下触发 `on_context_menu`）。
+    Right,
+    /// 中键。
+    Middle,
+}
+
 /// 指针事件。
 pub struct PointerEvent {
     pub x: f32,
@@ -616,6 +653,8 @@ pub struct PointerEvent {
     pub shift: bool,
     /// 滚轮增量（正 = 向下/缩小，负 = 向上/放大）；非滚轮事件为 0。
     pub wheel: f32,
+    /// 触发事件的鼠标按键（滚轮/悬停类事件为 Left）。
+    pub button: PointerButton,
     pub stopped: bool,
 }
 
@@ -628,6 +667,7 @@ impl PointerEvent {
             root_y: y,
             shift: false,
             wheel: 0.0,
+            button: PointerButton::Left,
             stopped: false,
         }
     }

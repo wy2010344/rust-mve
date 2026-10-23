@@ -59,7 +59,8 @@ pub use getter::IntoGetter;
 pub use icons::{icon, Icon};
 pub use node::{
     children_nodes, current_box, flatten, has_handler, layout_boxes, layout_offsets, materialize,
-    node_size, with_box, ChildSlot, ImeEvent, Key, KeyEvent, Layout, LayoutBox, Node, PointerEvent,
+    node_size, with_box, ChildSlot, ImeEvent, Key, KeyEvent, Layout, LayoutBox, Node,
+    PointerButton, PointerEvent,
 };
 /// 滚动容器 / 浮层组件（复刻 Kotlin SimpleScrollNode + Overlay/Dialog/Dropdown）。
 pub use overlay::{dialog, dropdown};
