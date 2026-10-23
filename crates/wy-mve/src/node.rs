@@ -147,6 +147,13 @@ pub struct Node {
     pub pad_x: Option<f32>,
     /// 内边距-纵向覆写。`None` = 用 `padding`；`Some(v)` = 上下都用 `v`。
     pub pad_y: Option<f32>,
+    /// 声明尺寸 `width`/`height` 表示**内容区**尺寸（复刻 Kotlin
+    /// `LayoutSize(value, fromInside)`，默认 false = 外包语义）。
+    ///
+    /// `false`：`width: 200` 是外包宽（内容区 = 200 − padding×2）。
+    /// `true`：`width: 200` 是内容区宽（外包 = 200 + padding×2，
+    /// 见 [`Node::effective_width`]）。
+    pub from_inside: bool,
     /// Flex grow（子节点在主轴上的伸展权重）。
     pub grow: f32,
     /// 交叉轴对齐（子节点自身对齐）。
@@ -254,6 +261,7 @@ impl Clone for Node {
             padding: self.padding,
             pad_x: self.pad_x,
             pad_y: self.pad_y,
+            from_inside: self.from_inside,
             grow: self.grow,
             align_self: self.align_self,
             justify: self.justify,
@@ -339,6 +347,7 @@ impl Default for Node {
             padding: 0.0,
             pad_x: None,
             pad_y: None,
+            from_inside: false,
             grow: 0.0,
             align_self: None,
             justify: DirectionJustify::Grow,
@@ -519,20 +528,37 @@ impl Node {
     }
 
     /// 动态宽度（`width_fn` 覆盖 `width`；对应 Kotlin `argWidth`）。
+    ///
+    /// `from_inside` 为 true 时，声明值是**内容区**尺寸，返回时换算成
+    /// 外包（`value + pad_x*2`）——复刻 Kotlin
+    /// `outerSize = max(0, value + paddingStart + paddingEnd)`。
+    /// 布局链路一律以外包尺寸计价，与默认语义一致。
     pub fn effective_width(&self) -> f32 {
-        if let Some(f) = &self.width_fn {
+        let raw = if let Some(f) = &self.width_fn {
             f()
         } else {
             self.width
+        };
+        if self.from_inside {
+            (raw + self.pad_x_eff() * 2.0).max(0.0)
+        } else {
+            raw
         }
     }
 
     /// 动态高度（`height_fn` 覆盖 `height`；对应 Kotlin `argHeight`）。
+    ///
+    /// `from_inside` 语义同 [`Node::effective_width`]（用 `pad_y` 换算）。
     pub fn effective_height(&self) -> f32 {
-        if let Some(f) = &self.height_fn {
+        let raw = if let Some(f) = &self.height_fn {
             f()
         } else {
             self.height
+        };
+        if self.from_inside {
+            (raw + self.pad_y_eff() * 2.0).max(0.0)
+        } else {
+            raw
         }
     }
 
@@ -1296,6 +1322,43 @@ mod tests {
         assert_eq!(boxes[0].height, 10.0, "主轴高度是 flex 自然尺寸，不吃满");
         assert_eq!(boxes[0].x, 12.0, "偏移加回左 padding");
         assert_eq!(boxes[0].y, 0.0, "偏移不加回纵向 padding");
+    }
+
+    #[test]
+    fn from_inside_size_converts_to_outer() {
+        // 复刻 Kotlin `LayoutSize(value, fromInside)`：fromInside=true 时
+        // 声明值是内容区，外包 = value + padding×2（布局链路一律外包计价）。
+        let n = Node {
+            width: 200.0,
+            height: 100.0,
+            padding: 12.0,
+            from_inside: true,
+            ..Node::default()
+        };
+        assert_eq!(n.effective_width(), 224.0, "外包宽 = 内容 200 + 左右 12×2");
+        assert_eq!(n.effective_height(), 124.0, "外包高 = 内容 100 + 上下 12×2");
+        // 默认（false）保持外包语义：声明值即外包
+        let n = Node {
+            width: 200.0,
+            padding: 12.0,
+            ..Node::default()
+        };
+        assert_eq!(n.effective_width(), 200.0);
+    }
+
+    #[test]
+    fn from_inside_uses_split_padding() {
+        // from_inside 与四向 padding 叠加：左右/上下分别换算
+        let n = Node {
+            width: 200.0,
+            height: 60.0,
+            pad_x: Some(10.0),
+            pad_y: Some(0.0),
+            from_inside: true,
+            ..Node::default()
+        };
+        assert_eq!(n.effective_width(), 220.0, "外包宽 = 200 + 10×2");
+        assert_eq!(n.effective_height(), 60.0, "上下无 padding，外包高即内容高");
     }
 
     #[test]

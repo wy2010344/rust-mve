@@ -687,6 +687,8 @@ fn gen_attr_assign(fname: &Ident, value: &Expr) -> Option<TokenStream2> {
         // 四向内边距覆写（对齐 Kotlin 四向 argPadding）：None = 用 padding 简写
         "pad_x" => Some(quote! { __n.pad_x = ::core::option::Option::Some(#value); }),
         "pad_y" => Some(quote! { __n.pad_y = ::core::option::Option::Some(#value); }),
+        // 声明尺寸按内容区解释（复刻 Kotlin LayoutSize.fromInside）
+        "from_inside" => Some(quote! { __n.from_inside = #value; }),
         "justify" => Some(quote! { __n.justify = #value; }),
         "align_items" => Some(quote! { __n.align_items = #value; }),
         "align_self" => Some(quote! { __n.align_self = ::core::option::Option::Some(#value); }),
@@ -862,6 +864,7 @@ fn layout_field(fname: &str) -> Option<(&'static str, Option<&'static str>)> {
         "padding" => ("padding", None),
         "pad_x" => ("pad_x", None),
         "pad_y" => ("pad_y", None),
+        "from_inside" => ("from_inside", None),
         "justify" => ("justify", None),
         "align_items" => ("align_items", None),
         "align_self" => ("align_self", None),
