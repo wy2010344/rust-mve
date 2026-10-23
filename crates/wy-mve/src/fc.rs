@@ -1351,6 +1351,8 @@ mod tests {
         let list = Signal::new(vec![1i32, 2, 3]);
         let slot = rsx! {
             vbox {
+                // 显式 8.0：Node 默认 gap 是 0（对齐 Kotlin 上游）
+                gap: 8.0,
                 for_each(list, |i: &i32| i.to_string()) { |_item, _cx| {
                     btn { label: "row", on_click: || {} }
                 }}
@@ -1479,16 +1481,21 @@ mod tests {
     fn for_each_layout_height_accounts_items() {
         // 关键回归：vbox 的自然高度必须包含 for_each 的所有列表项。
         // 修复前 for_each 是中间 Node，高度塌成 0 → 所有项 y 重叠。
-        let n = vbox([for_each(
-            |f| (0..3).for_each(|i| f(i.to_string(), i)),
-            |_k, _v, cx| {
-                cx.child(Node {
-                    width: 90.0,
-                    height: 32.0,
-                    ..Node::default()
-                })
-            },
-        )]);
+        // node_size 递归 children_nodes，3 项各 32 高 + 2 个 8 gap = 112
+        // （vbox_gap 显式给间距：Node 默认 gap 是 0，对齐 Kotlin 上游）
+        let n = vbox_gap(
+            8.0,
+            [for_each(
+                |f| (0..3).for_each(|i| f(i.to_string(), i)),
+                |_k, _v, cx| {
+                    cx.child(Node {
+                        width: 90.0,
+                        height: 32.0,
+                        ..Node::default()
+                    })
+                },
+            )],
+        );
         // node_size 递归 children_nodes，3 项各 32 高 + 2 个 8 gap = 112
         let (_, h) = crate::node::node_size(&n);
         assert_eq!(h, 3.0 * 32.0 + 2.0 * 8.0);

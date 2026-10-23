@@ -1,8 +1,34 @@
 # Node 层复刻偏差与补齐方案
 
-> 状态：**方案评审稿**（未动框架代码）。逐条对照 `wy-helper`（Kotlin 上游，
+> 状态：**实施中**。逐条对照 `wy-helper`（Kotlin 上游，
 > `skia-engine/.../LayoutNode.kt` + `layout/.../FlexLayout.kt` + `StackLayout.kt`）
 > 与 rust-mve（`wy-mve/src/node.rs` + `wy-layout/src/{flex,stack}.rs`）得出。
+
+## 实施进度
+
+| 项 | 状态 | 提交 |
+| --- | --- | --- |
+| P0-1 gap 默认 8.0 → 0.0 | ✅ 已实施 | 见下方「已实施项说明」 |
+| P0-2 align_fix 开口 | 待实施 | |
+| P0-3 padding 四向 | 待实施 | |
+| P1-1 from_inside | 待实施 | |
+| P1-3 双击/右键 | 待实施 | |
+| P1-2 捕获相位 | 待实施 | |
+| P1-4 显式定位判据 | 待实施 | |
+
+### 已实施：P0-1 gap 默认值
+
+- `Node::default().gap`：8.0 → 0.0，对齐 Kotlin `FlexParam.gap` 与
+  wy-layout `FlexObject::gap()`（两层默认值曾不一致）。
+- `row`/`column`/`row_at`/`column_at` 简写显式设 `gap: 8.0`，保住自身
+  「间距 8」的 API 契约（Kotlin 无此简写，属 rust-mve 自有 API）。
+- 示例层 `counter.rs` / `richtext.rs` 两处原本搭默认 8 便车的 rsx 容器
+  显式补 `gap: 8.0`。
+- 验证：wy-mve 163 passed（新增 `node_default_gap_is_zero` 钉死不变量）、
+  finance 61 passed、workspace lib 全绿、clippy `-D warnings` 零告警、
+  fmt 干净；**shadcn 与 finance 双示例离屏快照像素级完全一致**
+  （309 / 1170 图元，逐像素 diff 无差异）——示例层所有容器早已显式
+  声明 gap，默认值修正对既有视觉零影响。
 
 ## 结论先行
 

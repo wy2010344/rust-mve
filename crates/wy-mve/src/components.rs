@@ -145,6 +145,8 @@ pub fn row(children: impl Fn(&mut NodeContext) + 'static) -> Node {
     Node {
         layout: Some(Layout::Row),
         arg_children_fn: Rc::new(move |cx| children(cx)),
+        // 显式 8.0：本组件的间距契约（Node::default 的 gap 是 0）
+        gap: 8.0,
         ..Node::default()
     }
 }
@@ -156,6 +158,7 @@ pub fn row_at(x: f32, y: f32, children: impl Fn(&mut NodeContext) + 'static) -> 
         y,
         layout: Some(Layout::Row),
         arg_children_fn: Rc::new(move |cx| children(cx)),
+        gap: 8.0,
         ..Node::default()
     }
 }
@@ -165,6 +168,7 @@ pub fn column(children: impl Fn(&mut NodeContext) + 'static) -> Node {
     Node {
         layout: Some(Layout::Column),
         arg_children_fn: Rc::new(move |cx| children(cx)),
+        gap: 8.0,
         ..Node::default()
     }
 }
@@ -176,6 +180,7 @@ pub fn column_at(x: f32, y: f32, children: impl Fn(&mut NodeContext) + 'static) 
         y,
         layout: Some(Layout::Column),
         arg_children_fn: Rc::new(move |cx| children(cx)),
+        gap: 8.0,
         ..Node::default()
     }
 }

@@ -313,7 +313,11 @@ impl Default for Node {
             y: 0.0,
             width: 0.0,
             height: 0.0,
-            gap: 8.0,
+            // gap 默认 0：对齐 Kotlin `FlexParam.gap` 与 wy-layout
+            // `FlexObject::gap()` 的默认值（两层默认值曾不一致：Node 层 8.0
+            // 实际生效，导致"忘了写 gap"的容器与上游行为不同）。
+            // 需要间距的简写组件（row/column）在各自定义里显式设 8.0。
+            gap: 0.0,
             padding: 0.0,
             grow: 0.0,
             align_self: None,
@@ -1110,6 +1114,14 @@ pub enum ImeEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_default_gap_is_zero() {
+        // 对齐 Kotlin `FlexParam.gap` 与 wy-layout `FlexObject::gap()`
+        // 的默认值（都曾/现为 0）。Node 层曾是 8.0，两层默认值不一致，
+        // 且 Node 层的值实际生效——"忘了写 gap"的容器与上游行为不同。
+        assert_eq!(Node::default().gap(), 0.0);
+    }
 
     #[test]
     fn last_box_is_shared_across_clones() {

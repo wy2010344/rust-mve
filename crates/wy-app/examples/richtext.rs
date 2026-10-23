@@ -48,11 +48,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
             cx.child(editor_node);
 
-            // 样式按钮行 + 密码区 + 日志：同一列（与外层 column 同 gap，布局等价）
+            // 样式按钮行 + 密码区 + 日志：同一列
             cx.child(
                 rsx! {
                     vbox {
+                        // 显式 8.0：对齐外层 `column()` 简写的间距契约
+                        // （Node 默认 gap 已是 0，与 Kotlin 上游一致）
+                        gap: 8.0,
                         hbox {
+                            gap: 8.0,
                             // `let` 混入 rsx：逐按钮克隆共享内核（Rc 非 Copy）
                             let c = Rc::clone(&c1);
                             btn {

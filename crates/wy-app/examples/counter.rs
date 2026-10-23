@@ -13,6 +13,9 @@ fn counter_ui(cx: &mut NodeContext, count: Signal<i32>) {
         vbox_at(350.0, 250.0) {
             label(format!("Count: {}", count.get()))
             hbox {
+                // 显式 8.0：Node 默认 gap 是 0（对齐 Kotlin 上游），
+                // 要间距必须自己写
+                gap: 8.0,
                 btn { label: "−", on_click: move || count.set(count.get() - 1) }
                 btn { label: "+", on_click: move || count.set(count.get() + 1) }
             }
