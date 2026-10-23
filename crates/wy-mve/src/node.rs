@@ -1063,7 +1063,9 @@ pub fn layout_boxes(node: &Node, avail: (f32, f32), children: &[Node]) -> Vec<La
 
         out.push(match layout {
             Layout::Row => LayoutBox::new(pad_x + main_pos, pad_y + cross_pos, main_len, cross_len),
-            Layout::Column => LayoutBox::new(pad_x + cross_pos, pad_y + main_pos, cross_len, main_len),
+            Layout::Column => {
+                LayoutBox::new(pad_x + cross_pos, pad_y + main_pos, cross_len, main_len)
+            }
         });
     }
     out
@@ -1250,13 +1252,21 @@ mod tests {
             pad_x: Some(4.0),
             ..Node::default()
         };
-        assert_eq!((n.pad_x_eff(), n.pad_y_eff()), (4.0, 10.0), "pad_x 覆写、pad_y 回落简写");
+        assert_eq!(
+            (n.pad_x_eff(), n.pad_y_eff()),
+            (4.0, 10.0),
+            "pad_x 覆写、pad_y 回落简写"
+        );
         let n = Node {
             padding: 10.0,
             pad_y: Some(0.0),
             ..Node::default()
         };
-        assert_eq!((n.pad_x_eff(), n.pad_y_eff()), (10.0, 0.0), "pad_y: 0 是显式覆写而非缺省");
+        assert_eq!(
+            (n.pad_x_eff(), n.pad_y_eff()),
+            (10.0, 0.0),
+            "pad_y: 0 是显式覆写而非缺省"
+        );
     }
 
     #[test]
