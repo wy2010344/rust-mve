@@ -1,6 +1,6 @@
 # Node 层复刻偏差与补齐方案
 
-> 状态：**实施中**。逐条对照 `wy-helper`（Kotlin 上游，
+> 状态：**已全部实施**（7/7）。逐条对照 `wy-helper`（Kotlin 上游，
 > `skia-engine/.../LayoutNode.kt` + `layout/.../FlexLayout.kt` + `StackLayout.kt`）
 > 与 rust-mve（`wy-mve/src/node.rs` + `wy-layout/src/{flex,stack}.rs`）得出。
 
@@ -9,26 +9,43 @@
 | 项 | 状态 | 提交 |
 | --- | --- | --- |
 | P0-1 gap 默认 8.0 → 0.0 | ✅ 已实施 | 见下方「已实施项说明」 |
-| P0-2 align_fix 开口 | 待实施 | |
-| P0-3 padding 四向 | 待实施 | |
-| P1-1 from_inside | 待实施 | |
-| P1-3 双击/右键 | 待实施 | |
-| P1-2 捕获相位 | 待实施 | |
-| P1-4 显式定位判据 | 待实施 | |
+| P0-2 align_fix 开口 | ✅ 已实施 | `c594d45` |
+| P0-3 padding 四向（pad_x/pad_y） | ✅ 已实施 | `102caa9` + `e75ecfc` + `283bd50` |
+| P1-1 from_inside | ✅ 已实施 | `e0b5a75` |
+| P1-3 双击/右键 | ✅ 已实施 | `edfc077` |
+| P1-2 捕获相位 | ✅ 已实施 | `bd3a9a8` |
+| P1-4 显式定位判据 | ✅ 已实施 | `3284ce4` |
 
-### 已实施：P0-1 gap 默认值
+### 各项目要
 
-- `Node::default().gap`：8.0 → 0.0，对齐 Kotlin `FlexParam.gap` 与
-  wy-layout `FlexObject::gap()`（两层默认值曾不一致）。
-- `row`/`column`/`row_at`/`column_at` 简写显式设 `gap: 8.0`，保住自身
-  「间距 8」的 API 契约（Kotlin 无此简写，属 rust-mve 自有 API）。
-- 示例层 `counter.rs` / `richtext.rs` 两处原本搭默认 8 便车的 rsx 容器
-  显式补 `gap: 8.0`。
-- 验证：wy-mve 163 passed（新增 `node_default_gap_is_zero` 钉死不变量）、
-  finance 61 passed、workspace lib 全绿、clippy `-D warnings` 零告警、
-  fmt 干净；**shadcn 与 finance 双示例离屏快照像素级完全一致**
-  （309 / 1170 图元，逐像素 diff 无差异）——示例层所有容器早已显式
-  声明 gap，默认值修正对既有视觉零影响。
+- **P0-2 align_fix**：`Node.align_fix`（默认 false）+ rsx 属性；`natural_size_of`
+  在 align_fix 时交叉轴不取子节点 max（`allow_size_from_children=false` 语义）。
+  注意 wy-mve 的交叉轴分配从未走 wy-layout `StackLayout`（node.rs 手写四分支），
+  故落点在自然尺寸而非适配层透传。
+- **P0-3 padding 四向**：`pad_x`/`pad_y: Option<f32>` 覆写 `padding` 简写；
+  两个收敛点（`natural_size_of` / `layout_boxes` 内区与偏移）按方向取值。
+  finance 标题栏拆掉「padding:12 四向同值把 20 高栏内区压成 0、文字靠负偏移
+  碰巧落位」的手算补偿。
+- **P1-1 from_inside**：`effective_width/height` 统一换算（布局链路全走这两个
+  入口）；与 pad_x/pad_y 叠加按方向换算。
+- **P1-3 双击/右键**：引擎 `DoubleClickDetector`（400ms/5px，对齐 Kotlin 常量）；
+  双击不吞单击、构成即消费候选（三连击只触发一次）；右键只派发
+  ContextMenu 不派发 Down/Click。`PointerEvent` 加 `button` 位。
+- **P1-2 捕获相位**：6 个 dispatch 函数双相位（捕获根→叶 + 冒泡叶→根）；
+  `dispatch_click_chain` 展开为 down_capture → click_capture → down → click
+  四轮；悬停移动保持单相（Kotlin 无 HoverCapture 对应物）。Capture 变体
+  全集与 Kotlin 一一对应（Click/Down/Up/Move/Wheel/DoubleClick/ContextMenu）。
+- **P1-4 显式定位**：判据从「x/y 非 0」改为「x_fn/y_fn 存在」；四个 `*_at`
+  简写改设常量闭包（它们此前完全靠旧判据挪出 flex 流）；审计确认示例层
+  无 rsx 静态 x/y 定位、overlay/scroll 本就走 fn 路径。
+
+### 验证基线（每项同一套门禁）
+
+- wy-mve 173 passed / wy-engine 96 passed / finance 61 passed / shadcn 14 passed
+- `cargo clippy --workspace --lib --all-features -- -D warnings` 干净
+- `cargo fmt --all -- --check` 干净
+- **行为/默认值变更项（P0-1 / P1-4）额外**：双示例离屏快照逐像素 diff 一致
+  （finance 1170 图元 / shadcn 309 图元）——对既有视觉零影响
 
 ## 结论先行
 
