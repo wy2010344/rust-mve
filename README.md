@@ -3,7 +3,7 @@
 **纯 Rust 的信号驱动 UI 框架：树只建一次，改数据只重画该重画的那部分。**
 
 [![CI](https://github.com/wy2010344/rust-mve/actions/workflows/ci.yml/badge.svg)](https://github.com/wy2010344/rust-mve/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-672%20passing-brightgreen)](https://github.com/wy2010344/rust-mve/actions/workflows/ci.yml)
+[![tests](https://img.shields.io/badge/tests-673%20passing-brightgreen)](https://github.com/wy2010344/rust-mve/actions/workflows/ci.yml)
 [![clippy](https://img.shields.io/badge/clippy-0%20warnings-brightgreen)](https://github.com/wy2010344/rust-mve/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
@@ -116,7 +116,7 @@ cargo run -p wy-app --example shadcn
 cargo run -p wy-app --example counter
 ```
 
-需要 Rust 1.75+ 和一块能跑 wgpu 的显卡。
+需要 Rust 1.98+（仓库已用 `rust-toolchain.toml` 锁定版本）和一块能跑 wgpu 的显卡。
 交易看板顶栏可以在 `SIM` / `BINANCE` / `MOCK` 之间切换数据源。
 
 > **想不出图？** 每个示例都支持 `--snapshot`，不开窗口直接渲染成 PNG：
