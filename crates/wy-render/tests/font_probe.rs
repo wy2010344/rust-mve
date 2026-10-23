@@ -8,29 +8,27 @@
 //! （例如只把 `.ttf` 丢进 `Fonts` 目录却未写注册表）。这时**测不出任何结论**：
 //! 字形 id=0 只是因为回退链实际选不到中文字体，不是回退逻辑坏了。
 //!
-//! 所以测试先**用与实际渲染完全相同的路径**试渲染一次 `中`：
+//! 所以测试走**和实际渲染完全相同的路径**渲染一整串 CJK：
 //!
-//! - 默认字体 + parley 回退链能选出非零字形 → 做完整断言（失败就是真 bug）
-//! - 选不出（tofu）→ 跳过并说明，不是失败
+//! - 全部字符都能选出非零字形 → 断言（失败就是真 bug）
+//! - 任一字符选不出（tofu）→ 跳过并说明，不是失败
 //!
 //! 这样在开发者本机（有中文字体）能抓回退回归，在字体不全的 CI 上不会误报红。
 //!
-//! # 为什么跳过条件必须用「真实渲染」而不是「字符表查询」
+//! # 跳过条件与断言必须用「同一条路径、同一段文本」
 //!
-//! 早期版本用 fontique 的 `Charmap::map` 枚举所有字体族问「有没有覆盖中文」，
-//! 但它只要有一个字体**声称**覆盖就返回 true；而真实排版走的是
-//! 默认字体族 + 回退链，选不到那个声称覆盖的字体时仍是 tofu。
-//! 两套路径结论会打架，导致探测说「有字体」、断言却失败——正是此前 CI 一直红的根因。
+//! 早期版本用一个只渲染「中」的探针决定要不要跳过，再用「中文测试」整串断言——
+//! 两套输入结论会打架：个别字体可能只覆盖「中」、覆盖不了其余字，
+//! 于是探针说「能渲染」、整串断言却失败。这里统一成同一条路径、同一段文本。
 use parley::{FontContext, LayoutContext, PositionedLayoutItem, StyleProperty};
 
-/// 用**默认字体 + parley 回退链**渲染 `中`，看能否得到非零字形。
+/// 用**默认字体 + parley 回退链**渲染 `text`，返回每个字符的字形是否都非零。
 ///
-/// 与 `cjk_glyph_selection_nonzero` 的断言走同一条路径，
-/// 所以「能不能渲染」由真实渲染决定，而非由「集合里有没有字体声称覆盖」决定。
-fn default_renders_cjk() -> bool {
+/// 与 `cjk_glyph_selection_nonzero` 的断言走同一条路径、同一段文本，
+/// 所以「能不能渲染」由真实渲染决定，不会和断言分叉。
+fn all_cjk_glyphs_present(text: &str) -> bool {
     let mut font_cx = FontContext::new();
     let mut layout_cx = LayoutContext::new();
-    let text = "中";
     let mut builder = layout_cx.ranged_builder(&mut font_cx, text, 1.0, false);
     builder.push_default(StyleProperty::FontSize(20.0));
     // 不指定任何 explicit family —— 完全走默认字体族 + parley 回退链（与真实 app 一致）
@@ -40,19 +38,20 @@ fn default_renders_cjk() -> bool {
         for item in line.items() {
             if let PositionedLayoutItem::GlyphRun(gr) = item {
                 for g in gr.glyphs() {
-                    if g.id != 0 {
-                        return true;
+                    if g.id == 0 {
+                        return false; // 出现 tofu → 整串不合格
                     }
                 }
             }
         }
     }
-    false
+    true
 }
 
 #[test]
 fn cjk_glyph_selection_nonzero() {
-    if !default_renders_cjk() {
+    let text = "中文测试";
+    if !all_cjk_glyphs_present(text) {
         eprintln!(
             "跳过：默认字体 + 回退链选不出中文字形（系统未安装/未注册可用的中文字体）。\n\
              这是环境缺口，不是回退逻辑 bug；装中文字体后再跑即可验证回退是否正确。"
@@ -60,10 +59,9 @@ fn cjk_glyph_selection_nonzero() {
         return;
     }
 
-    // —— 以下与 default_renders_cjk 同路径，但这次做完整断言 ——
+    // —— 与 all_cjk_glyphs_present 同路径、同文本，做完整断言 ——
     let mut font_cx = FontContext::new();
     let mut layout_cx = LayoutContext::new();
-    let text = "中文测试";
     let mut builder = layout_cx.ranged_builder(&mut font_cx, text, 1.0, false);
     builder.push_default(StyleProperty::FontSize(20.0));
     let mut layout: parley::Layout<[u8; 4]> = builder.build(text);
@@ -84,7 +82,7 @@ fn cjk_glyph_selection_nonzero() {
     assert_eq!(
         glyph_count,
         text.chars().count(),
-        "每个 CJK 字符都应产出字形"
+        "每个 CJK 字符都应产出非零字形"
     );
 }
 
@@ -115,7 +113,7 @@ fn probe_detects_latin_coverage() {
 /// 字符表探测函数的**否定分支**单元测试（与上面的渲染路径解耦，纯逻辑）。
 ///
 /// 只在「不覆盖 CJK 的字体族」集合里查，必须返回 false；
-/// 否则 `system_has_cjk_font` 类探测一旦恒返回 true，缺字体的机器上就会误报失败。
+/// 否则探测一旦恒返回 true，缺字体的机器上就会误报失败。
 /// 这里用字体字符表查询（不是渲染路径）来验证探测逻辑本身没写反。
 fn families_cover_cjk(font_cx: &mut FontContext, names: &[String]) -> bool {
     let source_cache = &mut font_cx.source_cache;
