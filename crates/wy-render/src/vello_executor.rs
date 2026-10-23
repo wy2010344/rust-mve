@@ -158,6 +158,24 @@ pub fn execute_scene(
                     color: *color,
                 });
             }
+            Primitive::Path {
+                points,
+                closed,
+                stroke_width,
+                color,
+            } => {
+                if points.len() < 2 {
+                    continue;
+                }
+                let path = kurbo_path(points, *closed, cumulative, scale);
+                let c = to_peniko_color(*color);
+                if *stroke_width > 0.0 {
+                    let stroke = Stroke::new(*stroke_width as f64 * f64::from(scale));
+                    dst.stroke(&stroke, Affine::IDENTITY, c, None, &path);
+                } else {
+                    dst.fill(Fill::NonZero, Affine::IDENTITY, c, None, &path);
+                }
+            }
             Primitive::ClipPush { rect } => {
                 let x = (rect.x + cumulative.0) * scale;
                 let y = (rect.y + cumulative.1) * scale;
@@ -264,6 +282,29 @@ fn to_peniko_color(color: Color) -> peniko::Color {
 /// 构造 kurbo `Rect`（左上角 + 宽高 → 左上角 + 右下角）。
 fn kurbo_rect(x: f32, y: f32, w: f32, h: f32) -> vello::kurbo::Rect {
     vello::kurbo::Rect::new(x as f64, y as f64, (x + w) as f64, (y + h) as f64)
+}
+
+/// 构造 kurbo `BezPath`：折线（直线段串联）或闭合多边形。
+fn kurbo_path(
+    points: &[crate::math::Point],
+    closed: bool,
+    cumulative: (f32, f32),
+    scale: f32,
+) -> vello::kurbo::BezPath {
+    let mut path = vello::kurbo::BezPath::new();
+    for (i, p) in points.iter().enumerate() {
+        let x = (p.x + cumulative.0) * scale;
+        let y = (p.y + cumulative.1) * scale;
+        if i == 0 {
+            path.move_to((x as f64, y as f64));
+        } else {
+            path.line_to((x as f64, y as f64));
+        }
+    }
+    if closed {
+        path.close_path();
+    }
+    path
 }
 
 #[cfg(test)]
@@ -430,6 +471,55 @@ mod tests {
             1.0,
         );
         assert_eq!(text_cache.cache.len(), 1);
+    }
+
+    #[test]
+    fn execute_stroke_path_produces_vello_scene() {
+        let (mut font_cx, mut layout_cx, mut text_cache) = make_contexts();
+        let mut src = Scene::new();
+        src.stroke_path(
+            [
+                crate::math::Point::new(0.0, 0.0),
+                crate::math::Point::new(10.0, 10.0),
+                crate::math::Point::new(20.0, 0.0),
+            ],
+            2.0,
+            Color::from_u32(0xFF00FF00),
+        );
+
+        let mut dst = vello::Scene::new();
+        execute_scene(
+            &src,
+            &mut dst,
+            &mut font_cx,
+            &mut layout_cx,
+            &mut text_cache,
+            1.0,
+        );
+    }
+
+    #[test]
+    fn execute_fill_path_produces_vello_scene() {
+        let (mut font_cx, mut layout_cx, mut text_cache) = make_contexts();
+        let mut src = Scene::new();
+        src.fill_path(
+            [
+                crate::math::Point::new(0.0, 0.0),
+                crate::math::Point::new(10.0, 0.0),
+                crate::math::Point::new(10.0, 10.0),
+            ],
+            Color::from_u32(0xFF0000FF),
+        );
+
+        let mut dst = vello::Scene::new();
+        execute_scene(
+            &src,
+            &mut dst,
+            &mut font_cx,
+            &mut layout_cx,
+            &mut text_cache,
+            1.0,
+        );
     }
 
     #[test]

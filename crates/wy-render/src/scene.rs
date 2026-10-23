@@ -32,6 +32,20 @@ pub enum Primitive {
         font_size: f32,
         color: Color,
     },
+    /// 路径：折线（`closed = false`）或闭合多边形（`closed = true`）。
+    ///
+    /// `stroke_width > 0` 时描边（折线），`0` 时填充（闭合多边形）。
+    /// 有了它，图标可以自绘矢量路径（不依赖字体是否含该字形），
+    /// 图表也能画面积/折线而不必退化成柱状矩形。
+    Path {
+        /// 路径顶点（局部坐标）。
+        points: Vec<crate::math::Point>,
+        /// 是否闭合（闭合后可填充）。
+        closed: bool,
+        /// 描边宽度（0 = 填充）。
+        stroke_width: f32,
+        color: Color,
+    },
     /// 裁剪入栈。
     ClipPush { rect: Rect },
     /// 裁剪出栈。
@@ -125,6 +139,47 @@ impl Scene {
         });
     }
 
+    /// 记录一条折线（`stroke_width > 0` 描边）。
+    ///
+    /// 顶点少于 2 个时忽略。坐标为局部坐标，会被 `push_transform` 平移。
+    pub fn stroke_path(
+        &mut self,
+        points: impl IntoIterator<Item = crate::math::Point>,
+        stroke_width: f32,
+        color: impl Into<Color>,
+    ) {
+        let points: Vec<crate::math::Point> = points.into_iter().collect();
+        if points.len() < 2 || stroke_width <= 0.0 {
+            return;
+        }
+        self.primitives.push(Primitive::Path {
+            points,
+            closed: false,
+            stroke_width,
+            color: color.into(),
+        });
+    }
+
+    /// 记录一个闭合多边形（填充）。
+    ///
+    /// 顶点少于 3 个时忽略。
+    pub fn fill_path(
+        &mut self,
+        points: impl IntoIterator<Item = crate::math::Point>,
+        color: impl Into<Color>,
+    ) {
+        let points: Vec<crate::math::Point> = points.into_iter().collect();
+        if points.len() < 3 {
+            return;
+        }
+        self.primitives.push(Primitive::Path {
+            points,
+            closed: true,
+            stroke_width: 0.0,
+            color: color.into(),
+        });
+    }
+
     /// 裁剪入栈：后续图元将被限制在该矩形内。
     pub fn push_clip(&mut self, rect: impl Into<Rect>) {
         self.primitives
@@ -195,6 +250,60 @@ mod tests {
             Primitive::Rect { rect, color } => {
                 assert_eq!(rect, Rect::new(1.0, 2.0, 3.0, 4.0));
                 assert_eq!(color.to_u32(), 0x11223344);
+            }
+            other => panic!("unexpected primitive: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stroke_path_records_points() {
+        let mut s = Scene::new();
+        s.stroke_path(
+            [Point::new(0.0, 0.0), Point::new(10.0, 10.0)],
+            2.0,
+            Color::RED,
+        );
+        let items: Vec<_> = s.iter().cloned().collect();
+        match &items[0] {
+            Primitive::Path {
+                points,
+                closed,
+                stroke_width,
+                ..
+            } => {
+                assert_eq!(points.len(), 2);
+                assert!(!closed);
+                assert_eq!(*stroke_width, 2.0);
+            }
+            other => panic!("unexpected primitive: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn path_ignores_degenerate_input() {
+        let mut s = Scene::new();
+        // 少于 2 个点的折线、少于 3 个点的多边形都不应产生图元
+        s.stroke_path([Point::new(0.0, 0.0)], 2.0, Color::RED);
+        s.fill_path([Point::new(0.0, 0.0), Point::new(1.0, 1.0)], Color::RED);
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn fill_path_is_closed() {
+        let mut s = Scene::new();
+        s.fill_path(
+            [
+                Point::new(0.0, 0.0),
+                Point::new(4.0, 0.0),
+                Point::new(4.0, 4.0),
+            ],
+            Color::BLUE,
+        );
+        let items: Vec<_> = s.iter().cloned().collect();
+        match &items[0] {
+            Primitive::Path { points, closed, .. } => {
+                assert_eq!(points.len(), 3);
+                assert!(*closed);
             }
             other => panic!("unexpected primitive: {other:?}"),
         }

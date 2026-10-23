@@ -1,5 +1,7 @@
 //! 示例应用与工具：演示 wy-ui 框架的使用。
 
+pub mod snapshot;
+
 #[cfg(test)]
 mod tests {
     use wy_layout::{FlexChildConvert, FlexObject, Layout, LayoutInsideObject};

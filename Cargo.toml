@@ -6,7 +6,9 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/your-name/wy-ui"
+repository = "https://github.com/wy2010344/rust-mve"
+homepage = "https://github.com/wy2010344/rust-mve"
+description = "纯 Rust 信号驱动的声明式 UI 框架：MVE 响应式 + 自研一维布局 + Vello/wgpu 渲染"
 
 [workspace.dependencies]
 # 内部 crate
@@ -41,6 +43,13 @@ arboard = "3.6"
 
 # 文本边界
 unicode-segmentation = "1.12"
+
+# 离屏渲染出图（README 配图 / CI 截图）
+png = "0.18"
+
+# 行情示例：币安公开 REST（ureq 默认走 rustls，不依赖系统 OpenSSL）
+ureq = "2"
+serde_json = "1"
 
 [profile.release]
 lto = "fat"

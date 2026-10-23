@@ -11,6 +11,7 @@ pub mod composition;
 mod draw_context;
 pub mod event;
 mod math;
+pub mod offscreen;
 mod scene;
 pub mod selection;
 pub mod text_measure;
