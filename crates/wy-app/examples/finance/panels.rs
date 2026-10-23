@@ -390,10 +390,31 @@ pub fn depth_chart(
     }
 }
 
+/// 第 `i` 个桶边界的价格（`i = 0` 贴中间价，`i = count` 在最远边界）。
+fn bucket_price(mid: f64, step: f64, i: usize, bid: bool) -> f64 {
+    if bid {
+        mid - i as f64 * step
+    } else {
+        mid + i as f64 * step
+    }
+}
+
 /// 深度图单侧：阶梯**面积**（半透明填充）+ **折线**（描边）。
 ///
-/// 面积是"从曲线到基线"围成的多边形（用路径填充）；折线是同一条曲线的
-/// 描边（用路径 stroke）。两者共用一套采样点，保证边缘严丝合缝。
+/// 阶梯语义与 ooc `depth.ts` 的 `linePath` 逐点对应：
+/// - 买盘 `step='before'`：累计量在到达桶边界**之前**就已变化——每步先在
+///   旧 x 处垂直跳到新高度、再水平推进到下一个桶边界；曲线从远档走向中间价。
+/// - 卖盘 `step='after'`：累计量在越过桶边界**之后**才变化——每步先水平
+///   跨过边界、再在新 x 处垂直跳；曲线从中间价走向远档。
+///
+/// 关键不变量：**x 全程单调、每段非水平即垂直**。早先的实现给每个桶各自
+/// 生成一条「左边界→右边界」的水平段，桶与桶之间用斜线回跳（`x₁→x₀` 向右、
+/// 紧接着 `x₀→x₂` 向左斜跨过一整个桶），渲染出来是一把梳子/锯齿——那就是
+/// 深度图折线上的毛刺。且旧写法最远只画到 `count-1` 个桶，左/右边缘漏一桶。
+/// `depth_line_is_a_clean_staircase` 把这个不变量钉死。
+///
+/// 面积是「曲线 + 两个底角」围成的闭合多边形，折线是同一批点的描边，
+/// 两者共用采样点，边缘严丝合缝（对应 ooc `areaPath` 复用 `linePath`）。
 fn draw_side_area(scene: &mut Scene, plot: Rect, base: f32, g: &Geometry, bid: bool) {
     let side = if bid { &g.bid } else { &g.ask };
     if side.totals.len() < 2 || side.step <= 0.0 {
@@ -405,38 +426,31 @@ fn draw_side_area(scene: &mut Scene, plot: Rect, base: f32, g: &Geometry, bid: b
         (theme::DOWN_AREA, theme::DOWN_EDGE)
     };
 
-    // 采样点：每个桶边界的累计量（阶梯的拐点）
-    let mut pts: Vec<wy_render::Point> = Vec::new();
-    let buckets = side.totals.len() - 1;
-    for i in 0..buckets {
-        let near = if bid {
-            g.mid - i as f64 * side.step
-        } else {
-            g.mid + i as f64 * side.step
-        };
-        let far = if bid {
-            g.mid - (i as f64 + 1.0) * side.step
-        } else {
-            g.mid + (i as f64 + 1.0) * side.step
-        };
-        let x_left = plot.x + g.x_norm(far) * plot.width;
-        let x_right = plot.x + g.x_norm(near) * plot.width;
-        let h = g.y_norm(side.totals[i + 1]) * plot.height;
-        let y = base - h;
-        // 阶梯：先走到本桶的右边界（保持前一步高度），再升到新高度
-        if i == 0 {
-            pts.push(wy_render::Point::new(x_left, base));
-            pts.push(wy_render::Point::new(x_left, y));
-        } else {
-            pts.push(wy_render::Point::new(x_left, y));
+    let count = side.totals.len() - 1;
+    let x_of = |i: usize| plot.x + g.x_norm(bucket_price(g.mid, side.step, i, bid)) * plot.width;
+    let y_of = |i: usize| base - g.y_norm(side.totals[i]) * plot.height;
+
+    // 阶梯拐点：2 * count + 1 个顶点（含起点）
+    let mut pts: Vec<wy_render::Point> = Vec::with_capacity(2 * count + 1);
+    if bid {
+        // 从远档（累计最多）起步，走向中间价
+        pts.push(wy_render::Point::new(x_of(count), y_of(count)));
+        for k in (0..count).rev() {
+            // 垂直：在旧 x 处跳到新高度；水平：推进到本桶边界
+            pts.push(wy_render::Point::new(x_of(k + 1), y_of(k)));
+            pts.push(wy_render::Point::new(x_of(k), y_of(k)));
         }
-        pts.push(wy_render::Point::new(x_right, y));
-    }
-    if pts.len() < 2 {
-        return;
+    } else {
+        // 从中间价（累计 0）起步，走向远档
+        pts.push(wy_render::Point::new(x_of(0), y_of(0)));
+        for k in 1..=count {
+            // 水平：跨过桶边界；垂直：在新 x 处跳到新高度
+            pts.push(wy_render::Point::new(x_of(k), y_of(k - 1)));
+            pts.push(wy_render::Point::new(x_of(k), y_of(k)));
+        }
     }
 
-    // 面积：曲线 + 回到基线围成的闭合多边形
+    // 面积：曲线 + 回到基线围成的闭合多边形（ooc：line + 右下角 + 左下角 + Z）
     let mut area_pts = pts.clone();
     let last_x = area_pts.last().map(|p| p.x).unwrap_or(plot.x);
     area_pts.push(wy_render::Point::new(last_x, base));
@@ -550,6 +564,82 @@ mod tests {
             paths.len() >= 4,
             "深度图应画出面积与折线（路径图元），实际 {} 条",
             paths.len()
+        );
+    }
+
+    /// 折线必须是**干净阶梯**：x 全程单调、每段非水平即垂直。
+    ///
+    /// 曾经的 bug：每桶各自生成「左边界→右边界」水平段，桶间用斜线回跳
+    /// （x₁→x₀ 向右、再 x₀→x₂ 向左斜跨一整个桶），渲染出梳子状毛刺。
+    /// 这个测试把「无斜线段 + x 不回头」钉死，并校验两侧在中间价相接。
+    #[test]
+    fn depth_line_is_a_clean_staircase() {
+        let d = sample_depth();
+        let g = geometry(Some(&d), 1.0);
+        assert!(g.has_data);
+
+        let mut scene = Scene::new();
+        let body = Rect::new(0.0, 0.0, 400.0, 260.0);
+        depth_chart(&mut scene, body, &g, None);
+
+        // 只取描边路径（折线）；面积是填充（stroke_width == 0）
+        let lines: Vec<Vec<wy_render::Point>> = scene
+            .iter()
+            .filter_map(|p| match p {
+                wy_render::Primitive::Path {
+                    points,
+                    stroke_width,
+                    ..
+                } if *stroke_width > 0.0 => Some(points.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines.len(), 2, "买卖两侧各一条描边折线");
+
+        for pts in &lines {
+            // 每段必须水平或垂直（斜线就是毛刺）
+            for w in pts.windows(2) {
+                let dx = (w[1].x - w[0].x).abs();
+                let dy = (w[1].y - w[0].y).abs();
+                assert!(
+                    dx < 1e-3 || dy < 1e-3,
+                    "折线出现斜线段（毛刺）：({}, {}) → ({}, {})",
+                    w[0].x,
+                    w[0].y,
+                    w[1].x,
+                    w[1].y
+                );
+            }
+            // x 全程单调不减：从一侧边界走向另一侧，不回头
+            for w in pts.windows(2) {
+                assert!(
+                    w[1].x >= w[0].x - 1e-3,
+                    "折线 x 回头（毛刺）：({}, {}) → ({}, {})",
+                    w[0].x,
+                    w[0].y,
+                    w[1].x,
+                    w[1].y
+                );
+            }
+        }
+
+        // 两侧在中间价处相接：买盘收到 mid_x、卖盘从 mid_x 出发
+        let plot = depth_plot(body);
+        let mid_x = plot.x + g.x_norm(g.mid) * plot.width;
+        let bid_end = lines[0].last().expect("买盘应有顶点").x;
+        let ask_start = lines[1].first().expect("卖盘应有顶点").x;
+        assert!((bid_end - mid_x).abs() < 1e-3, "买盘应收在中间价");
+        assert!((ask_start - mid_x).abs() < 1e-3, "卖盘应从中间价出发");
+
+        // 曲线覆盖整个半幅：首/末点应贴到绘图区左右边缘（旧写法漏画最远一桶）
+        assert!(
+            (lines[0][0].x - plot.x).abs() < 1e-3,
+            "买盘应从绘图区左边缘出发"
+        );
+        let right = plot.x + plot.width;
+        assert!(
+            (lines[1].last().expect("卖盘应有顶点").x - right).abs() < 1e-3,
+            "卖盘应画到绘图区右边缘"
         );
     }
 
