@@ -704,6 +704,15 @@ fn gen_attr_assign(fname: &Ident, value: &Expr) -> Option<TokenStream2> {
                 );
             }
         }),
+
+        "on_click_capture" => Some(quote! {
+            {
+                let __f = #value;
+                __n.on_click_capture_fn = ::core::option::Option::Some(
+                    ::std::rc::Rc::new(move |_ev| __f())
+                );
+            }
+        }),
         "on_hover" => Some(quote! {
             {
                 let __f = #m::fc::__fn_bool(#value);
@@ -720,12 +729,30 @@ fn gen_attr_assign(fname: &Ident, value: &Expr) -> Option<TokenStream2> {
                 );
             }
         }),
+
+        "on_wheel_capture" => Some(quote! {
+            {
+                let __f = #m::fc::__fn_ptr(#value);
+                __n.on_wheel_capture_fn = ::core::option::Option::Some(
+                    ::std::rc::Rc::new(move |__ev: &mut _| __f(__ev.wheel))
+                );
+            }
+        }),
         // 需要 `stop_propagation()` / 局部坐标时用这个（图表缩放要吃掉滚轮事件，
         // 否则父级滚动容器会跟着动）。
         "on_wheel_ev" => Some(quote! {
             {
                 let __f = #m::fc::__fn_ptr(#value);
                 __n.on_wheel_fn = ::core::option::Option::Some(
+                    ::std::rc::Rc::new(move |__ev: &mut _| __f(__ev))
+                );
+            }
+        }),
+
+        "on_wheel_ev_capture" => Some(quote! {
+            {
+                let __f = #m::fc::__fn_ptr(#value);
+                __n.on_wheel_capture_fn = ::core::option::Option::Some(
                     ::std::rc::Rc::new(move |__ev: &mut _| __f(__ev))
                 );
             }
@@ -749,10 +776,28 @@ fn gen_attr_assign(fname: &Ident, value: &Expr) -> Option<TokenStream2> {
                 );
             }
         }),
+
+        "on_down_capture" => Some(quote! {
+            {
+                let __f = #m::fc::__fn_ptr(#value);
+                __n.on_down_capture_fn = ::core::option::Option::Some(
+                    ::std::rc::Rc::new(move |__ev: &mut _| __f(__ev))
+                );
+            }
+        }),
         "on_up" => Some(quote! {
             {
                 let __f = #m::fc::__fn_ptr(#value);
                 __n.on_up_fn = ::core::option::Option::Some(
+                    ::std::rc::Rc::new(move |__ev: &mut _| __f(__ev))
+                );
+            }
+        }),
+
+        "on_up_capture" => Some(quote! {
+            {
+                let __f = #m::fc::__fn_ptr(#value);
+                __n.on_up_capture_fn = ::core::option::Option::Some(
                     ::std::rc::Rc::new(move |__ev: &mut _| __f(__ev))
                 );
             }
@@ -766,6 +811,15 @@ fn gen_attr_assign(fname: &Ident, value: &Expr) -> Option<TokenStream2> {
                 );
             }
         }),
+
+        "on_double_click_capture" => Some(quote! {
+            {
+                let __f = #m::fc::__fn_ptr(#value);
+                __n.on_double_click_capture_fn = ::core::option::Option::Some(
+                    ::std::rc::Rc::new(move |__ev: &mut _| __f(__ev))
+                );
+            }
+        }),
         "on_context_menu" => Some(quote! {
             {
                 let __f = #m::fc::__fn_ptr(#value);
@@ -774,10 +828,28 @@ fn gen_attr_assign(fname: &Ident, value: &Expr) -> Option<TokenStream2> {
                 );
             }
         }),
+
+        "on_context_menu_capture" => Some(quote! {
+            {
+                let __f = #m::fc::__fn_ptr(#value);
+                __n.on_context_menu_capture_fn = ::core::option::Option::Some(
+                    ::std::rc::Rc::new(move |__ev: &mut _| __f(__ev))
+                );
+            }
+        }),
         "on_drag_move" => Some(quote! {
             {
                 let __f = #m::fc::__fn_ptr(#value);
                 __n.on_move_fn = ::core::option::Option::Some(
+                    ::std::rc::Rc::new(move |__ev: &mut _| __f(__ev))
+                );
+            }
+        }),
+
+        "on_drag_move_capture" => Some(quote! {
+            {
+                let __f = #m::fc::__fn_ptr(#value);
+                __n.on_move_capture_fn = ::core::option::Option::Some(
                     ::std::rc::Rc::new(move |__ev: &mut _| __f(__ev))
                 );
             }
@@ -905,14 +977,21 @@ fn layout_rc_field(fname: &str) -> Option<&'static str> {
         "measure" => "measure_fn",
         "draw" => "draw_fn",
         "on_click" => "on_click_fn",
+        "on_click_capture" => "on_click_capture_fn",
         "on_hover" => "on_hover_fn",
         "on_wheel" | "on_wheel_ev" => "on_wheel_fn",
+        "on_wheel_capture" | "on_wheel_ev_capture" => "on_wheel_capture_fn",
         "on_move" => "on_hover_move_fn",
         "on_down" => "on_down_fn",
+        "on_down_capture" => "on_down_capture_fn",
         "on_up" => "on_up_fn",
+        "on_up_capture" => "on_up_capture_fn",
         "on_double_click" => "on_double_click_fn",
+        "on_double_click_capture" => "on_double_click_capture_fn",
         "on_context_menu" => "on_context_menu_fn",
+        "on_context_menu_capture" => "on_context_menu_capture_fn",
         "on_drag_move" => "on_move_fn",
+        "on_drag_move_capture" => "on_move_capture_fn",
         "on_key" => "key_fn",
         "on_click_ev" => "on_click_fn",
         _ => return None,

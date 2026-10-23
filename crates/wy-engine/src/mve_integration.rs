@@ -188,14 +188,33 @@ fn dispatch_click_nodes(
     }
 }
 
-/// 沿给定命中链分发 down/click 两阶段（链为 叶→根，携带绝对原点）。
+/// 沿给定命中链分发 down/click 两阶段 × 捕获/冒泡两相位（链为 叶→根）。
+///
+/// 复刻 Kotlin `dispatchPointer`：Kotlin 对 Down 与 Click 各做一次
+/// dispatch（各自 capture+bubble）；本 port 无 `method` 字段，阶段由
+/// **调用哪个 handler** 表达（runOnDown vs runOnClick），故四轮顺序为
+/// down_capture（根→叶）→ click_capture（根→叶）→ down（叶→根）→
+/// click（叶→根）。任一相位 `stopPropagation` 即止。
 fn dispatch_click_chain(chain: &[(Node, (f32, f32))], event: &mut wy_mve::PointerEvent) {
-    // 链：叶→根（与调度一致）。每项 (node, 绝对位置)，换算局部坐标。
+    // 捕获相位：链逆序 = 根→叶（外层先于内层看到事件）
+    for (node, pos) in chain.iter().rev() {
+        event.x = event.root_x - pos.0;
+        event.y = event.root_y - pos.1;
+        node.run_on_down_capture(event);
+        if event.stopped {
+            return;
+        }
+    }
+    for (node, pos) in chain.iter().rev() {
+        event.x = event.root_x - pos.0;
+        event.y = event.root_y - pos.1;
+        node.run_on_click_capture(event);
+        if event.stopped {
+            return;
+        }
+    }
+    // 冒泡相位：叶→根（内层先于外层）
     for (node, pos) in chain {
-        // Kotlin 区分 Down/Click 的方式是**调用哪个 handler**（runOnDown vs
-        // runOnClick），不是事件上的字段——本 Rust port 的 `PointerEvent`
-        // 无 `method` 字段（编译器 `available fields` 佐证）。两阶段循环本身
-        // 就已表达阶段：第一轮 = Down，第二轮 = Click。
         event.x = event.root_x - pos.0;
         event.y = event.root_y - pos.1;
         node.run_on_down(event);
@@ -227,9 +246,20 @@ fn find_identity(nodes: &[Node], id: &Rc<()>) -> Option<Node> {
 }
 
 /// 沿捕获链分发指针移动（叶→根；拖动扩展选区）。
+///
+/// 双相位：capture（根→叶）先走，再冒泡（叶→根）——复刻 Kotlin
+/// `onPointerMoveCapture` / `onPointerMove`。
 fn dispatch_move_chain(chain: &[(Node, (f32, f32))], x: f32, y: f32, shift: bool) {
     let mut event = wy_mve::PointerEvent::new(x, y);
     event.shift = shift;
+    for (node, pos) in chain.iter().rev() {
+        event.x = x - pos.0;
+        event.y = y - pos.1;
+        node.run_on_move_capture(&mut event);
+        if event.stopped {
+            return;
+        }
+    }
     for (node, pos) in chain {
         event.x = x - pos.0;
         event.y = y - pos.1;
@@ -241,9 +271,19 @@ fn dispatch_move_chain(chain: &[(Node, (f32, f32))], x: f32, y: f32, shift: bool
 }
 
 /// 沿捕获链分发指针释放（叶→根；结束拖动会话）。
+///
+/// 双相位：capture（根→叶）先走，再冒泡（叶→根）。
 fn dispatch_up_chain(chain: &[(Node, (f32, f32))], x: f32, y: f32, shift: bool) {
     let mut event = wy_mve::PointerEvent::new(x, y);
     event.shift = shift;
+    for (node, pos) in chain.iter().rev() {
+        event.x = x - pos.0;
+        event.y = y - pos.1;
+        node.run_on_up_capture(&mut event);
+        if event.stopped {
+            return;
+        }
+    }
     for (node, pos) in chain {
         event.x = x - pos.0;
         event.y = y - pos.1;
@@ -258,6 +298,10 @@ fn dispatch_up_chain(chain: &[(Node, (f32, f32))], x: f32, y: f32, shift: bool) 
 ///
 /// 与 [`dispatch_move_chain`] 的区别：那条是"按下期间"（拖选/拖拽），
 /// 这条只在未按下时派发，且走 `run_hover_move`（语义独立的回调）。
+///
+/// 单相位：Kotlin 无 HoverCapture 对应物（其 Capture 变体只覆盖
+/// Click/Down/Up/Move/Wheel/DoubleClick/ContextMenu），悬停移动不设
+/// 捕获相位。
 fn dispatch_hover_move_chain(chain: &[(Node, (f32, f32))], x: f32, y: f32) {
     let mut event = wy_mve::PointerEvent::new(x, y);
     for (node, pos) in chain {
@@ -277,6 +321,16 @@ fn dispatch_hover_move_chain(chain: &[(Node, (f32, f32))], x: f32, y: f32) {
 fn dispatch_wheel_chain(chain: &[(Node, (f32, f32))], x: f32, y: f32, wheel: f32) -> bool {
     let mut event = wy_mve::PointerEvent::new(x, y);
     event.wheel = wheel;
+    // 捕获相位（根→叶）：外层可先于图表/列表看到滚轮
+    for (node, pos) in chain.iter().rev() {
+        event.x = x - pos.0;
+        event.y = y - pos.1;
+        node.run_wheel_capture(&mut event);
+        if event.stopped {
+            return true;
+        }
+    }
+    // 冒泡相位（叶→根）：最深层（图表、盘口列表）先消费
     for (node, pos) in chain {
         event.x = x - pos.0;
         event.y = y - pos.1;
@@ -289,7 +343,17 @@ fn dispatch_wheel_chain(chain: &[(Node, (f32, f32))], x: f32, y: f32, wheel: f32
 }
 
 /// 沿命中链分发双击（叶→根）。判定参数见 [`DOUBLE_CLICK_INTERVAL_MS`]。
+///
+/// 双相位：capture（根→叶）先走，再冒泡（叶→根）。
 fn dispatch_double_click_chain(chain: &[(Node, (f32, f32))], event: &mut wy_mve::PointerEvent) {
+    for (node, pos) in chain.iter().rev() {
+        event.x = event.root_x - pos.0;
+        event.y = event.root_y - pos.1;
+        node.run_on_double_click_capture(event);
+        if event.stopped {
+            return;
+        }
+    }
     for (node, pos) in chain {
         event.x = event.root_x - pos.0;
         event.y = event.root_y - pos.1;
@@ -301,7 +365,17 @@ fn dispatch_double_click_chain(chain: &[(Node, (f32, f32))], event: &mut wy_mve:
 }
 
 /// 沿命中链分发右键菜单（叶→根；右键不走 Down/Click）。
+///
+/// 双相位：capture（根→叶）先走，再冒泡（叶→根）。
 fn dispatch_context_menu_chain(chain: &[(Node, (f32, f32))], event: &mut wy_mve::PointerEvent) {
+    for (node, pos) in chain.iter().rev() {
+        event.x = event.root_x - pos.0;
+        event.y = event.root_y - pos.1;
+        node.run_on_context_menu_capture(event);
+        if event.stopped {
+            return;
+        }
+    }
     for (node, pos) in chain {
         event.x = event.root_x - pos.0;
         event.y = event.root_y - pos.1;
@@ -1037,6 +1111,161 @@ mod tests {
             *log.borrow(),
             vec!["menu".to_string(), "down".to_string(), "click".to_string()],
             "左键路径不受右键影响"
+        );
+    }
+
+    /// 构造「外层（铺满+命中）> 内层（叶子+命中）」两层链，
+    /// 外层挂捕获回调、内层挂冒泡回调，返回 (app, log)。
+    fn two_level_capture_app(
+        outer_log: &str,
+        inner_log: &str,
+        outer_stop: bool,
+    ) -> (MveApp, Rc<RefCell<Vec<String>>>) {
+        let log = Rc::new(RefCell::new(Vec::<String>::new()));
+        let l_outer = Rc::clone(&log);
+        let l_inner = Rc::clone(&log);
+        let outer_tag = outer_log.to_string();
+        let inner_tag = inner_log.to_string();
+        let app = MveApp::new(move |cx| {
+            let l_outer = Rc::clone(&l_outer);
+            let l_inner = Rc::clone(&l_inner);
+            let outer_tag = outer_tag.clone();
+            let inner_tag = inner_tag.clone();
+            cx.child(Node {
+                width: 200.0,
+                height: 200.0,
+                hit_test_fn: Rc::new(|_, _| true),
+                on_click_capture_fn: Some(Rc::new(move |ev| {
+                    l_outer.borrow_mut().push(outer_tag.clone());
+                    if outer_stop {
+                        ev.stop_propagation();
+                    }
+                })),
+                arg_children_fn: Rc::new(move |cx| {
+                    let l_inner = Rc::clone(&l_inner);
+                    let inner_tag = inner_tag.clone();
+                    cx.child(Node {
+                        width: 100.0,
+                        height: 100.0,
+                        hit_test_fn: Rc::new(|_, _| true),
+                        on_click_fn: Some(Rc::new(move |_ev| {
+                            l_inner.borrow_mut().push(inner_tag.clone());
+                        })),
+                        ..Node::default()
+                    });
+                }),
+                ..Node::default()
+            });
+        });
+        (app, log)
+    }
+
+    #[test]
+    fn capture_phase_runs_before_bubble() {
+        // 复刻 Kotlin dispatchPointer：捕获（根→叶）先于冒泡（叶→根）——
+        // 外层的捕获必须先于内层的冒泡触发。
+        let (mut app, log) = two_level_capture_app("outer_capture", "inner_bubble", false);
+        let mut scene = Scene::new();
+        app.draw(&mut scene, 200.0, 200.0);
+
+        let mouse = |state: winit::event::ElementState| winit::event::WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state,
+            button: winit::event::MouseButton::Left,
+        };
+        let cursor = winit::event::WindowEvent::CursorMoved {
+            device_id: winit::event::DeviceId::dummy(),
+            position: winit::dpi::PhysicalPosition::new(50.0, 50.0),
+        };
+        app.handle_event(&cursor);
+        app.handle_event(&mouse(winit::event::ElementState::Pressed));
+        app.handle_event(&mouse(winit::event::ElementState::Released));
+
+        assert_eq!(
+            *log.borrow(),
+            vec!["outer_capture".to_string(), "inner_bubble".to_string()],
+            "捕获（外层）必须先于冒泡（内层）"
+        );
+    }
+
+    #[test]
+    fn capture_stop_propagation_blocks_bubble() {
+        // 捕获相位 stopPropagation → 冒泡整段不再派发（复刻 Kotlin
+        // dispatchPointer 的 `if (e.stoppedProgression) return`）。
+        let (mut app, log) = two_level_capture_app("outer_capture", "inner_bubble", true);
+        let mut scene = Scene::new();
+        app.draw(&mut scene, 200.0, 200.0);
+
+        let mouse = |state: winit::event::ElementState| winit::event::WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state,
+            button: winit::event::MouseButton::Left,
+        };
+        let cursor = winit::event::WindowEvent::CursorMoved {
+            device_id: winit::event::DeviceId::dummy(),
+            position: winit::dpi::PhysicalPosition::new(50.0, 50.0),
+        };
+        app.handle_event(&cursor);
+        app.handle_event(&mouse(winit::event::ElementState::Pressed));
+        app.handle_event(&mouse(winit::event::ElementState::Released));
+
+        assert_eq!(
+            *log.borrow(),
+            vec!["outer_capture".to_string()],
+            "捕获拦截后内层冒泡不应收到事件"
+        );
+    }
+
+    #[test]
+    fn wheel_capture_runs_before_bubble() {
+        // 滚轮同样双相位：外层 wheel_capture 先于内层 wheel
+        let log = Rc::new(RefCell::new(Vec::<String>::new()));
+        let l_outer = Rc::clone(&log);
+        let l_inner = Rc::clone(&log);
+        let mut app = MveApp::new(move |cx| {
+            let l_outer = Rc::clone(&l_outer);
+            let l_inner = Rc::clone(&l_inner);
+            cx.child(Node {
+                width: 200.0,
+                height: 200.0,
+                hit_test_fn: Rc::new(|_, _| true),
+                on_wheel_capture_fn: Some(Rc::new(move |_ev| {
+                    l_outer.borrow_mut().push("outer_capture".to_string());
+                })),
+                arg_children_fn: Rc::new(move |cx| {
+                    let l_inner = Rc::clone(&l_inner);
+                    cx.child(Node {
+                        width: 100.0,
+                        height: 100.0,
+                        hit_test_fn: Rc::new(|_, _| true),
+                        on_wheel_fn: Some(Rc::new(move |_ev| {
+                            l_inner.borrow_mut().push("inner_bubble".to_string());
+                        })),
+                        ..Node::default()
+                    });
+                }),
+                ..Node::default()
+            });
+        });
+        let mut scene = Scene::new();
+        app.draw(&mut scene, 200.0, 200.0);
+
+        let cursor = winit::event::WindowEvent::CursorMoved {
+            device_id: winit::event::DeviceId::dummy(),
+            position: winit::dpi::PhysicalPosition::new(50.0, 50.0),
+        };
+        let wheel = winit::event::WindowEvent::MouseWheel {
+            device_id: winit::event::DeviceId::dummy(),
+            delta: winit::event::MouseScrollDelta::LineDelta(0.0, 1.0),
+            phase: winit::event::TouchPhase::Moved,
+        };
+        app.handle_event(&cursor);
+        app.handle_event(&wheel);
+
+        assert_eq!(
+            *log.borrow(),
+            vec!["outer_capture".to_string(), "inner_bubble".to_string()],
+            "滚轮捕获先于冒泡"
         );
     }
 

@@ -73,21 +73,33 @@ pub struct Node {
     pub hit_test_fn: HitTestFn,
     /// 点击事件。
     pub on_click_fn: Option<ClickFn>,
+    /// 捕获相位孪生（先于冒泡派发，沿链根→叶；复刻 Kotlin onPointerCapture）。
+    pub on_click_capture_fn: Option<ClickFn>,
     /// 按下事件。
     pub on_down_fn: Option<ClickFn>,
+    /// 捕获相位孪生（先于冒泡派发，沿链根→叶；复刻 Kotlin onPointerCapture）。
+    pub on_down_capture_fn: Option<ClickFn>,
     /// 释放事件。
     pub on_up_fn: Option<ClickFn>,
+    /// 捕获相位孪生（先于冒泡派发，沿链根→叶；复刻 Kotlin onPointerCapture）。
+    pub on_up_capture_fn: Option<ClickFn>,
     /// 双击回调（400ms 内同点 5px 内的第二次点击；双击**不吞**单击——
     /// click 先派发，构成双击再补发，对齐 Kotlin `onPointerDoubleClick`）。
     pub on_double_click_fn: Option<ClickFn>,
+    /// 捕获相位孪生（先于冒泡派发，沿链根→叶；复刻 Kotlin onPointerCapture）。
+    pub on_double_click_capture_fn: Option<ClickFn>,
     /// 右键菜单回调（右键按下触发；右键**不派发** Down/Click，
     /// 对齐 Kotlin `onPointerContextMenu`）。
     pub on_context_menu_fn: Option<ClickFn>,
+    /// 捕获相位孪生（先于冒泡派发，沿链根→叶；复刻 Kotlin onPointerCapture）。
+    pub on_context_menu_capture_fn: Option<ClickFn>,
     /// 指针移动事件（**按下捕获期间**派发：拖选、拖拽）。
     ///
     /// 不按键的悬停移动走 [`Node::on_hover_move_fn`]，两者语义不同，
     /// 避免文本框这类"移动即扩选"的节点在悬停时被误触发。
     pub on_move_fn: Option<ClickFn>,
+    /// 捕获相位孪生（先于冒泡派发，沿链根→叶；复刻 Kotlin onPointerCapture）。
+    pub on_move_capture_fn: Option<ClickFn>,
     /// 悬停移动事件（**未按下**时指针在节点上移动，携带局部坐标）。
     ///
     /// 引擎沿悬停链派发（叶→根）。用于十字线、悬停读数、tooltip——
@@ -96,6 +108,8 @@ pub struct Node {
     pub on_hover_move_fn: Option<ClickFn>,
     /// 滚轮事件（`PointerEvent::wheel` 为带符号滚动量，正数向下/放大）。
     pub on_wheel_fn: Option<ClickFn>,
+    /// 捕获相位孪生（先于冒泡派发，沿链根→叶；复刻 Kotlin onPointerCapture）。
+    pub on_wheel_capture_fn: Option<ClickFn>,
     /// 悬停变化（`true` = 指针进入，`false` = 离开）。
     ///
     /// 引擎在 `CursorMoved` 时比对命中链差异后派发，对应浏览器
@@ -239,13 +253,20 @@ impl Clone for Node {
             draw_fn: Rc::clone(&self.draw_fn),
             hit_test_fn: Rc::clone(&self.hit_test_fn),
             on_click_fn: self.on_click_fn.as_ref().map(Rc::clone),
+            on_click_capture_fn: self.on_click_capture_fn.as_ref().map(Rc::clone),
             on_down_fn: self.on_down_fn.as_ref().map(Rc::clone),
+            on_down_capture_fn: self.on_down_capture_fn.as_ref().map(Rc::clone),
             on_up_fn: self.on_up_fn.as_ref().map(Rc::clone),
+            on_up_capture_fn: self.on_up_capture_fn.as_ref().map(Rc::clone),
             on_double_click_fn: self.on_double_click_fn.as_ref().map(Rc::clone),
+            on_double_click_capture_fn: self.on_double_click_capture_fn.as_ref().map(Rc::clone),
             on_context_menu_fn: self.on_context_menu_fn.as_ref().map(Rc::clone),
+            on_context_menu_capture_fn: self.on_context_menu_capture_fn.as_ref().map(Rc::clone),
             on_move_fn: self.on_move_fn.as_ref().map(Rc::clone),
+            on_move_capture_fn: self.on_move_capture_fn.as_ref().map(Rc::clone),
             on_hover_move_fn: self.on_hover_move_fn.as_ref().map(Rc::clone),
             on_wheel_fn: self.on_wheel_fn.as_ref().map(Rc::clone),
+            on_wheel_capture_fn: self.on_wheel_capture_fn.as_ref().map(Rc::clone),
             on_hover_fn: self.on_hover_fn.as_ref().map(Rc::clone),
             key_fn: self.key_fn.as_ref().map(Rc::clone),
             ime_fn: self.ime_fn.as_ref().map(Rc::clone),
@@ -323,13 +344,20 @@ impl Default for Node {
             draw_fn: Rc::new(|_| {}),
             hit_test_fn: Rc::new(|_, _| true),
             on_click_fn: None,
+            on_click_capture_fn: None,
             on_down_fn: None,
+            on_down_capture_fn: None,
             on_up_fn: None,
+            on_up_capture_fn: None,
             on_double_click_fn: None,
+            on_double_click_capture_fn: None,
             on_context_menu_fn: None,
+            on_context_menu_capture_fn: None,
             on_move_fn: None,
+            on_move_capture_fn: None,
             on_hover_move_fn: None,
             on_wheel_fn: None,
+            on_wheel_capture_fn: None,
             on_hover_fn: None,
             key_fn: None,
             ime_fn: None,
@@ -403,14 +431,35 @@ impl Node {
         }
     }
 
+    /// 捕获相位孪生（引擎沿链**根→叶**先派发一遍，再走冒泡）。
+    pub fn run_on_click_capture(&self, event: &mut PointerEvent) {
+        if let Some(f) = &self.on_click_capture_fn {
+            f(event);
+        }
+    }
+
     pub fn run_on_down(&self, event: &mut PointerEvent) {
         if let Some(f) = &self.on_down_fn {
             f(event);
         }
     }
 
+    /// 捕获相位孪生（引擎沿链**根→叶**先派发一遍，再走冒泡）。
+    pub fn run_on_down_capture(&self, event: &mut PointerEvent) {
+        if let Some(f) = &self.on_down_capture_fn {
+            f(event);
+        }
+    }
+
     pub fn run_on_up(&self, event: &mut PointerEvent) {
         if let Some(f) = &self.on_up_fn {
+            f(event);
+        }
+    }
+
+    /// 捕获相位孪生（引擎沿链**根→叶**先派发一遍，再走冒泡）。
+    pub fn run_on_up_capture(&self, event: &mut PointerEvent) {
+        if let Some(f) = &self.on_up_capture_fn {
             f(event);
         }
     }
@@ -422,9 +471,23 @@ impl Node {
         }
     }
 
+    /// 捕获相位孪生（引擎沿链**根→叶**先派发一遍，再走冒泡）。
+    pub fn run_on_double_click_capture(&self, event: &mut PointerEvent) {
+        if let Some(f) = &self.on_double_click_capture_fn {
+            f(event);
+        }
+    }
+
     /// 右键菜单回调（右键按下沿命中链调用；不走 Down/Click）。
     pub fn run_on_context_menu(&self, event: &mut PointerEvent) {
         if let Some(f) = &self.on_context_menu_fn {
+            f(event);
+        }
+    }
+
+    /// 捕获相位孪生（引擎沿链**根→叶**先派发一遍，再走冒泡）。
+    pub fn run_on_context_menu_capture(&self, event: &mut PointerEvent) {
+        if let Some(f) = &self.on_context_menu_capture_fn {
             f(event);
         }
     }
@@ -435,9 +498,23 @@ impl Node {
         }
     }
 
+    /// 捕获相位孪生（引擎沿链**根→叶**先派发一遍，再走冒泡）。
+    pub fn run_on_move_capture(&self, event: &mut PointerEvent) {
+        if let Some(f) = &self.on_move_capture_fn {
+            f(event);
+        }
+    }
+
     /// 触发滚轮回调（`event.wheel` 为带符号滚动量）。
     pub fn run_wheel(&self, event: &mut PointerEvent) {
         if let Some(f) = &self.on_wheel_fn {
+            f(event);
+        }
+    }
+
+    /// 捕获相位孪生（引擎沿链**根→叶**先派发一遍，再走冒泡）。
+    pub fn run_wheel_capture(&self, event: &mut PointerEvent) {
+        if let Some(f) = &self.on_wheel_capture_fn {
             f(event);
         }
     }
