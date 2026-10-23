@@ -3,7 +3,7 @@
 **纯 Rust 的信号驱动 UI 框架：树只建一次，改数据只重画该重画的那部分。**
 
 [![CI](https://github.com/wy2010344/rust-mve/actions/workflows/ci.yml/badge.svg)](https://github.com/wy2010344/rust-mve/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-670%20passing-brightgreen)](https://github.com/wy2010344/rust-mve/actions/workflows/ci.yml)
+[![tests](https://img.shields.io/badge/tests-672%20passing-brightgreen)](https://github.com/wy2010344/rust-mve/actions/workflows/ci.yml)
 [![clippy](https://img.shields.io/badge/clippy-0%20warnings-brightgreen)](https://github.com/wy2010344/rust-mve/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
@@ -95,6 +95,13 @@ crates/
 
 ## 跑起来
 
+### 不想装 Rust？
+
+从 [Releases](https://github.com/wy2010344/rust-mve/releases) 下载 `rust-mve-demo-windows-x64.zip`，
+解压后双击任意 `.exe` 即可 —— **无需安装 Rust 或任何运行库**。
+
+### 从源码跑
+
 ```bash
 git clone https://github.com/wy2010344/rust-mve.git
 cd rust-mve
@@ -111,6 +118,12 @@ cargo run -p wy-app --example counter
 
 需要 Rust 1.75+ 和一块能跑 wgpu 的显卡。
 交易看板顶栏可以在 `SIM` / `BINANCE` / `MOCK` 之间切换数据源。
+
+> **想不出图？** 每个示例都支持 `--snapshot`，不开窗口直接渲染成 PNG：
+> ```bash
+> cargo run -p wy-app --example finance -- --snapshot shot.png
+> ```
+> README 上面那两张图就是这么生成的 —— **图跟着代码走，不会过期**。
 
 ---
 
