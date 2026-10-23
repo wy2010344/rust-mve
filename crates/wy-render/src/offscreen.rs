@@ -243,9 +243,43 @@ mod tests {
     use super::*;
     use crate::{Color, Rect};
 
-    /// 离屏渲染需要一个真实 GPU 适配器，没有就跳过（不能因此让 CI 变红）。
+    /// PNG 编码是**纯 CPU**逻辑，任何机器上都能测——这条永远跑。
+    #[test]
+    fn encodes_rgba_to_a_valid_png() {
+        // 2×2 的红色不透明像素
+        let rgba = vec![
+            255u8, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+        ];
+        let png = encode_png(&rgba, 2, 2).expect("PNG 编码不应失败");
+
+        // PNG magic number
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "输出应是合法 PNG");
+        assert!(png.len() > 64, "PNG 不应为空：{}", png.len());
+        // IHDR 里的宽高必须与我们给的一致
+        assert_eq!(&png[16..20], &[0, 0, 0, 2], "宽度应为 2");
+        assert_eq!(&png[20..24], &[0, 0, 0, 2], "高度应为 2");
+    }
+
+    /// **需要真实 GPU 的离屏渲染测试**。
+    ///
+    /// 默认**跳过**，需要显式开启（`WY_OFFSCREEN_TEST=1 cargo test`）。
+    ///
+    /// 为什么不默认跑：CI runner 上没有真显卡，wgpu 会退到软件光栅化后端
+    /// （WARP / llvmpipe），在那上面 Vello 的计算着色器路径会段错误
+    /// （Windows 上表现为 `0xc0000005`）——**不是我们的代码有 bug，
+    /// 但测试进程整个崩掉，CI 变红，还带不到任何有用信息**。
+    ///
+    /// 想验证离屏渲染真的有出图，在有显卡的机器上跑：
+    /// ```text
+    /// WY_OFFSCREEN_TEST=1 cargo test -p wy-render offscreen
+    /// ```
     #[test]
     fn renders_a_filled_rect_to_png() {
+        if std::env::var_os("WY_OFFSCREEN_TEST").is_none() {
+            eprintln!("跳过：离屏渲染测试需要真实 GPU，设 WY_OFFSCREEN_TEST=1 开启");
+            return;
+        }
+
         let mut scene = Scene::new();
         scene.fill_rect(Rect::new(0.0, 0.0, 32.0, 16.0), Color::from_u32(0xFF0000FF));
 
@@ -257,7 +291,6 @@ mod tests {
             }
             Err(e) => panic!("离屏渲染失败：{e}"),
         };
-        // PNG magic number
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "输出应是合法 PNG");
         assert!(png.len() > 64, "PNG 不应为空：{}", png.len());
     }

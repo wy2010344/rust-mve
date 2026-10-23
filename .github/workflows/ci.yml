@@ -43,6 +43,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # fontique 在 Linux 上走 fontconfig 绑定，缺 fontconfig 会在
+      # 构建期报 `yeslogic-fontconfig-sys` 失败——不是代码问题，是系统依赖。
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev libfreetype6-dev pkg-config
+
       - name: 安装 Rust 工具链
         run: rustup show active-toolchain
 
@@ -53,3 +60,72 @@ jobs:
 
       - name: 单元测试
         run: cargo test --workspace --all-targets
+
+  # 打 tag 时自动出「解压即用」的 Windows 产物。
+  #
+  # 为什么要做：Rust 项目 `cargo build --release` 要等几分钟，
+  # 90% 的人走到这一步就走了。一个几十 MB 的 zip、解压双击，
+  # 转化率差十倍。
+  release:
+    name: 构建 Windows 产物
+    needs: check
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链
+        run: rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 构建 release
+        run: cargo build --release -p wy-app --example finance --example shadcn --example counter
+
+      - name: 打包
+        shell: pwsh
+        run: |
+          $dir = "rust-mve-demo-windows-x64"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Copy-Item "target/release/examples/finance.exe" "$dir/交易看板.exe"
+          Copy-Item "target/release/examples/shadcn.exe" "$dir/组件看板.exe"
+          Copy-Item "target/release/examples/counter.exe" "$dir/最小示例.exe"
+          @"
+          解压后**双击任意 .exe 即可运行**，无需安装 Rust 或任何运行库。
+
+          - 交易看板.exe  交易看板（默认用内置合成行情，不联网也能跑）
+          - 组件看板.exe  shadcn 风格看板（表单 / 待办 / 统计卡片）
+          - 最小示例.exe  计数器（最小可运行示例）
+
+          系统要求：Windows x64，需要一块支持 Vulkan / DX12 的显卡。
+
+          从源码运行：
+            cargo run -p wy-app --example finance
+            cargo run -p wy-app --example shadcn
+            cargo run -p wy-app --example counter
+          "@ | Out-File -FilePath "$dir/README.txt" -Encoding utf8
+          Compress-Archive -Path $dir -DestinationPath "$dir.zip"
+
+      - name: 上传 Release 资产
+        uses: softprops/action-gh-release@v2
+        with:
+          files: rust-mve-demo-windows-x64.zip
+          body: |
+            ## 直接运行（无需编译）
+
+            1. 下载 `rust-mve-demo-windows-x64.zip`
+            2. 解压，双击任意 `.exe`
+            3. **无需安装 Rust / 任何运行库**
+
+            交易看板默认使用**内置合成行情**，不联网也能跑完整界面。
+
+            ## 从源码运行
+
+            ```bash
+            cargo run -p wy-app --example finance
+            cargo run -p wy-app --example shadcn
+            cargo run -p wy-app --example counter
+            ```
+
