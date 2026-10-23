@@ -136,16 +136,26 @@ pub fn panel_with(
     let mut header_items = vec![title_cell, badge_cell];
     header_items.extend(actions);
 
-    let mut header = wy_mve::hbox_gap(6.0, header_items);
-    header.height = HEADER_H;
-    header.padding = 12.0;
-    header.align_items = AlignItem::Center;
-    header.skip_draw = true;
-
-    let mut content = wy_mve::vbox(children);
-    content.gap = 0.0;
-    content.grow = 1.0;
-    content.align_items = AlignItem::Stretch;
+    let header = rsx! {
+        hbox {
+            gap: 6.0,
+            height: HEADER_H,
+            padding: 12.0,
+            align_items: AlignItem::Center,
+            skip_draw: true,
+            ..header_items
+        }
+    }
+    .into_node();
+    let content = rsx! {
+        vbox {
+            gap: 0.0,
+            grow: 1.0,
+            align_items: AlignItem::Stretch,
+            ..children
+        }
+    }
+    .into_node();
 
     rsx! {
         vbox {

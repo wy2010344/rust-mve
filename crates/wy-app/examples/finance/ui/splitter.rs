@@ -16,7 +16,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use wy_mve::{current_box, Node, PointerEvent};
+use wy_mve::{current_box, rsx, AlignItem, Node, PointerEvent};
 use wy_render::{Rect, Scene};
 use wy_signal::{GetValue, SetValue, Signal};
 
@@ -35,18 +35,8 @@ pub fn probe() -> SizeProbe {
     Rc::new(Cell::new((0.0, 0.0)))
 }
 
-/// 让容器在绘制时记录自己的实测尺寸。
-///
-/// 只写 `Cell`（不是 `Signal`），所以不会触发重绘，也不会在 draw 期引起环。
-pub fn with_probe(mut node: Node, p: SizeProbe) -> Node {
-    let prev = node.draw_fn;
-    node.draw_fn = Rc::new(move |any: &mut dyn std::any::Any| {
-        let b = current_box();
-        p.set((b.width, b.height));
-        prev(any);
-    });
-    node
-}
+// 容器尺寸探针由调用方在 rsx 的 `draw:` 里记录（见 `ui/mod.rs` 的 `stacked`）：
+// 只写 `Cell`（不是 `Signal`），所以不会触发重绘，也不会在 draw 期引起环。
 
 /// 拖动轴。
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -182,84 +172,58 @@ pub fn gutter(value: Signal<f32>, spec: DragSpec, p: SizeProbe) -> Node {
         }
     };
 
-    let hover_in = hover;
-    let mut node = Node {
-        on_down_fn: Some(Rc::new(on_down)),
-        on_move_fn: Some(Rc::new(on_move)),
-        on_up_fn: Some(Rc::new(on_up)),
-        on_hover_fn: Some(Rc::new(move |entered| hover_in.set(entered))),
-        ..Node::default()
-    };
-
-    // 尺寸：主轴 6px，交叉轴撑满容器
-    match axis {
-        Axis::X => {
-            node.width = GUTTER;
-            node.align_self = Some(wy_mve::AlignItem::Stretch);
-        }
-        Axis::Y => {
-            node.height = GUTTER;
-            node.align_self = Some(wy_mve::AlignItem::Stretch);
+    rsx! {
+        node {
+            on_down: on_down,
+            on_drag_move: on_move,
+            on_up: on_up,
+            on_hover: move |entered: bool| hover.set(entered),
+            width: if axis == Axis::X { GUTTER } else { 0.0 },
+            height: if axis == Axis::Y { GUTTER } else { 0.0 },
+            align_self: AlignItem::Stretch,
+            draw: move |s: &mut Scene| {
+                let b = current_box();
+                if b.width <= 0.0 || b.height <= 0.0 {
+                    return;
+                }
+                let on = active.get();
+                let hot = on || hover.get();
+                if on {
+                    s.fill_round_rect(Rect::new(0.0, 0.0, b.width, b.height), 3.0, theme::ACCENT_SOFT);
+                } else if hover.get() {
+                    s.fill_round_rect(Rect::new(0.0, 0.0, b.width, b.height), 3.0, theme::ROW_ACTIVE);
+                }
+                // 三个小点常驻显示：不悬停也得看得出"这儿能拖"。
+                // 颜色只在不悬停时压暗到 HANDLE——比底色亮一档，又不会在满屏
+                // 面板里抢注意力。
+                let color = if on {
+                    theme::ACCENT
+                } else if hover.get() {
+                    theme::TEXT
+                } else {
+                    theme::HANDLE
+                };
+                let (cx, cy) = (b.width / 2.0, b.height / 2.0);
+                for k in -1..=1 {
+                    let off = k as f32 * 10.0;
+                    let (dx, dy) = match axis {
+                        Axis::X => (0.0, off),
+                        Axis::Y => (off, 0.0),
+                    };
+                    s.fill_round_rect(Rect::new(cx + dx - 2.0, cy + dy - 2.0, 4.0, 4.0), 2.0, color);
+                }
+                // 悬停/拖动时再补一条贯穿的 1px 轴线，能看清"缝"在哪、拖到了哪
+                if hot {
+                    let seam = if on { theme::ACCENT_DIM } else { theme::HANDLE };
+                    match axis {
+                        Axis::X => s.fill_rect(Rect::new(cx - 0.5, 0.0, 1.0, b.height), seam),
+                        Axis::Y => s.fill_rect(Rect::new(0.0, cy - 0.5, b.width, 1.0), seam),
+                    }
+                }
+            },
         }
     }
-
-    node.draw_fn = Rc::new(move |any: &mut dyn std::any::Any| {
-        let Some(scene) = any.downcast_mut::<Scene>() else {
-            return;
-        };
-        let b = current_box();
-        if b.width <= 0.0 || b.height <= 0.0 {
-            return;
-        }
-        let on = active.get();
-        let hot = on || hover.get();
-        if on {
-            scene.fill_round_rect(
-                Rect::new(0.0, 0.0, b.width, b.height),
-                3.0,
-                theme::ACCENT_SOFT,
-            );
-        } else if hover.get() {
-            scene.fill_round_rect(
-                Rect::new(0.0, 0.0, b.width, b.height),
-                3.0,
-                theme::ROW_ACTIVE,
-            );
-        }
-        // 三个小点常驻显示：不悬停也得看得出"这儿能拖"。
-        // 颜色只在不悬停时压暗到 HANDLE——比底色亮一档，又不会在满屏
-        // 面板里抢注意力。
-        let color = if on {
-            theme::ACCENT
-        } else if hover.get() {
-            theme::TEXT
-        } else {
-            theme::HANDLE
-        };
-        let (cx, cy) = (b.width / 2.0, b.height / 2.0);
-        for k in -1..=1 {
-            let off = k as f32 * 10.0;
-            let (dx, dy) = match axis {
-                Axis::X => (0.0, off),
-                Axis::Y => (off, 0.0),
-            };
-            scene.fill_round_rect(
-                Rect::new(cx + dx - 2.0, cy + dy - 2.0, 4.0, 4.0),
-                2.0,
-                color,
-            );
-        }
-        // 悬停/拖动时再补一条贯穿的 1px 轴线，能看清"缝"在哪、拖到了哪
-        if hot {
-            let seam = if on { theme::ACCENT_DIM } else { theme::HANDLE };
-            match axis {
-                Axis::X => scene.fill_rect(Rect::new(cx - 0.5, 0.0, 1.0, b.height), seam),
-                Axis::Y => scene.fill_rect(Rect::new(0.0, cy - 0.5, b.width, 1.0), seam),
-            }
-        }
-    });
-
-    node
+    .into_node()
 }
 
 #[cfg(test)]

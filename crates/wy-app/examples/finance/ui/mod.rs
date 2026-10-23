@@ -103,6 +103,9 @@ pub fn dashboard(ctx: &mut NodeContext, model: Rc<Model>, ctl: Rc<Ctl>) {
 }
 
 /// 撑满父容器（主轴 grow + 交叉轴 stretch）。
+///
+/// 必须是**原地改属性**：包一层 `rsx! { node { grow, align_self, ..[child] } }`
+/// 会多出一个节点层，改动树深度，集成测试按树结构断言会挂。
 fn fill(mut node: Node) -> Node {
     node.grow = 1.0;
     node.align_self = Some(AlignItem::Stretch);
@@ -123,24 +126,27 @@ fn fill(mut node: Node) -> Node {
 /// ```
 fn stacked(top: Slot, bottom: Slot, split: Signal<f32>) -> Node {
     let probe = splitter::probe();
+    let p = Rc::clone(&probe);
     let g = splitter::gutter(
         split,
         splitter::DragSpec::height(0.55, 0.18, 0.85),
         Rc::clone(&probe),
     );
-    splitter::with_probe(
-        rsx! {
-            vbox {
-                gap: 0.0,
-                align_items: AlignItem::Stretch,
-                { top }
-                { g }
-                { bottom }
-            }
+    rsx! {
+        vbox {
+            gap: 0.0,
+            align_items: AlignItem::Stretch,
+            // 容器实测尺寸写进 probe，供分割条把指针位移换算成比例
+            draw: move |_s: &mut Scene| {
+                let b = wy_mve::current_box();
+                p.set((b.width, b.height));
+            },
+            { top }
+            { g }
+            { bottom }
         }
-        .into_node(),
-        probe,
-    )
+    }
+    .into_node()
 }
 
 fn normal_layout(full: Signal<bool>) -> Node {
@@ -214,10 +220,16 @@ fn normal_layout(full: Signal<bool>) -> Node {
         Rc::clone(&row_probe),
     );
 
-    let body = rsx! {
+    // 行级实测尺寸写进 row_probe，供分割条换算（原 `with_probe` 已内联为 hbox 自身
+    // 的 `draw:`，不额外增加节点层级，树结构与改写前一致）
+    let body = fill(rsx! {
         hbox {
             gap: 0.0,
             align_items: AlignItem::Stretch,
+            draw: move |_s: &mut Scene| {
+                let b = wy_mve::current_box();
+                row_probe.set((b.width, b.height));
+            },
             { left }
             { g1 }
             { center }
@@ -225,8 +237,7 @@ fn normal_layout(full: Signal<bool>) -> Node {
             { right }
         }
     }
-    .into_node();
-    let body = fill(splitter::with_probe(body, row_probe));
+    .into_node());
 
     // ---- 顶栏 ----
     let bar = rsx! {
