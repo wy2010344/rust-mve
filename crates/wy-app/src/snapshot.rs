@@ -67,9 +67,6 @@ pub fn save_snapshot(app: &dyn WyApp, path: &str, width: u32, height: u32) -> Re
     wy_render::offscreen::render_to_file(&scene, width, height, path)
         .map_err(|e| format!("离屏渲染失败：{e}（需要一个可用的 GPU 适配器）"))?;
 
-    println!(
-        "已写出 {path}（{width}×{height}，{} 个图元）",
-        scene.len()
-    );
+    println!("已写出 {path}（{width}×{height}，{} 个图元）", scene.len());
     Ok(())
 }

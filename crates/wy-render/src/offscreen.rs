@@ -73,21 +73,13 @@ impl std::error::Error for OffscreenError {}
 ///
 /// `width`/`height` 是**物理像素**（Scene 坐标按 1:1 渲染）。
 /// 背景是透明的（alpha = 0），需要不透明背景时在 Scene 里自己画一个矩形。
-pub fn render_to_png(
-    scene: &Scene,
-    width: u32,
-    height: u32,
-) -> Result<Vec<u8>, OffscreenError> {
+pub fn render_to_png(scene: &Scene, width: u32, height: u32) -> Result<Vec<u8>, OffscreenError> {
     let rgba = render_to_rgba(scene, width, height)?;
     encode_png(&rgba, width, height)
 }
 
 /// 把 [`Scene`] 渲染成 RGBA8 像素（每行 4 字节，紧密排列）。
-pub fn render_to_rgba(
-    scene: &Scene,
-    width: u32,
-    height: u32,
-) -> Result<Vec<u8>, OffscreenError> {
+pub fn render_to_rgba(scene: &Scene, width: u32, height: u32) -> Result<Vec<u8>, OffscreenError> {
     let width = width.max(1);
     let height = height.max(1);
 

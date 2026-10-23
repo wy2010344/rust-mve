@@ -106,9 +106,12 @@ fn fill_synthetic(model: &Rc<Model>) {
 
     let ticker = synth::ticker(symbol, now);
     model.ticker.set(Some(ticker.clone()));
-    model
-        .klines
-        .set(synth::klines(symbol, synth::interval_ms(&interval), now, 120));
+    model.klines.set(synth::klines(
+        symbol,
+        synth::interval_ms(&interval),
+        now,
+        120,
+    ));
     model.depth.set(Some(synth::book_depth(symbol, now)));
     model.deep.set(Some(synth::deep_depth(symbol, now)));
     model.trades.set(synth::trades(symbol, now, 40));
@@ -550,7 +553,11 @@ mod tests {
         let app = build_app(model);
         let mut scene = Scene::new();
         app.draw(&mut scene, 1440.0, 900.0);
-        assert!(scene.len() > 300, "合成数据下的场景图元太少：{}", scene.len());
+        assert!(
+            scene.len() > 300,
+            "合成数据下的场景图元太少：{}",
+            scene.len()
+        );
     }
 
     /// 深度图在合成数据下有可画的累计曲线（不是空白图）。

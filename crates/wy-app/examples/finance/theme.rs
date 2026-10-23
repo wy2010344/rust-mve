@@ -195,8 +195,16 @@ mod tests {
             DOWN_AREA.blue()
         );
         // 两者都必须是低透明度的填充色（不是实心）
-        assert!(UP_AREA.alpha() < 0x80, "买盘面积应半透明，实为 a={}", UP_AREA.alpha());
-        assert!(DOWN_AREA.alpha() < 0x80, "卖盘面积应半透明，实为 a={}", DOWN_AREA.alpha());
+        assert!(
+            UP_AREA.alpha() < 0x80,
+            "买盘面积应半透明，实为 a={}",
+            UP_AREA.alpha()
+        );
+        assert!(
+            DOWN_AREA.alpha() < 0x80,
+            "卖盘面积应半透明，实为 a={}",
+            DOWN_AREA.alpha()
+        );
     }
 
     /// 涨绿跌红（加密行情终端惯例），且边缘线是**不透明**的。
