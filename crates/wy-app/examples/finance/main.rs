@@ -115,7 +115,14 @@ fn fill_synthetic(model: &Rc<Model>) {
     model.depth.set(Some(synth::book_depth(symbol, now)));
     model.deep.set(Some(synth::deep_depth(symbol, now)));
     model.trades.set(synth::trades(symbol, now, 40));
-    model.watch.set(vec![ticker.clone(), ticker]);
+    // 自选列：WATCH_SYMBOLS 全列各造一份（过去塞同一个 ticker 两遍，
+    // 既重复又只有一行——定高行 + 滚动列表下这个瑕疵会被放大）
+    model.watch.set(
+        WATCH_SYMBOLS
+            .iter()
+            .map(|s| synth::ticker(s, now))
+            .collect(),
+    );
     model.status.set(Status::Live);
 }
 
@@ -485,8 +492,26 @@ mod tests {
                 })
                 .collect(),
         );
-        let t = model.ticker.get().unwrap();
-        model.watch.set(vec![t.clone(), t]);
+        // 自选列：WATCH_SYMBOLS 全列各造一份（同一个 ticker 塞两遍既重复
+        // 又只有一行，定高行 + 滚动列表下会被放大成"列表只剩一行"）
+        model.watch.set(
+            WATCH_SYMBOLS
+                .iter()
+                .map(|s| Ticker {
+                    symbol: (*s).to_string(),
+                    last: 67_000.0,
+                    change: 120.0,
+                    change_percent: 0.18,
+                    high: 67_500.0,
+                    low: 66_100.0,
+                    open: 66_880.0,
+                    volume: 12_345.0,
+                    quote_volume: 820_000_000.0,
+                    bid: 66_999.0,
+                    ask: 67_001.0,
+                })
+                .collect(),
+        );
         model.status.set(Status::Live);
         model
     }
@@ -692,16 +717,24 @@ mod tests {
         height: f32,
         /// 有子节点的容器（面板 / 列 / 行），这类盒子绝不能塌。
         container: bool,
+        /// 装配层打的语义锚点（`col-*` 等），测试按它认对象。
+        tag: Option<&'static str>,
     }
 
     /// 走一遍引擎的布局路径，把每个可见节点的绝对盒摊平。
     ///
     /// 与 `draw_node` 保持一致：容器子节点用 `layout_boxes` 定位，无布局的
     /// group 子节点用自然尺寸；隐藏节点整枝跳过。
+    ///
+    /// **裁剪感知**：`clip` 容器（滚动容器视口）外的子树本来就被 Scene 的
+    /// 裁剪栈挡着，这里同样把盒与裁剪区求交——完全在外的丢弃、骑在边上
+    /// 的裁齐。否则"滚动内容比视口高"这种设计意图会被误报成溢出
+    /// （引擎的命中测试也走同一语义，见 `hit_test_node` 的 clip 拦截）。
     fn collect_boxes(
         node: &wy_mve::Node,
         parent: (f32, f32),
         avail: (f32, f32),
+        clip: Option<(f32, f32, f32, f32)>,
         out: &mut Vec<AbsBox>,
     ) {
         if node.is_hidden() {
@@ -709,22 +742,50 @@ mod tests {
         }
         let abs = (parent.0 + node.pos_x(), parent.1 + node.pos_y());
         let children = wy_mve::children_nodes(node);
-        out.push(AbsBox {
+        let mut b = AbsBox {
             x: abs.0,
             y: abs.1,
             width: avail.0,
             height: avail.1,
             container: !children.is_empty(),
-        });
+            tag: node.tag,
+        };
+        if let Some((cx, cy, cw, ch)) = clip {
+            // 与裁剪区求交：完全在外 → 这一枝不可见，整枝跳过
+            let x0 = b.x.max(cx);
+            let y0 = b.y.max(cy);
+            let x1 = (b.x + b.width).min(cx + cw);
+            let y1 = (b.y + b.height).min(cy + ch);
+            if x1 - x0 <= 0.0 || y1 - y0 <= 0.0 {
+                return;
+            }
+            b.x = x0;
+            b.y = y0;
+            b.width = x1 - x0;
+            b.height = y1 - y0;
+        }
+        out.push(b);
+        // 本节点是裁剪容器：子树限制在自身盒内
+        let clip = if node.clip {
+            Some((b.x, b.y, b.width, b.height))
+        } else {
+            clip
+        };
         if node.layout.is_some() {
             let boxes = wy_mve::layout_boxes(node, avail, &children);
             for (child, b) in children.iter().zip(boxes.iter()) {
-                collect_boxes(child, (abs.0 + b.x, abs.1 + b.y), (b.width, b.height), out);
+                collect_boxes(
+                    child,
+                    (abs.0 + b.x, abs.1 + b.y),
+                    (b.width, b.height),
+                    clip,
+                    out,
+                );
             }
         } else {
             for child in children.iter() {
                 let own = wy_mve::node_size(child);
-                collect_boxes(child, abs, own, out);
+                collect_boxes(child, abs, own, clip, out);
             }
         }
     }
@@ -734,7 +795,7 @@ mod tests {
         app.draw(&mut scene, w, h);
         let mut out = Vec::new();
         for node in app.root().nodes() {
-            collect_boxes(&node, (0.0, 0.0), (w, h), &mut out);
+            collect_boxes(&node, (0.0, 0.0), (w, h), None, &mut out);
         }
         out
     }
@@ -780,6 +841,11 @@ mod tests {
     }
 
     /// 三列顺序不乱：左列完全在中间列左边，中间列完全在右列左边。
+    ///
+    /// 按 `tag` 认列（`ui::mod::stacked` 给三列打了 `col-*`）：几何特征
+    /// （"又高又不满屏"）在列表进了滚动容器之后不再唯一——裁剪后的滚动
+    /// 内容盒也符合这一特征，按特征挑会把面板里的内容盒误当成"列"。
+    /// tag 是装配层的语义锚点，列表内部怎么改都不影响这条断言。
     #[test]
     fn columns_do_not_overlap() {
         let model = synth_model();
@@ -787,19 +853,13 @@ mod tests {
         let (w, h) = (1440.0, 900.0);
         let boxes = boxes_at(&app, w, h);
 
-        // 取"又高又不满屏"的盒（列本身），按 x 排序；根/body 行会被宽度过滤掉
         let mut columns: Vec<AbsBox> = boxes
             .iter()
-            .filter(|b| b.height > h * 0.5 && b.width > 100.0 && b.width < w - 100.0)
+            .filter(|b| matches!(b.tag, Some("col-left" | "col-center" | "col-right")))
             .copied()
             .collect();
+        assert_eq!(columns.len(), 3, "应能按 tag 认出三列：{columns:?}");
         columns.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap());
-        columns.dedup_by(|a, b| (a.x - b.x).abs() < 0.5 && (a.width - b.width).abs() < 0.5);
-        assert!(
-            columns.len() >= 3,
-            "应能认出至少三列，实际 {}：{columns:?}",
-            columns.len()
-        );
         for pair in columns.windows(2) {
             let (left, right) = (pair[0], pair[1]);
             assert!(
@@ -874,6 +934,89 @@ mod tests {
             after[gi + 1].width < boxes[gi + 1].width - 59.0,
             "中间列应让出 60px"
         );
+    }
+
+    /// 列表行高固定、且整体在滚动容器里（对齐参考实现；行高不再随
+    /// 面板 `grow` 均分——均分会把矮面板的行压扁、高面板的行拉伸出
+    /// 夸张行距）。
+    ///
+    /// 行按 `tag` 认（`list_row` 的语义标签），不按几何特征或索引——
+    /// ctx 组件挂的孩子数不定（book 挂 2 个：面板 + 设置菜单，索引法会错位）。
+    /// 行高直接求 `height_fn`（`rsx!` 的 `height:` 生成的就是它）。
+    /// 顺带钉死：自选列出 `WATCH_SYMBOLS` 全部标的（合成数据曾把同一个
+    /// ticker 塞两遍，定高行下这个瑕疵会被放大成"列表只剩一行"）。
+    #[test]
+    fn list_rows_are_fixed_height_inside_scroll() {
+        let model = synth_model();
+        let app = build_app(model.clone());
+        let _ = boxes_at(&app, 1440.0, 900.0);
+
+        let page = app.root().nodes()[0].clone();
+
+        // 三个列表都在滚动容器里：watchlist / stats 各 1 个，book 两侧 2 个，
+        // trades 1 个——clip 视口共 5 个
+        let clips = count_clip(&page);
+        assert_eq!(clips, 5, "应有 5 个滚动视口（watch/stats/book×2/trades）");
+
+        let watch_rows = find_all_by_tag(&page, "watch-row");
+        assert_eq!(
+            watch_rows.len(),
+            WATCH_SYMBOLS.len(),
+            "自选应列出全部标的（合成数据按 WATCH_SYMBOLS 生成）"
+        );
+        for r in &watch_rows {
+            assert_row_height(r, ui::watchlist::ROW_H, "自选");
+        }
+
+        let book_rows = find_all_by_tag(&page, "book-row");
+        assert_eq!(book_rows.len(), ui::book::ROWS * 2, "盘口两侧各 ROWS 档");
+        for r in &book_rows {
+            assert_row_height(r, ui::book::ROW_H, "盘口");
+        }
+
+        let trade_rows = find_all_by_tag(&page, "trade-row");
+        assert!(!trade_rows.is_empty(), "成交应有行");
+        for r in &trade_rows {
+            assert_row_height(r, ui::trades::ROW_H, "成交");
+        }
+    }
+
+    /// 行高直接求 `height_fn`（`rsx!` 的 `height:` 生成的是布局期闭包，
+    /// 字段 `node.height` 仍是 0，读它什么都断言不到）。
+    fn assert_row_height(row: &wy_mve::Node, want: f32, what: &str) {
+        let h = row
+            .height_fn
+            .as_ref()
+            .unwrap_or_else(|| panic!("{what}行应有 height_fn（定高行）"))();
+        assert_eq!(h, want, "{what}行应定高 {want}");
+    }
+
+    /// 数子树里的 clip 视口数（滚动容器）。
+    fn count_clip(node: &wy_mve::Node) -> usize {
+        let kids = wy_mve::children_nodes(node);
+        node.clip as usize + kids.iter().map(count_clip).sum::<usize>()
+    }
+
+    /// 收集子树里所有带某 tag 的节点。
+    fn find_all_by_tag(node: &wy_mve::Node, tag: &'static str) -> Vec<wy_mve::Node> {
+        let mut out = Vec::new();
+        if node.tag == Some(tag) {
+            out.push(node.clone());
+        }
+        for c in wy_mve::children_nodes(node) {
+            out.extend(find_all_by_tag(&c, tag));
+        }
+        out
+    }
+
+    /// 按 tag 在树里找节点（测试的语义锚点，见 `ui::mod::stacked`）。
+    fn find_by_tag(node: &wy_mve::Node, tag: &'static str) -> Option<wy_mve::Node> {
+        if node.tag == Some(tag) {
+            return Some(node.clone());
+        }
+        wy_mve::children_nodes(node)
+            .iter()
+            .find_map(|c| find_by_tag(c, tag))
     }
 
     /// 拖行分割条 → 上下比例真的变（比例模式走 `probe` 的高度）。

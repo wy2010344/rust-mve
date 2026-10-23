@@ -6,7 +6,7 @@
 
 use std::rc::Rc;
 
-use wy_mve::{component, rsx};
+use wy_mve::{component, rsx, scroll, AlignItem};
 use wy_render::Color;
 use wy_signal::GetValue;
 
@@ -46,18 +46,25 @@ pub fn stats_panel(ctx: &mut NodeContext) {
         panel {
             title: "MARKET STATS",
             badge: "24H",
-            // 直接作为 panel 的 children：panel 内部已是一个 `grow:1 + Stretch` 的
-            // 纵向 flex，再包一层 vbox 只会多一层壳（上一轮就是这么塌成 0 高的）。
-            kv_row { label: "HIGH",      value: cell(model.clone(), |t: &Ticker| format_price(t.high)),  tone: theme::TEXT, grow: 1.0 }
-            kv_row { label: "LOW",       value: cell(model.clone(), |t: &Ticker| format_price(t.low)),   tone: theme::TEXT, grow: 1.0 }
-            kv_row { label: "OPEN",      value: cell(model.clone(), |t: &Ticker| format_price(t.open)),  tone: theme::MUTED, grow: 1.0 }
-            kv_row { label: "CHANGE",    value: cell(model.clone(), |t: &Ticker| format_price(t.change)), tone: tone_of(model.clone(), up), grow: 1.0 }
-            kv_row { label: "CHANGE %",  value: cell(model.clone(), |t: &Ticker| format_percent(t.change_percent)), tone: tone_of(model.clone(), up), grow: 1.0 }
-            kv_row { label: "VOLUME",    value: cell(model.clone(), volume),     tone: theme::MUTED, grow: 1.0 }
-            kv_row { label: "QUOTE VOL", value: cell(model.clone(), |t: &Ticker| format_compact(t.quote_volume)), tone: theme::MUTED, grow: 1.0 }
-            kv_row { label: "BEST BID",  value: cell(model.clone(), |t: &Ticker| format_price(t.bid)),   tone: theme::UP, grow: 1.0 }
-            kv_row { label: "BEST ASK",  value: cell(model.clone(), |t: &Ticker| format_price(t.ask)),   tone: theme::DOWN, grow: 1.0 }
-            kv_row { label: "SPREAD",    value: cell(model.clone(), spread),    tone: theme::FAINT, grow: 1.0 }
+            // 行定高、整体进滚动容器：统计行不再随面板 grow 均分（均分会把
+            // 矮面板里的行压扁、高面板里的行拉出夸张行距）。kv_row 的 h 有
+            // 默认值，这里不重复写。
+            scroll {
+                gap: 0.0,
+                padding: 0.0,
+                grow: 1.0,
+                align_items: AlignItem::Stretch,
+                kv_row { label: "HIGH",      value: cell(model.clone(), |t: &Ticker| format_price(t.high)),  tone: theme::TEXT }
+                kv_row { label: "LOW",       value: cell(model.clone(), |t: &Ticker| format_price(t.low)),   tone: theme::TEXT }
+                kv_row { label: "OPEN",      value: cell(model.clone(), |t: &Ticker| format_price(t.open)),  tone: theme::MUTED }
+                kv_row { label: "CHANGE",    value: cell(model.clone(), |t: &Ticker| format_price(t.change)), tone: tone_of(model.clone(), up) }
+                kv_row { label: "CHANGE %",  value: cell(model.clone(), |t: &Ticker| format_percent(t.change_percent)), tone: tone_of(model.clone(), up) }
+                kv_row { label: "VOLUME",    value: cell(model.clone(), volume),     tone: theme::MUTED }
+                kv_row { label: "QUOTE VOL", value: cell(model.clone(), |t: &Ticker| format_compact(t.quote_volume)), tone: theme::MUTED }
+                kv_row { label: "BEST BID",  value: cell(model.clone(), |t: &Ticker| format_price(t.bid)),   tone: theme::UP }
+                kv_row { label: "BEST ASK",  value: cell(model.clone(), |t: &Ticker| format_price(t.ask)),   tone: theme::DOWN }
+                kv_row { label: "SPREAD",    value: cell(model.clone(), spread),    tone: theme::FAINT }
+            }
         }
     });
 }

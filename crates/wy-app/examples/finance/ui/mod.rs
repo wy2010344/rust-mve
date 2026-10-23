@@ -124,7 +124,10 @@ fn fill(mut node: Node) -> Node {
 ///     split,
 /// )
 /// ```
-fn stacked(top: Slot, bottom: Slot, split: Signal<f32>) -> Node {
+///
+/// `tag` 是给集成测试的语义锚点：三列在窗口里"又高又不满屏"的几何特征
+/// 并不唯一（滚动容器裁剪后的内容盒也符合），按 tag 认列才稳。
+fn stacked(top: Slot, bottom: Slot, split: Signal<f32>, tag: &'static str) -> Node {
     let probe = splitter::probe();
     let p = Rc::clone(&probe);
     let g = splitter::gutter(
@@ -134,6 +137,7 @@ fn stacked(top: Slot, bottom: Slot, split: Signal<f32>) -> Node {
     );
     rsx! {
         vbox {
+            tag: tag,
             gap: 0.0,
             align_items: AlignItem::Stretch,
             // 容器实测尺寸写进 probe，供分割条把指针位移换算成比例
@@ -171,6 +175,7 @@ fn normal_layout(full: Signal<bool>) -> Node {
             }
         },
         left_split,
+        "col-left",
     )
     .with_width(left_w);
 
@@ -189,6 +194,7 @@ fn normal_layout(full: Signal<bool>) -> Node {
             }
         },
         center_split,
+        "col-center",
     ));
 
     // ---- 右列：盘口 + 成交 ----
@@ -204,6 +210,7 @@ fn normal_layout(full: Signal<bool>) -> Node {
             }
         },
         right_split,
+        "col-right",
     )
     .with_width(right_w);
 

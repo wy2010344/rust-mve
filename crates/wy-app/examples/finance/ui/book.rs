@@ -7,23 +7,29 @@
 //!   Depth Viz（Amount / Cumulative）、Animations；
 //! - 深度条贴右生长、点价、精度聚合（badge 显示当前步长）。
 //!
-//! 每一档都是独立节点：命中、悬停、点击由引擎按树路由，行高由 flex 均分，
-//! 面板被拖矮时行高自动收窄，不需要在面板里反算行号或行高。
+//! 每一档都是独立节点：命中、悬停、点击由引擎按树路由；行高**固定**
+//! （对齐 ooc `bookRowHeight = 18`），面板矮于内容时整体进滚动容器，
+//! 中间价行钉在面板中间不随滚动跑。
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use wy_mve::{component, current_box, dropdown, for_each, rsx, AlignItem, Node, Slot};
+use wy_mve::{component, current_box, dropdown, for_each, rsx, scroll, AlignItem, Node, Slot};
 use wy_render::{Rect, Scene};
 use wy_signal::{GetValue, SetValue, Signal};
 
-use super::widgets::{chip_on, col_header, panel_with, toggle_chip, PAD};
+use super::widgets::{
+    chip_on, col_header, cols_row, list_row, panel_with, toggle_chip, ColCell, COLS_3, PAD,
+};
 use crate::bookview::{self, BarMode, BookMode, BookRow};
 use crate::market::{format_price, format_qty};
 use crate::{theme, Model};
 
-/// 每侧固定行数：行高由父容器均分（`grow: 1`），面板变矮时自动收窄。
+/// 每侧行数：行高固定 [`ROW_H`]，面板矮于内容时由滚动容器兜底
+/// （对齐 ooc `bookRowHeight = 18`）。
 pub const ROWS: usize = 10;
+/// 盘口行高（定高，不随面板 grow 均分）。
+pub const ROW_H: f32 = 18.0;
 /// 中间价行高。
 const MID_H: f32 = 24.0;
 /// 比例条高度。
@@ -144,7 +150,11 @@ pub fn book_panel(ctx: &mut NodeContext) {
         vec![
             rsx! {
                 col_header {
-                    cells: vec![("Price", 0.0), ("Amount", 0.60), ("Total", 1.0)],
+                    cells: vec![
+                        ("Price", COLS_3.0),
+                        ("Amount", COLS_3.1),
+                        ("Total", COLS_3.2),
+                    ],
                 }
             },
             Slot::One(side_list(Rc::clone(&b), false)),
@@ -287,10 +297,13 @@ fn toggle_of(
     }
 }
 
-/// 一侧列表：`for_each` 按档位下标复用行，行高由 `grow` 均分。
+/// 一侧列表：`for_each` 按档位下标复用行，**行定高、整体进滚动容器**。
 ///
 /// 行是在动态区域里构建的，拿不到本函数的局部变量，所以走 `consume`：
 /// `book_panel` 把 `Rc<BookState>` provide 了下来，这里直接取。
+///
+/// 中间价行固定在面板中间（不滚动），两侧各自滚动——对齐 ooc 的做法：
+/// 盘口滚来滚去时锚点不能跑。
 fn side_list(b: Rc<BookState>, bid: bool) -> Node {
     let m_emit = Rc::clone(&b);
     let rows = for_each(
@@ -325,7 +338,7 @@ fn side_list(b: Rc<BookState>, bid: bool) -> Node {
 
     let m_hide = Rc::clone(&b);
     rsx! {
-        vbox {
+        scroll {
             gap: 0.0,
             padding: 0.0,
             // 行撑满面板宽度（否则行宽为 0，绘制和命中都会塌掉）
@@ -342,68 +355,74 @@ fn side_list(b: Rc<BookState>, bid: bool) -> Node {
 }
 
 /// 一档：数量条 + 价格 + 数量 + 名义金额。
+///
+/// 列文字走 [`cols_row`]（与表头 `col_header` 同一套比例），行骨架走
+/// [`list_row`]（定高 + 悬停 + 点击）——不再手算列 x。
 fn book_row(b: Rc<BookState>, data: Rc<RefCell<BookRow>>) -> Node {
     let hover = Signal::new(false);
     let m_click = Rc::clone(&b);
     let m_draw = Rc::clone(&b);
+    let row_draw = Rc::clone(&data);
     let row_click = Rc::clone(&data);
-    rsx! {
-        node {
-            height: 0.0,
-            grow: 1.0,
-            on_hover: move |on| hover.set(on),
-            // 点价：拿到本档价格（只在盘口面板内用，不写回共享 Model）
-            on_click: move || {
-                let p = row_click.borrow().price;
-                if p > 0.0 {
-                    m_click.pick(p);
-                }
-            },
-            draw: move |s: &mut Scene| {
-                let b = current_box();
-                if b.height <= 0.0 {
-                    return;
-                }
-                let row = *data.borrow();
-                if hover.get() {
-                    s.fill_rect(Rect::new(0.0, 0.0, b.width, b.height), theme::ROW_ALT);
-                }
-                // 深度条：贴右生长
-                let frac = (row.percent / 100.0).clamp(0.0, 1.0);
-                let bar_w = (b.width - 2.0 * PAD) * frac;
-                let soft = if row.bid {
-                    theme::UP_SOFT
-                } else {
-                    theme::DOWN_SOFT
-                };
-                if bar_w > 0.0 {
-                    s.fill_rect(
-                        Rect::new(b.width - PAD - bar_w, 1.0, bar_w, (b.height - 2.0).max(1.0)),
-                        soft,
-                    );
-                }
-                let y = (b.height - 9.0) / 2.0;
-                theme::text(s, PAD, y, &format_price(row.price), 9.5, theme::tone(row.bid));
-                theme::text_right(
-                    s,
-                    PAD + (b.width - 2.0 * PAD) * 0.60,
-                    y,
-                    &format_qty(row.qty),
-                    9.5,
-                    theme::MUTED,
+    // Signal 是 Copy（内部 Rc 句柄）：直接赋值即共享
+    let h_write = hover;
+    let h_read = hover;
+    list_row(
+        ROW_H,
+        move |on| h_write.set(on),
+        // 点价：拿到本档价格（只在盘口面板内用，不写回共享 Model）
+        move || {
+            let p = row_click.borrow().price;
+            if p > 0.0 {
+                m_click.pick(p);
+            }
+        },
+        move |s: &mut Scene, w: f32, h: f32| {
+            let row = *row_draw.borrow();
+            // body 是 Fn（每次重绘都会跑）：跨调用共享的 Rc 要先 clone 一份
+            // 再 move 进列闭包，否则第二次调用时它已被移走
+            let m_total = m_draw.clone();
+            if h_read.get() {
+                s.fill_rect(Rect::new(0.0, 0.0, w, h), theme::ROW_ALT);
+            }
+            // 深度条：贴右生长
+            let frac = (row.percent / 100.0).clamp(0.0, 1.0);
+            let bar_w = (w - 2.0 * PAD) * frac;
+            let soft = if row.bid {
+                theme::UP_SOFT
+            } else {
+                theme::DOWN_SOFT
+            };
+            if bar_w > 0.0 {
+                s.fill_rect(
+                    Rect::new(w - PAD - bar_w, 1.0, bar_w, (h - 2.0).max(1.0)),
+                    soft,
                 );
-                theme::text_right(
-                    s,
-                    b.width - PAD,
-                    y,
-                    &bookview::format_total(row.total, !m_draw.rounding.get()),
-                    9.5,
-                    theme::MUTED,
-                );
-            },
-        }
-    }
-    .into_node()
+            }
+            let (price, qty, total) = (row.price, row.qty, row.total);
+            let bid_tone = row.bid;
+            cols_row(
+                s,
+                w,
+                h,
+                &[
+                    ColCell::left(
+                        move || format_price(price),
+                        9.5,
+                        move || theme::tone(bid_tone),
+                    ),
+                    ColCell::right(COLS_3.1, move || format_qty(qty), 9.5, || theme::MUTED),
+                    ColCell::right(
+                        COLS_3.2,
+                        move || bookview::format_total(total, !m_total.rounding.get()),
+                        9.5,
+                        || theme::MUTED,
+                    ),
+                ],
+            );
+        },
+        "book-row",
+    )
 }
 
 /// 中间价分隔行：LAST + 点价标记。

@@ -31,6 +31,86 @@ pub const PAD: f32 = theme::PAD;
 /// 表头行高度。
 pub const HEADER_ROW_H: f32 = 20.0;
 
+/// 盘口 / 成交三列的列边界比例（与 [`col_header`] 的 `cells` 同一套）：
+/// 价格左对齐、数量收在 60%、总额贴右。
+///
+/// 抽成常量是因为它过去在 `book.rs` / `trades.rs` 里各写一遍 `0.60`——
+/// 两处漂移一格，列就对不齐表头。
+pub const COLS_3: (f32, f32, f32) = (0.0, 0.60, 1.0);
+
+/// 一个列单元格：文本 / 字号 / 颜色，**全部绘制期求值**。
+///
+/// 列边界语义与 [`col_header`] 完全一致：`at` 是右边界占内容宽的比例
+/// （`0.0` = 左对齐贴 [`PAD`]），所以表头与数据行永远对齐。
+pub struct ColCell {
+    /// 右边界比例（0.0 = 左对齐）。
+    pub at: f32,
+    /// 文本（getter）。
+    pub text: Rc<dyn Fn() -> String>,
+    /// 字号。
+    pub size: f32,
+    /// 颜色（getter）。
+    pub color: Rc<dyn Fn() -> Color>,
+}
+
+impl ColCell {
+    /// 左对齐列（价格 / 符号）。
+    pub fn left(
+        text: impl Fn() -> String + 'static,
+        size: f32,
+        color: impl Fn() -> Color + 'static,
+    ) -> Self {
+        Self {
+            at: 0.0,
+            text: Rc::new(text),
+            size,
+            color: Rc::new(color),
+        }
+    }
+
+    /// 右对齐到「内容宽 × `at`」的列（数量 / 总额 / 时间）。
+    pub fn right(
+        at: f32,
+        text: impl Fn() -> String + 'static,
+        size: f32,
+        color: impl Fn() -> Color + 'static,
+    ) -> Self {
+        Self {
+            at,
+            text: Rc::new(text),
+            size,
+            color: Rc::new(color),
+        }
+    }
+}
+
+/// 按列比例画一行数据（[`theme::header_row`] 的行版），整行在 `h` 里垂直居中。
+///
+/// 这是所有列表行共用的列绘制：位置全部由 `w` 与 `at` 现算，调用方不写坐标。
+pub fn cols_row(s: &mut Scene, w: f32, h: f32, cells: &[ColCell]) {
+    for c in cells {
+        let y = (h - c.size) / 2.0;
+        if c.at <= 0.0 {
+            theme::text(s, PAD, y, &(c.text)(), c.size, (c.color)());
+        } else {
+            let edge = (PAD + (w - 2.0 * PAD) * c.at).min(w - PAD);
+            theme::text_right(s, edge, y, &(c.text)(), c.size, (c.color)());
+        }
+    }
+}
+
+/// 同 [`cols_row`]，但文字顶部 y 由调用方给（双行排版的第二行等）。
+pub fn cols_row_at(s: &mut Scene, w: f32, y: f32, cells: &[ColCell]) {
+    for c in cells {
+        if c.at <= 0.0 {
+            theme::text(s, PAD, y, &(c.text)(), c.size, (c.color)());
+        } else {
+            let edge = (PAD + (w - 2.0 * PAD) * c.at).min(w - PAD);
+            theme::text_right(s, edge, y, &(c.text)(), c.size, (c.color)());
+        }
+    }
+}
+
 /// 布局属性的链式写法。
 ///
 /// `rsx!` 标签里能直接写 `grow: sig.get()`，但**已经在函数里拼好的节点**
@@ -185,6 +265,49 @@ pub fn col_header(cells: Vec<(&'static str, f32)>) -> Node {
             draw: move |s: &mut Scene| {
                 let b = current_box();
                 theme::header_row(s, b.width, b.height, &cells);
+            },
+        }
+    }
+    .into_node()
+}
+
+/// 标准列表行：**定高** + 悬停/点击 + 调用方绘制。
+///
+/// 定高是硬约束：列表整体进滚动容器（见 [`wy_mve`] 的 `scroll`），行高若
+/// 再随面板 `grow` 均分，矮面板会把一行压成几像素、高面板又把行拉出
+/// 夸张行距——参考实现全部是定高行（wy-helper 自选 38 / 成交 20、
+/// ooc 盘口 18），超出视口由滚动条兜底。
+///
+/// `body` 收 `(scene, 宽, 高)`：悬停底、深度条、列文字全在这里画，
+/// 列文字用 [`cols_row`]（不手算 x）。
+///
+/// 普通函数而非 `#[component]`：四个参数里两个是 `impl Fn`，且 `body` 是
+/// 几十行的绘制闭包——`rsx!` 标签属性装不下它（与 `tab_btn` / `chip_custom`
+/// 同款的"命令式版"入口）。
+pub fn list_row(
+    // 行高（px）。
+    h: f32,
+    // 悬停进入/离开（写自己的信号即可）。
+    on_hover: impl Fn(bool) + 'static,
+    // 点击（不交互就传 `|| {}`）。
+    on_click: impl Fn() + 'static,
+    // 行内容（scene, 宽, 高）。
+    body: impl Fn(&mut Scene, f32, f32) + 'static,
+    // 语义标签：测试按它认行（`book-row` / `watch-row` / `trade-row`）。
+    tag: &'static str,
+) -> Node {
+    rsx! {
+        node {
+            tag: tag,
+            height: h,
+            on_hover: on_hover,
+            on_click: on_click,
+            draw: move |s: &mut Scene| {
+                let b = current_box();
+                if b.height <= 0.0 {
+                    return;
+                }
+                body(s, b.width, b.height);
             },
         }
     }
@@ -482,8 +605,9 @@ pub fn toggle_chip(label: &'static str, active: impl Fn() -> bool, on_click: imp
 
 /// 一行"标签 —— 值"，值靠右。宽度由父容器 Stretch 给。
 ///
-/// 行高由父容器均分，所以行距会跟着面板高度变；行够高时补一条
-/// 极浅的分隔线，让"一列读数"看起来是表格而不是散落的文字。
+/// 行高**定值**（默认 26）：统计行进滚动容器，不再随面板 `grow` 均分——
+/// 均分会把矮面板里的行压成几像素、高面板里的行拉出夸张行距。
+/// 行够高时补一条极浅的分隔线，让"一列读数"看起来是表格而不是散落的文字。
 #[component]
 pub fn kv_row(
     /// 左侧标签（getter：裸字符串或闭包）。
@@ -495,9 +619,13 @@ pub fn kv_row(
     /// 数值色调（getter）。
     #[getter]
     tone: Color,
+    /// 行高（px）。
+    #[props(default = 26.0f32)]
+    h: f32,
 ) -> Node {
     rsx! {
         node {
+            height: h,
             draw: move |s: &mut Scene| {
                 let b = current_box();
                 if b.height <= 0.0 {
