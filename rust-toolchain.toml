@@ -1,0 +1,11 @@
+# 锁定工具链版本。
+#
+# 为什么要锁：rustfmt 的格式化规则会随版本微调（style edition 也会修）。
+# 本地 1.98 格式化过的代码，CI 上如果跑 1.99 的 rustfmt，会报出一堆
+# "Diff in ..." —— 代码没问题，是两个版本的 rustfmt 审美不同。
+#
+# 锁版本后：本地 fmt 过的，CI 一定也过；clippy 的告警集合也是确定的。
+[toolchain]
+channel = "1.98.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

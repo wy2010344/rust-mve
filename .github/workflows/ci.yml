@@ -8,7 +8,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # 依赖缓存：Cargo 自带的 registry 缓存 + 编译产物缓存
   CARGO_INCREMENTAL: 0
 
 jobs:
@@ -18,10 +17,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 工具链版本由仓库根的 rust-toolchain.toml 锁定。
+      # 不在这里跑 `rustup update`——那会拉到比本地更新的 rustfmt，
+      # 格式化规则随版本微调，CI 会报出一堆本地根本复现不了的 "Diff in ..."。
       - name: 安装 Rust 工具链
-        run: |
-          rustup component add rustfmt clippy
-          rustup update
+        run: rustup show active-toolchain
 
       - uses: Swatinem/rust-cache@v2
 
@@ -44,9 +44,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: 安装 Rust 工具链
-        run: |
-          rustup component add rustfmt clippy
-          rustup update
+        run: rustup show active-toolchain
 
       - uses: Swatinem/rust-cache@v2
 

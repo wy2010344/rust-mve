@@ -1,0 +1,8 @@
+# rustfmt 配置
+#
+# style_edition 显式锁定：rustfmt 默认跟随 Cargo.toml 的 edition，
+# 但 style edition 自身的规则会随 rustfmt 版本微调。显式写死之后，
+# 即使升级 rustfmt，格式化结果也不会漂移——CI 与本地不会因为
+# "两个版本的 rustfmt 审美不同"而打架。
+edition = "2021"
+style_edition = "2021"
