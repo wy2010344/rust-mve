@@ -687,6 +687,9 @@ fn gen_attr_assign(fname: &Ident, value: &Expr) -> Option<TokenStream2> {
         "justify" => Some(quote! { __n.justify = #value; }),
         "align_items" => Some(quote! { __n.align_items = #value; }),
         "align_self" => Some(quote! { __n.align_self = ::core::option::Option::Some(#value); }),
+        // 交叉轴尺寸由外部固定（复刻 Kotlin StackObject.alignFix）：
+        // 容器交叉轴无自身自然尺寸，由父容器分配值决定
+        "align_fix" => Some(quote! { __n.align_fix = #value; }),
         // 通用节点事件：任意容器都能绑，不必退化成手写 Node 字面量
         "on_click" => Some(quote! {
             {
@@ -857,6 +860,7 @@ fn layout_field(fname: &str) -> Option<(&'static str, Option<&'static str>)> {
         "justify" => ("justify", None),
         "align_items" => ("align_items", None),
         "align_self" => ("align_self", None),
+        "align_fix" => ("align_fix", None),
         "focusable" => ("focusable", None),
         "skip_draw" => ("skip_draw", None),
         "focus_trap" => ("focus_trap", None),

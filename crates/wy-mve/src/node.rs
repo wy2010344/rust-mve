@@ -148,6 +148,14 @@ pub struct Node {
     pub justify: DirectionJustify,
     /// 容器交叉轴对齐（容器属性）。
     pub align_items: AlignItem,
+    /// 交叉轴尺寸由外部固定（复刻 Kotlin `StackObject.alignFix`，默认 false）。
+    ///
+    /// `false`：容器交叉轴自然尺寸由"非对齐子节点的最大尺寸"撑起
+    /// （内容驱动，[`natural_size_of`] 的既有语义）。
+    /// `true`：容器交叉轴**没有自身自然尺寸**——由父容器分配值决定
+    /// （`layout_boxes` 的 `cross_avail`）。子节点有自然尺寸时两者行为
+    /// 分叉，语义与 `AlignItem::Stretch`（"把我拉大到父尺寸"）不同。
+    pub align_fix: bool,
     /// 动态位置 X（覆盖 `x`，对应 Kotlin `override fun argPosition(Direction.x)`）。
     pub x_fn: Option<DynNum>,
     /// 动态位置 Y（覆盖 `y`）。
@@ -241,6 +249,7 @@ impl Clone for Node {
             align_self: self.align_self,
             justify: self.justify,
             align_items: self.align_items,
+            align_fix: self.align_fix,
             x_fn: self.x_fn.as_ref().map(Rc::clone),
             y_fn: self.y_fn.as_ref().map(Rc::clone),
             width_fn: self.width_fn.as_ref().map(Rc::clone),
@@ -323,6 +332,7 @@ impl Default for Node {
             align_self: None,
             justify: DirectionJustify::Grow,
             align_items: AlignItem::Center,
+            align_fix: false,
             x_fn: None,
             y_fn: None,
             width_fn: None,
@@ -753,6 +763,10 @@ pub fn node_size(node: &Node) -> (f32, f32) {
 }
 
 /// 布局容器由子节点撑起的自然尺寸（不含显式宽高覆盖）。
+///
+/// `align_fix`（复刻 Kotlin `StackObject.alignFix`）为 true 时，交叉轴
+/// **没有自身自然尺寸**（返回 0）：容器交叉轴由父容器分配值决定，
+/// 不取"非对齐子节点的最大尺寸"。主轴（内容顺排方向）不受影响。
 fn natural_size_of(layout: Layout, node: &Node) -> (f32, f32) {
     let gap = node.gap();
     let pad = node.padding.max(0.0);
@@ -769,11 +783,15 @@ fn natural_size_of(layout: Layout, node: &Node) -> (f32, f32) {
         match layout {
             Layout::Row => {
                 main += cw + gap;
-                cross = cross.max(ch);
+                if !node.align_fix {
+                    cross = cross.max(ch);
+                }
             }
             Layout::Column => {
                 main += ch + gap;
-                cross = cross.max(cw);
+                if !node.align_fix {
+                    cross = cross.max(cw);
+                }
             }
         }
         count += 1;
@@ -1121,6 +1139,80 @@ mod tests {
         // 的默认值（都曾/现为 0）。Node 层曾是 8.0，两层默认值不一致，
         // 且 Node 层的值实际生效——"忘了写 gap"的容器与上游行为不同。
         assert_eq!(Node::default().gap(), 0.0);
+    }
+
+    #[test]
+    fn align_fix_container_has_no_cross_natural_size() {
+        // 复刻 Kotlin `StackObject.alignFix` / wy-layout
+        // `StackLayout::allow_size_from_children()` 为 false：
+        // align_fix 容器交叉轴**没有自身自然尺寸**（不取子节点 max），
+        // 主轴（顺排方向）仍由内容撑起。
+        let leaf = |w: f32, h: f32| Node {
+            width: w,
+            height: h,
+            ..Node::default()
+        };
+        let col = Node {
+            layout: Some(Layout::Column),
+            align_fix: true,
+            arg_children_fn: Rc::new(move |cx| {
+                cx.add_node(leaf(50.0, 20.0));
+                cx.add_node(leaf(80.0, 30.0));
+            }),
+            ..Node::default()
+        };
+        let (w, h) = natural_size_of(Layout::Column, &col);
+        // 主轴（高）= 20 + 30；交叉轴（宽）= 0（不由内容撑）
+        assert_eq!(w, 0.0, "align_fix 容器交叉轴不应由内容撑");
+        assert_eq!(h, 50.0, "主轴仍按内容累加");
+    }
+
+    #[test]
+    fn no_align_fix_container_cross_size_from_children() {
+        // 默认（align_fix=false）行为不变：交叉轴取非对齐子节点最大尺寸
+        let col = Node {
+            layout: Some(Layout::Column),
+            arg_children_fn: Rc::new(move |cx| {
+                cx.add_node(Node {
+                    width: 50.0,
+                    height: 20.0,
+                    ..Node::default()
+                });
+                cx.add_node(Node {
+                    width: 80.0,
+                    height: 30.0,
+                    ..Node::default()
+                });
+            }),
+            ..Node::default()
+        };
+        let (w, h) = natural_size_of(Layout::Column, &col);
+        assert_eq!(w, 80.0, "默认行为：交叉轴取子节点最大宽度");
+        assert_eq!(h, 50.0);
+    }
+
+    #[test]
+    fn align_fix_child_stretch_uses_parent_allocation() {
+        // align_fix 容器 + Stretch 子节点：子节点交叉轴拿父分配内区
+        // （与 wy-layout `align_fix` 时 `size_val = inside.inner_size` 一致）
+        let child = Node {
+            width: 50.0,
+            height: 20.0,
+            ..Node::default()
+        };
+        let col = Node {
+            layout: Some(Layout::Column),
+            align_fix: true,
+            align_items: AlignItem::Stretch,
+            arg_children_fn: Rc::new(move |cx| {
+                cx.add_node(child.clone());
+            }),
+            ..Node::default()
+        };
+        let children = children_nodes(&col);
+        let boxes = layout_boxes(&col, (200.0, 100.0), &children);
+        assert_eq!(boxes.len(), 1);
+        assert_eq!(boxes[0].width, 200.0, "Stretch 子节点交叉轴拿父分配内区");
     }
 
     #[test]

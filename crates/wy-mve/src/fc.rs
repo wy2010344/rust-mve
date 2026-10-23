@@ -1366,6 +1366,19 @@ mod tests {
     }
 
     #[test]
+    fn rsx_align_fix_sets_field() {
+        // 复刻 Kotlin `StackObject.alignFix`：rsx 属性直通 Node 字段
+        use crate::rsx;
+        let slot = rsx! {
+            vbox {
+                align_fix: true,
+                label("x")
+            }
+        };
+        assert!(slot.into_node().align_fix, "align_fix 属性应生效");
+    }
+
+    #[test]
     fn rsx_focus_flags() {
         use crate::rsx;
         let a = rsx! { focusable { label("x") } };
