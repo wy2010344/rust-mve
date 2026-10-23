@@ -20,11 +20,13 @@ use crate::node::ChildSlot;
 /// 不会被包成中间节点。
 pub fn render_when(
     slots: &mut Vec<ChildSlot>,
+    provided: &crate::context::Provided,
     cond: impl Fn() -> bool + 'static,
     branch: impl Fn(bool, &mut NodeContext) + 'static,
 ) {
     render_for_each(
         slots,
+        provided,
         move |emit| emit(cond(), ()),
         move |key, _value, cx| branch(key, cx),
     );

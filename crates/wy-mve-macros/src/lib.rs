@@ -14,8 +14,14 @@
 //! - 列表：`for_each(list, key_fn) { |item, cx| { ... } }`
 //! - 条件：`if cond { ... } else { ... }` —— 转 `if/else`，false 分支不产出节点
 //!
-//! 可用布局属性：`x` `y` `width` `height` `gap` `hide` `size`（返回 `(w, h)`）
-//! `focusable` `skip_draw` `focus_trap` `selection_enabled` `focus_order`。
+//! 可用布局属性：`x` `y` `width` `height` `gap` `grow` `padding` `justify`
+//! `align_items` `align_self` `hide` `size`（权威尺寸，返回 `(w, h)`）
+//! `measure`（建议尺寸，返回 `(w, h)`，与显式宽高取 max）
+//! `focusable` `skip_draw` `focus_trap` `selection_enabled` `focus_order`；
+//! 自绘：`draw`（`Fn(&mut Scene)`，闭包内用 `current_box()` 取自身尺寸）；
+//! 通用事件：`on_click`（`Fn()`）、`on_hover`（`Fn(bool)`）、
+//! `on_wheel`（`Fn(f32)`）、`on_move`（`Fn(f32, f32)`，悬停移动的局部坐标）、
+//! `on_down` / `on_up` / `on_drag_move`（`Fn(&mut PointerEvent)`，拖拽手势）。
 //!
 //! 全部编译到 `wy_mve::fc` 的等价函数；宏只省掉闭包/逗号/`.into()` 样板。
 //! 所有子节点统一生成为 `wy_mve::fc::Slot`，容器/条件产出 `Vec<Slot>`。
@@ -107,6 +113,11 @@ enum Node {
     },
     /// 原始 Rust 语句（`let` 绑定等），原样透传。
     Raw(Vec<Stmt>),
+    /// 展开动态子节点列表：`..items`（`items: Vec<Slot>` 或任何 `IntoIterator<Item = Slot>`）。
+    ///
+    /// 有了它，"动作区/设置项由调用方给一个 Vec" 的组件也能整体写进 `rsx!`，
+    /// 不必退回 `hbox_gap(..)` + 逐字段赋值。
+    Spread(Expr),
 }
 
 // ============================================================================
@@ -121,6 +132,13 @@ impl Parse for Node {
         if input.peek(syn::token::Brace) {
             let block: syn::ExprBlock = input.parse()?;
             return Ok(Node::Dynamic(syn::Expr::Block(block)));
+        }
+
+        // `..items`：展开一个子节点列表
+        if input.peek(Token![..]) {
+            let _: Token![..] = input.parse()?;
+            let expr: Expr = syn::Expr::parse_without_eager_brace(input)?;
+            return Ok(Node::Spread(expr));
         }
 
         // if cond { .. } else { .. }
@@ -434,6 +452,11 @@ fn gen_child(node: &Node) -> syn::Result<TokenStream2> {
             prelude,
             body,
         } => gen_for_each(source, key_fn, params, prelude, body),
+        Node::Spread(expr) => Ok(quote! {
+            #m::fc::Slot::Many(#m::fc::ChildArg::new(move |__cx| {
+                #m::fc::push_all(#expr, __cx);
+            }))
+        }),
         Node::When {
             cond,
             then_branch,
@@ -510,20 +533,29 @@ fn gen_child(node: &Node) -> syn::Result<TokenStream2> {
 /// `label(expr)` → 闭包包装的动态文本；`label("lit")` → 静态文本。
 fn gen_dynamic(expr: &Expr) -> TokenStream2 {
     let m = mve();
+    // `{ foo() }` 作为子节点时，块只是书写习惯，转成 `Into::into({ foo() })`
+    // 会让 rustc 报「多余花括号」。这里把单语句的块拆开，保持生成码干净。
+    let mut expr = expr;
+    while let Expr::Block(b) = expr {
+        match b.block.stmts.as_slice() {
+            [syn::Stmt::Expr(inner, None)] => expr = inner,
+            _ => break,
+        }
+    }
     let Expr::Call(call) = expr else {
-        return quote! { #m::fc::Slot::One(#expr) };
+        return quote! { ::core::convert::Into::<#m::fc::Slot>::into(#expr) };
     };
     let fname = call.func.to_token_stream().to_string();
     let fname = fname.rsplit("::").next().unwrap_or(&fname).to_string();
     if !matches!(fname.as_str(), "label" | "caption" | "text") {
-        return quote! { #m::fc::Slot::One(#expr) };
+        return quote! { ::core::convert::Into::<#m::fc::Slot>::into(#expr) };
     }
     let Some(first) = call.args.first() else {
-        return quote! { #m::fc::Slot::One(#expr) };
+        return quote! { ::core::convert::Into::<#m::fc::Slot>::into(#expr) };
     };
     // 调用方自备闭包 → 透传
     if matches!(first, Expr::Closure(_)) {
-        return quote! { #m::fc::Slot::One(#expr) };
+        return quote! { ::core::convert::Into::<#m::fc::Slot>::into(#expr) };
     }
     let inner = &call.args[0];
     quote! {
@@ -548,6 +580,10 @@ fn gen_children_vec(nodes: &[Node]) -> syn::Result<TokenStream2> {
             // 原始 Rust 语句 → 只求值不产出
             Node::Raw(stmts) => {
                 parts.push(quote! { #(#stmts)* });
+            }
+            // `..items` → 直接拼接到输出列表（早一层展开，不额外包 Slot）
+            Node::Spread(expr) => {
+                parts.push(quote! { __out.extend(#expr); });
             }
             _ => {
                 let one = gen_child(n)?;
@@ -621,8 +657,10 @@ fn gen_attr_assigns(fields: &[(Ident, Expr)], container: &Ident) -> syn::Result<
                 fname.span(),
                 format!(
                     "容器 `{container}` 不支持属性 `{fname}`；可用：x, y, width, height, \
-                     gap, hide, size, focusable, skip_draw, focus_trap, \
-                     selection_enabled, focus_order"
+                     gap, grow, padding, justify, align_items, align_self, hide, size, measure, \
+                     draw, on_click, on_click_ev, on_hover, on_wheel, on_wheel_ev, on_move, \
+                     on_down, on_up, on_drag_move, on_key, focusable, skip_draw, focus_trap, \
+                     selection_enabled, focus_order, clip, not_in_layout"
                 ),
             ));
         };
@@ -633,6 +671,7 @@ fn gen_attr_assigns(fields: &[(Ident, Expr)], container: &Ident) -> syn::Result<
 
 /// 单个属性 → 赋值语句。
 fn gen_attr_assign(fname: &Ident, value: &Expr) -> Option<TokenStream2> {
+    let m = mve();
     match fname.to_string().as_str() {
         "x" => Some(num_attr(quote! { x }, quote! { x_fn }, value)),
         "y" => Some(num_attr(quote! { y }, quote! { y_fn }, value)),
@@ -640,6 +679,125 @@ fn gen_attr_assign(fname: &Ident, value: &Expr) -> Option<TokenStream2> {
         "height" => Some(num_attr(quote! { height }, quote! { height_fn }, value)),
         "gap" => Some(num_attr(quote! { gap }, quote! { gap_fn }, value)),
         "hide" => Some(bool_attr(quote! { hidden }, quote! { hide_fn }, value)),
+        // flex 排布（容器属性）：grow 吃剩余空间，padding 内缩，justify/align 对齐。
+        // grow 也要能吃信号表达式（`grow: split.get()`）——分割条拖的就是权重，
+        // 写成静态值的话拖动永远看不出变化。
+        "grow" => Some(num_attr(quote! { grow }, quote! { grow_fn }, value)),
+        "padding" => Some(quote! { __n.padding = #value; }),
+        "justify" => Some(quote! { __n.justify = #value; }),
+        "align_items" => Some(quote! { __n.align_items = #value; }),
+        "align_self" => Some(quote! { __n.align_self = ::core::option::Option::Some(#value); }),
+        // 通用节点事件：任意容器都能绑，不必退化成手写 Node 字面量
+        "on_click" => Some(quote! {
+            {
+                let __f = #value;
+                __n.on_click_fn = ::core::option::Option::Some(
+                    ::std::rc::Rc::new(move |_ev| __f())
+                );
+            }
+        }),
+        "on_hover" => Some(quote! {
+            {
+                let __f = #m::fc::__fn_bool(#value);
+                __n.on_hover_fn = ::core::option::Option::Some(
+                    ::std::rc::Rc::new(move |__entered: bool| __f(__entered))
+                );
+            }
+        }),
+        "on_wheel" => Some(quote! {
+            {
+                let __f = #m::fc::__fn_ptr(#value);
+                __n.on_wheel_fn = ::core::option::Option::Some(
+                    ::std::rc::Rc::new(move |__ev: &mut _| __f(__ev.wheel))
+                );
+            }
+        }),
+        // 需要 `stop_propagation()` / 局部坐标时用这个（图表缩放要吃掉滚轮事件，
+        // 否则父级滚动容器会跟着动）。
+        "on_wheel_ev" => Some(quote! {
+            {
+                let __f = #m::fc::__fn_ptr(#value);
+                __n.on_wheel_fn = ::core::option::Option::Some(
+                    ::std::rc::Rc::new(move |__ev: &mut _| __f(__ev))
+                );
+            }
+        }),
+        "on_move" => Some(quote! {
+            {
+                let __f = #m::fc::__fn_xy(#value);
+                __n.on_hover_move_fn = ::core::option::Option::Some(
+                    ::std::rc::Rc::new(move |__ev: &mut _| __f(__ev.x, __ev.y))
+                );
+            }
+        }),
+        // 按下 / 抬起 / 按下期移动：拖拽类组件（分割条、框选、拖放）必需。
+        // 与 `on_click` 的区别：click 只在松手命中时触发一次，
+        // 这三个回调构成「按下 → 连续 move → 抬起」的完整手势。
+        "on_down" => Some(quote! {
+            {
+                let __f = #m::fc::__fn_ptr(#value);
+                __n.on_down_fn = ::core::option::Option::Some(
+                    ::std::rc::Rc::new(move |__ev: &mut _| __f(__ev))
+                );
+            }
+        }),
+        "on_up" => Some(quote! {
+            {
+                let __f = #m::fc::__fn_ptr(#value);
+                __n.on_up_fn = ::core::option::Option::Some(
+                    ::std::rc::Rc::new(move |__ev: &mut _| __f(__ev))
+                );
+            }
+        }),
+        "on_drag_move" => Some(quote! {
+            {
+                let __f = #m::fc::__fn_ptr(#value);
+                __n.on_move_fn = ::core::option::Option::Some(
+                    ::std::rc::Rc::new(move |__ev: &mut _| __f(__ev))
+                );
+            }
+        }),
+        // 点击事件（带 &mut PointerEvent）：面板拦截冒泡（stop_propagation）等
+        "on_click_ev" => Some(quote! {
+            {
+                let __f = #m::fc::__fn_ptr(#value);
+                __n.on_click_fn = ::core::option::Option::Some(
+                    ::std::rc::Rc::new(move |__ev: &mut _| __f(__ev))
+                );
+            }
+        }),
+        // 自绘：把「downcast + 判空」样板收进宏里。
+        //
+        // 没有它时，每个自绘组件都要写 3 行
+        // `let Some(s) = any.downcast_mut::<Scene>() else { return; };`，
+        // 于是大家都绕开 `rsx!` 去手写 `Node { draw_fn: Rc::new(..) }` ——
+        // 这正是 `examples/finance` 曾经整体退回绘制的原因。
+        "draw" => {
+            let m = mve();
+            Some(quote! {
+                {
+                    let __paint = #value;
+                    __n.draw_fn = ::std::rc::Rc::new(
+                        move |__any: &mut dyn ::std::any::Any| {
+                            if let ::core::option::Option::Some(__scene) =
+                                __any.downcast_mut::<#m::Scene>()
+                            {
+                                __paint(__scene);
+                            }
+                        },
+                    );
+                }
+            })
+        }
+        // 测量回调（随内容变化的尺寸，如文本实测宽度）。
+        // 与 `size` 的区别：`size` 是**权威尺寸**（直接返回，忽略其它）；
+        // `measure` 是**建议尺寸**（与显式 width/height 取 max），
+        // 所以文本节点应该用 `measure`，让 `width:` 仍能兜底加宽。
+        "measure" => Some(quote! {
+            __n.measure_fn = ::core::option::Option::Some(
+                ::std::rc::Rc::new(move || #value),
+            );
+        }),
         // 整体尺寸覆盖（Kotlin `override fun argSize`），闭包返回 (w, h)
         "size" => Some(quote! {
             __n.size_fn = Some(::std::rc::Rc::new(move || #value));
@@ -650,8 +808,116 @@ fn gen_attr_assign(fname: &Ident, value: &Expr) -> Option<TokenStream2> {
         "focus_trap" => Some(quote! { __n.focus_trap = #value; }),
         "selection_enabled" => Some(quote! { __n.selection_enabled = #value; }),
         "focus_order" => Some(quote! { __n.focus_order = #value; }),
+        // 语义标签：给节点起名，便于测试/调试按名字定位
+        "tag" => Some(quote! { __n.tag = Some(#value); }),
+        // 裁剪子树（scroll 容器）：绘制与命中都以布局盒为界
+        "clip" => Some(quote! { __n.clip = #value; }),
+        // 绝对定位（Kotlin notInLayout）：不参与 flex，x/y 直接定位（浮层/滚动条）
+        "not_in_layout" => Some(quote! { __n.not_in_layout = #value; }),
+        // 键盘事件（带 &mut KeyEvent，返回 bool 表示已消费）：浮层 Esc 关闭等
+        "on_key" => Some(quote! {
+            {
+                let __f = #m::fc::__fn_key(#value);
+                __n.key_fn = ::core::option::Option::Some(
+                    ::std::rc::Rc::new(move |__ev: &mut _| __f(__ev))
+                );
+            }
+        }),
         _ => None,
     }
+}
+
+/// `#[component]` 的事件回调属性名。
+///
+/// 这些名字在组件签名里就是 `impl Fn()` 形式的 props；在容器标签上则是普通
+/// 布局属性（挂到节点字段上）。同一个名字两处语义不同，故在组件分支先认它们。
+const EVENT_PROPS: &[&str] = &[
+    "on_click",
+    "on_hover",
+    "on_wheel",
+    "on_move",
+    "on_down",
+    "on_up",
+    "on_drag_move",
+];
+
+/// 属性名 → 模板节点上的字段（静态字段, 动态字段）。
+///
+/// 见 [`layout_copy_stmts`]：属性先落到模板节点，再搬到组件真正产出的节点上。
+fn layout_field(fname: &str) -> Option<(&'static str, Option<&'static str>)> {
+    Some(match fname {
+        "x" => ("x", Some("x_fn")),
+        "y" => ("y", Some("y_fn")),
+        "width" => ("width", Some("width_fn")),
+        "height" => ("height", Some("height_fn")),
+        "gap" => ("gap", Some("gap_fn")),
+        "grow" => ("grow", Some("grow_fn")),
+        "hide" => ("hidden", Some("hide_fn")),
+        "padding" => ("padding", None),
+        "justify" => ("justify", None),
+        "align_items" => ("align_items", None),
+        "align_self" => ("align_self", None),
+        "focusable" => ("focusable", None),
+        "skip_draw" => ("skip_draw", None),
+        "focus_trap" => ("focus_trap", None),
+        "selection_enabled" => ("selection_enabled", None),
+        "focus_order" => ("focus_order", None),
+        "tag" => ("tag", None),
+        "clip" => ("clip", None),
+        "not_in_layout" => ("not_in_layout", None),
+        _ => return None,
+    })
+}
+
+/// 只有 `Option<Rc<..>>` 一种形态的属性（搬运时要 `clone`）。
+fn layout_rc_field(fname: &str) -> Option<&'static str> {
+    Some(match fname {
+        "size" => "size_fn",
+        "measure" => "measure_fn",
+        "draw" => "draw_fn",
+        "on_click" => "on_click_fn",
+        "on_hover" => "on_hover_fn",
+        "on_wheel" | "on_wheel_ev" => "on_wheel_fn",
+        "on_move" => "on_hover_move_fn",
+        "on_down" => "on_down_fn",
+        "on_up" => "on_up_fn",
+        "on_drag_move" => "on_move_fn",
+        "on_key" => "key_fn",
+        "on_click_ev" => "on_click_fn",
+        _ => return None,
+    })
+}
+
+/// 「模板节点 → 目标节点」的搬运语句。
+///
+/// 为什么要先落模板：ctx 组件返回的是 `Slot::Many`（body 推迟到挂载期），
+/// 调用处拿不到它将来会产出的节点。把属性先落到一个模板节点上（只生成一次），
+/// 等组件注入节点时再逐条搬过去，属性就对 ctx 组件也生效了——
+/// 否则 `grow` / `width` 这类布局属性会被静默丢弃，分栏比例直接失效。
+fn layout_copy_stmts(names: &[Ident]) -> Vec<TokenStream2> {
+    names
+        .iter()
+        .filter_map(|n| {
+            let name = n.to_string();
+            if let Some(field) = layout_rc_field(&name) {
+                let f = Ident::new(field, n.span());
+                return Some(quote! { __n.#f = ::core::clone::Clone::clone(&__tpl.#f); });
+            }
+            let (static_f, dyn_f) = layout_field(&name)?;
+            let s = Ident::new(static_f, n.span());
+            let head = quote! { __n.#s = __tpl.#s; };
+            Some(match dyn_f {
+                Some(d) => {
+                    let d = Ident::new(d, n.span());
+                    quote! {
+                        #head
+                        __n.#d = ::core::clone::Clone::clone(&__tpl.#d);
+                    }
+                }
+                None => head,
+            })
+        })
+        .collect()
 }
 
 /// f32 属性：字面量直赋静态字段，其余包闭包给 fn 字段。
@@ -718,6 +984,7 @@ fn is_builtin_container(name: &str) -> bool {
             | "vbox_at"
             | "hbox_at"
             | "group"
+            | "node"
             | "focusable"
             | "focus_trap"
     )
@@ -822,7 +1089,33 @@ fn gen_component(
     // `__component(badge, |b| b.field(v).. .build())`——由组件函数反推 Props，
     // **调用处无需写出/导入 `Props` 类型**（避免跨模块可见性负担）。
     // 省略字段由 builder 填默认值，裸子节点路由到 `.children(vec![..])`。
-    let setters = fields.iter().map(|(n, e)| quote! { .#n(#e) });
+    //
+    // 布局属性（`grow`/`width`/`hide`/`draw`…）**不进 props**，而是作用在组件
+    // 返回的根节点上：组件因此和容器一样是「布局节点」，`text_label { grow: 1.0 }`
+    // 与 `vbox { grow: 1.0 }` 写法一致——这是「组件化而不退回绘制」的前提。
+    //
+    // **事件回调例外**：`on_click` 这些名字在 `#[component]` 里就是 props
+    // （`on_click: impl Fn()`）。若把它们当布局属性，节点回调被设上、props 却空着，
+    // 组件永远收不到这次点击。所以这里先认事件名，其余再问布局。
+    let mut setters: Vec<TokenStream2> = Vec::new();
+    let mut layout_stmts: Vec<TokenStream2> = Vec::new();
+    let mut layout_names: Vec<Ident> = Vec::new();
+    for (n, e) in fields {
+        if EVENT_PROPS.contains(&n.to_string().as_str()) {
+            setters.push(quote! { .#n(#e) });
+            continue;
+        }
+        match gen_attr_assign(n, e) {
+            Some(stmt) => {
+                layout_stmts.push(stmt);
+                layout_names.push(n.clone());
+            }
+            None => setters.push(quote! { .#n(#e) }),
+        }
+    }
+    // 属性先落到一个**模板节点**上（只生成一次）：ctx 组件返回的是惰性 slot，
+    // 属性没法在调用处立刻落到节点上，得等它注入节点时再搬过去。
+    let layout_copy = layout_copy_stmts(&layout_names);
     let children_setter = if children.is_empty() {
         quote! {}
     } else {
@@ -831,6 +1124,50 @@ fn gen_component(
     };
     let call = quote! {
         #m::fc::__component(#name, |__b| __b #(#setters)* #children_setter .build())
+    };
+    let call = if layout_stmts.is_empty() {
+        call
+    } else {
+        quote! {
+            {
+                // 属性语句固定写 `__n`，所以模板先叫 `__n`，再绑成 `__tpl`
+                let __tpl: #m::Node = {
+                    let mut __n: #m::Node = ::core::default::Default::default();
+                    #(#layout_stmts)*
+                    __n
+                };
+                match #call {
+                    #m::fc::Slot::One(mut __n) => {
+                        #(#layout_copy)*
+                        #m::fc::Slot::One(__n)
+                    }
+                    // ctx 组件（首参带 `ctx`）：body 推迟到挂载期，属性要等它
+                    // 真正注入节点时才有地方落——先让它跑进自己的作用域，
+                    // 再把模板搬到它注入的每一个节点上。
+                    // 搬回父上下文走 `adopt_slots` 而不是 `push_slot`：节点在
+                    // 作用域里已盖上那一层 provide（组件自己 provide 的值），
+                    // 不能覆盖掉。
+                    #m::fc::Slot::Many(__arg) => #m::fc::Slot::Many(#m::ChildArg::new(
+                        move |__cx: &mut #m::NodeContext| {
+                            let mut __scope = __cx.child_scope();
+                            __arg.push_slots(&mut __scope);
+                            let mut __out: ::std::vec::Vec<#m::ChildSlot> =
+                                ::std::vec::Vec::new();
+                            for __s in __scope.into_slots() {
+                                match __s {
+                                    #m::ChildSlot::Node(mut __n) => {
+                                        #(#layout_copy)*
+                                        __out.push(#m::ChildSlot::Node(__n));
+                                    }
+                                    __other => __out.push(__other),
+                                }
+                            }
+                            __cx.adopt_slots(__out);
+                        }
+                    )),
+                }
+            }
+        }
     };
 
     if stmts.is_empty() {
@@ -982,6 +1319,31 @@ impl Parse for RsxRoot {
 ///
 /// # 约束
 /// - 不支持 `self`、`async`、`const`、`unsafe`、泛型/生命周期参数。
+/// - `ctx` 组件（首参 `&mut NodeContext`）的 body 不能 `return`：它会被搬进
+///   `FnOnce` 闭包，`return` 的语义会变成"从闭包返回"。
+///
+/// # 两种组件形态
+///
+/// **普通组件**（本函数直接返回节点）：立即求值，适合纯展示。
+///
+/// **ctx 组件**（首参 `ctx: &mut NodeContext`）：对应 ooc `fc` 的 `(ctx, ...args) => R`。
+/// body 推迟到挂载期执行，因而能用上下文注入动态区域。`ctx` 不进 Props，
+/// 调用处看不见它：
+///
+/// ```ignore
+/// use wy_mve::{component, rsx, NodeContext, Slot};
+///
+/// // 对应 ooc：Rows = fc $ [ctx, items => ctx.renderForEach(...)]
+/// #[component]
+/// fn rows(ctx: &mut NodeContext, items: impl Fn() -> Vec<String>) {
+///     ctx.render_for_each(
+///         move |f| items().into_iter().for_each(|s| f(s.clone(), s)),
+///         |_k, item, cx| cx.child(label(move || item.borrow().clone())),
+///     );
+/// }
+///
+/// let ui = rsx! { vbox { rows { items: move || data.get() } } };
+/// ```
 ///
 /// # Examples
 ///
@@ -1057,6 +1419,9 @@ fn expand_component(item: TokenStream2) -> syn::Result<TokenStream2> {
         Plain,
         /// 闭包字段：Props 存 `Rc<dyn Bound>`，setter 泛型收 `impl Bound`。
         Closure(syn::TypeParamBound),
+        /// `#[getter]` 字段：Props 存 `Rc<dyn Fn() -> Inner>`，setter 泛型收
+        /// `impl IntoGetter<Inner>`——裸值或闭包皆可（见 `wy_mve::IntoGetter`）。
+        Getter(syn::Type),
     }
     struct FieldSpec {
         ident: Ident,
@@ -1067,6 +1432,8 @@ fn expand_component(item: TokenStream2) -> syn::Result<TokenStream2> {
     }
 
     let mut specs: Vec<FieldSpec> = Vec::new();
+    // 首参 `ctx: &mut NodeContext`：不进 Props，改为惰性子节点（见下方生成分支）。
+    let mut ctx_ident: Option<Ident> = None;
     for arg in &sig.inputs {
         let pat_ty = match arg {
             syn::FnArg::Receiver(r) => {
@@ -1086,47 +1453,92 @@ fn expand_component(item: TokenStream2) -> syn::Result<TokenStream2> {
                 ));
             }
         };
+        // 首参为 `&mut NodeContext` → ctx 组件（对应 ooc `fc` 的 `ctx` 形参）。
+        if ctx_ident.is_none() && specs.is_empty() && is_ctx_param(&pat_ty.ty) {
+            ctx_ident = Some(ident);
+            continue;
+        }
+        if is_node_context_type(&pat_ty.ty) {
+            return Err(syn::Error::new_spanned(
+                &pat_ty.ty,
+                "#[component] 的 `ctx` 只能是首参，且须为 `ctx: &mut NodeContext`",
+            ));
+        }
+        // `&mut XxxContext` 拼错：宏会把 ctx 类型擦除，若不在这里拦住，
+        // 它将退化成普通 prop，报的是 `&mut` 生命周期无法 'static 的一堆难懂错误。
+        if ctx_ident.is_none() && specs.is_empty() {
+            if let syn::Type::Reference(r) = &*pat_ty.ty {
+                if let syn::Type::Path(tp) = &*r.elem {
+                    if tp.path.segments.last().is_some_and(|s| {
+                        s.ident != "NodeContext" && s.ident.to_string().ends_with("Context")
+                    }) {
+                        return Err(syn::Error::new_spanned(
+                            &pat_ty.ty,
+                            "#[component] 首参疑似 ctx，但类型不是 `&mut NodeContext`",
+                        ));
+                    }
+                }
+            }
+        }
         let is_children = ident == "children";
         // `#[props(default)]` / `#[props(default = expr)]`
         let props_default = parse_props_default(&pat_ty.attrs)?;
+        // `#[getter]`：prop 是「显示值」——调用处传裸表达式或闭包皆可。
+        let getter = parse_getter(&pat_ty.attrs)?;
 
-        let (prop_ty, setter, auto_children) = match &*pat_ty.ty {
-            // `impl Fn(..) -> ..` → `Rc<dyn Fn(..) -> ..>`
-            syn::Type::ImplTrait(it) => {
-                let mut trait_bounds = it.bounds.iter().filter_map(|b| match b {
-                    syn::TypeParamBound::Trait(_) => Some(b.clone()),
-                    _ => None,
-                });
-                let first = trait_bounds.next().ok_or_else(|| {
-                    syn::Error::new_spanned(&pat_ty.ty, "#[component] 不支持该 `impl Trait` 参数")
-                })?;
-                let is_children_trait = matches!(&first,
+        let (prop_ty, setter, auto_children) = if getter {
+            // 声明类型即「值类型」（如 `String` / `Color`），运行时存取值闭包。
+            let inner = (*pat_ty.ty).clone();
+            let prop_ty: syn::Type =
+                syn::parse_quote!(::std::rc::Rc<dyn ::core::ops::Fn() -> #inner>);
+            (prop_ty, Setter::Getter(inner), false)
+        } else {
+            match &*pat_ty.ty {
+                // `impl Fn(..) -> ..` → `Rc<dyn Fn(..) -> ..>`
+                syn::Type::ImplTrait(it) => {
+                    let mut trait_bounds = it.bounds.iter().filter_map(|b| match b {
+                        syn::TypeParamBound::Trait(_) => Some(b.clone()),
+                        _ => None,
+                    });
+                    let first = trait_bounds.next().ok_or_else(|| {
+                        syn::Error::new_spanned(
+                            &pat_ty.ty,
+                            "#[component] 不支持该 `impl Trait` 参数",
+                        )
+                    })?;
+                    let is_children_trait = matches!(&first,
                     syn::TypeParamBound::Trait(tb) if tb.path.is_ident("Children"));
-                if is_children_trait {
-                    (
-                        syn::parse_quote!(::std::vec::Vec<#m::Slot>),
-                        Setter::Plain,
-                        true,
-                    )
-                } else {
-                    let prop_ty: syn::Type = syn::parse_quote!(::std::rc::Rc<dyn #first>);
-                    (prop_ty, Setter::Closure(first), false)
+                    if is_children_trait {
+                        (
+                            syn::parse_quote!(::std::vec::Vec<#m::Slot>),
+                            Setter::Plain,
+                            true,
+                        )
+                    } else {
+                        let prop_ty: syn::Type = syn::parse_quote!(::std::rc::Rc<dyn #first>);
+                        (prop_ty, Setter::Closure(first), false)
+                    }
                 }
+                // `children: Vec<Slot>` → 可选插槽
+                _ if is_children => (
+                    syn::parse_quote!(::std::vec::Vec<#m::Slot>),
+                    Setter::Plain,
+                    true,
+                ),
+                other => ((*other).clone(), Setter::Plain, false),
             }
-            // `children: Vec<Slot>` → 可选插槽
-            _ if is_children => (
-                syn::parse_quote!(::std::vec::Vec<#m::Slot>),
-                Setter::Plain,
-                true,
-            ),
-            other => ((*other).clone(), Setter::Plain, false),
         };
 
         // children / impl Children 默认空槽；`#[props(default)]` 显式默认；`Option<T>` 自动 None。
+        // getter 的默认值也走 `IntoGetter`（裸值或闭包均可）。
         let (optional, default) = if auto_children {
             (true, quote! { ::std::vec::Vec::new() })
         } else if let Some(d) = props_default {
-            (true, d)
+            if getter {
+                (true, quote! { #m::IntoGetter::into_getter(#d) })
+            } else {
+                (true, d)
+            }
         } else if is_option_type(&pat_ty.ty) {
             (true, quote! { ::core::option::Option::None })
         } else {
@@ -1140,6 +1552,15 @@ fn expand_component(item: TokenStream2) -> syn::Result<TokenStream2> {
             optional,
             default,
         });
+    }
+
+    // `ctx` 与 `children` 是两种互斥的子节点注入方式：前者在挂载期自己 `ctx.child(..)`，
+    // 后者由调用方把 `rsx!` 子节点塞进 Props。同时存在会让「谁先谁后」变得不可预期。
+    if ctx_ident.is_some() && specs.iter().any(|s| s.ident == "children") {
+        return Err(syn::Error::new_spanned(
+            sig,
+            "#[component] 带 `ctx` 时不要再声明 `children` 参数；直接 `ctx.child(..)` 注入",
+        ));
     }
 
     let attrs = &func.attrs;
@@ -1175,6 +1596,13 @@ fn expand_component(item: TokenStream2) -> syn::Result<TokenStream2> {
                     self
                 }
             },
+            Setter::Getter(inner) => quote! {
+                #[must_use]
+                pub fn #n<__G: #m::IntoGetter<#inner> + 'static>(mut self, v: __G) -> Self {
+                    self.#n = ::core::option::Option::Some(#m::IntoGetter::into_getter(v));
+                    self
+                }
+            },
         }
     });
     let build_fields = specs.iter().map(|s| {
@@ -1188,6 +1616,32 @@ fn expand_component(item: TokenStream2) -> syn::Result<TokenStream2> {
         }
     });
     let field_names = specs.iter().map(|s| &s.ident);
+
+    // 两种组件形态：
+    // - 普通组件：立即求值，`body` 直接产出 `Slot`（树在构建期就成型）。
+    // - ctx 组件：对应 ooc `fc` 的 `(ctx, ...args) => R`。`body` 推迟到挂载期，
+    //   由 `ChildArg`（`FnOnce(&mut NodeContext)`）承载，因此能 `ctx.child(..)` /
+    //   `ctx.render_for_each(..)` / `ctx.render_when(..)`。
+    let into_slot = if let Some(ctx_name) = &ctx_ident {
+        quote! {
+            ::core::convert::Into::<#m::Slot>::into(#m::ChildArg::new(
+                move |__cx: &mut #m::NodeContext| {
+                    // 组件作用域：继承父链的 provide，自己 provide 的不外泄给兄弟
+                    let mut __scope = __cx.child_scope();
+                    {
+                        let #ctx_name: &mut #m::NodeContext = &mut __scope;
+                        let __produced: #m::Slot = #m::fc::IntoSlot::into_slot(#body);
+                        #m::Children::push_slots(__produced, #ctx_name);
+                    }
+                    __cx.adopt(__scope);
+                }
+            ))
+        }
+    } else {
+        quote! {
+            ::core::convert::Into::<#m::Slot>::into(#body)
+        }
+    };
 
     Ok(quote! {
         #(#attrs)*
@@ -1222,7 +1676,7 @@ fn expand_component(item: TokenStream2) -> syn::Result<TokenStream2> {
         #(#attrs)*
         #vis fn #name(props: #props_name) -> #m::Slot {
             let #props_name { #(#field_names),* } = props;
-            ::core::convert::Into::<#m::Slot>::into(#body)
+            #into_slot
         }
 
         impl #m::fc::Props for #props_name {
@@ -1259,6 +1713,19 @@ fn parse_props_default(attrs: &[syn::Attribute]) -> syn::Result<Option<TokenStre
     Ok(None)
 }
 
+/// 解析参数上的 `#[getter]`：标记该 prop 为「显示值」语义。
+///
+/// 返回 `true` 表示标注了。接受 `#[getter]`（路径形式）；若写成 `#[getter(...)]`
+/// 也容忍（忽略参数），避免调用方纠结括号。
+fn parse_getter(attrs: &[syn::Attribute]) -> syn::Result<bool> {
+    for attr in attrs {
+        if attr.path().is_ident("getter") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// `Option<T>` 检测（用于自动可选字段）。
 fn is_option_type(ty: &syn::Type) -> bool {
     let syn::Type::Path(tp) = ty else {
@@ -1268,4 +1735,23 @@ fn is_option_type(ty: &syn::Type) -> bool {
         .segments
         .last()
         .is_some_and(|seg| seg.ident == "Option")
+}
+
+/// `&mut NodeContext`？—— ctx 组件的首参形态。
+fn is_ctx_param(ty: &syn::Type) -> bool {
+    match ty {
+        syn::Type::Reference(r) => r.mutability.is_some() && is_node_context_type(&r.elem),
+        _ => false,
+    }
+}
+
+/// `NodeContext`（忽略路径前缀与泛型实参）？
+fn is_node_context_type(ty: &syn::Type) -> bool {
+    let syn::Type::Path(tp) = ty else {
+        return false;
+    };
+    tp.path
+        .segments
+        .last()
+        .is_some_and(|seg| seg.ident == "NodeContext")
 }

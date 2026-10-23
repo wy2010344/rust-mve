@@ -24,14 +24,22 @@
 //! - [`collect`] — 摊平子节点参数
 //! - [`text`] / [`button`] — 同名于 `components`，此处语义等价
 
+// 让 `#[component]` / `rsx!` 生成的 `::wy_mve::...` 路径在本 crate 内部也能解析
+// （框架自带组件 scroll/dialog/dropdown 就是用同一套宏写的）。
+extern crate self as wy_mve;
+
 pub mod clipboard;
 pub mod components;
 mod cond;
 mod context;
 pub mod fc;
 mod foreach;
+pub mod getter;
+pub mod icons;
 mod node;
+pub mod overlay;
 mod rich_text;
+pub mod scroll;
 mod text_field;
 pub mod text_util;
 
@@ -45,12 +53,26 @@ pub use fc::{
     vbox, vbox_at, vbox_gap, when, ChildArg, Children, Slot,
 };
 pub use foreach::render_for_each;
+/// 「裸值 / 闭包 → 取值函数」分发 trait，由 `#[getter]` 标注的 prop 使用。
+pub use getter::IntoGetter;
+/// 矢量图标组件（自绘路径，不依赖字体字形——字符图标在缺字形的机器上会变方块）。
+pub use icons::{icon, Icon};
 pub use node::{
-    children_nodes, flatten, has_handler, layout_offsets, materialize, node_size, ChildSlot,
-    ImeEvent, Key, KeyEvent, Layout, Node, PointerEvent,
+    children_nodes, current_box, flatten, has_handler, layout_boxes, layout_offsets, materialize,
+    node_size, with_box, ChildSlot, ImeEvent, Key, KeyEvent, Layout, LayoutBox, Node, PointerEvent,
 };
+/// 滚动容器 / 浮层组件（复刻 Kotlin SimpleScrollNode + Overlay/Dialog/Dropdown）。
+pub use overlay::{dialog, dropdown};
 pub use rich_text::{rich_editable_opts, rich_text, rich_text_opts, RichTextOpts};
+pub use scroll::scroll;
 pub use text_field::{text_field, text_field_opts, TextFieldColors, TextFieldOpts};
+pub use wy_layout::{AlignItem, DirectionJustify};
+/// 颜色类型重新导出：getter prop（如 `text_label` 的 `color`）按值传入时
+/// 需要它能作为 `IntoGetter<Color>` 的值分支。
+pub use wy_render::Color;
+/// 绘制目标重新导出：让 `rsx! { draw: |s| .. }` 生成的 downcast 不必让调用方
+/// 额外声明 `wy-render` 依赖（宏只认 `wy_mve` 一条路径）。
+pub use wy_render::Scene;
 
 /// `#[component]` 属性宏：把函数包装为 `rsx!` 可用的组件（见 `wy-mve-macros`）。
 pub use wy_mve_macros::component;

@@ -50,10 +50,26 @@ const BLIT_WGSL: &str = r#"
 @group(0) @binding(0) var src_tex: texture_2d<f32>;
 @group(0) @binding(1) var src_sampler: sampler;
 
+// surface 是 *Srgb 格式时，硬件会在写入时做 linear -> sRGB 编码。
+// 中间纹理里的值已经是 sRGB 编码过的，所以这里必须先解码回 linear，
+// 否则会被编码两次（整屏发灰、暗部全被抬起来）。
+const SURFACE_IS_SRGB: bool = /*SRGB*/false;
+
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let lo = c / 12.92;
+    let hi = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+    return select(hi, lo, c <= vec3<f32>(0.04045));
+}
+
 @fragment fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let dims = textureDimensions(src_tex);
     let uv = pos.xy / vec2<f32>(f32(dims.x), f32(dims.y));
-    return textureSample(src_tex, src_sampler, uv);
+    let c = textureSample(src_tex, src_sampler, uv);
+    var rgb = c.rgb;
+    if SURFACE_IS_SRGB {
+        rgb = srgb_to_linear(rgb);
+    }
+    return vec4<f32>(rgb, c.a);
 }
 "#;
 
@@ -161,6 +177,35 @@ pub trait WyApp {
     fn ime_cursor_area(&self) -> Option<(f32, f32, f32, f32)> {
         None
     }
+
+    /// 初始窗口尺寸（逻辑像素）。默认 800×600。
+    fn window_size(&self) -> (f32, f32) {
+        (800.0, 600.0)
+    }
+
+    /// 窗口标题。默认 `wy-ui`。
+    fn window_title(&self) -> &str {
+        "wy-ui"
+    }
+
+    /// 下一次需要唤醒的时刻（可选）。
+    ///
+    /// 用于「定时数据泵」：后台线程（网络/IO）不能直接写信号——信号状态在
+    /// `thread_local` 里、非 `Send`，只能在 UI 线程写。因此后台线程把数据送进
+    /// 通道，由应用返回 `Some(now + 周期)` 让 runner 用
+    /// `ControlFlow::WaitUntil` 定时唤醒 UI 线程，再在 [`Self::on_wake`] 里
+    /// 排空通道并批量写信号。
+    ///
+    /// 返回 `None`（默认）= 纯事件驱动，不做任何定时唤醒。
+    fn next_wake(&self) -> Option<std::time::Instant> {
+        None
+    }
+
+    /// 定时唤醒回调：在 UI 线程、事件循环空闲时调用。
+    ///
+    /// 与 [`Self::next_wake`] 配套；默认空实现。此回调**不在绘制中**执行，
+    /// 可以安全写信号（写信号会经 `RedrawTracker` 自动触发重绘）。
+    fn on_wake(&mut self) {}
 
     /// 提供无障碍树更新（可选）。
     ///
@@ -275,9 +320,11 @@ impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
         }
 
         // 创建窗口（先隐藏，以便 AccessKit adapter 在显示前创建）
+        let (want_w, want_h) = self.app.window_size();
+        let title = self.app.window_title().to_string();
         let attrs = Window::default_attributes()
-            .with_title("wy-ui")
-            .with_inner_size(winit::dpi::LogicalSize::new(800.0, 600.0))
+            .with_title(title)
+            .with_inner_size(winit::dpi::LogicalSize::new(want_w as f64, want_h as f64))
             .with_visible(false);
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
         let size = window.inner_size();
@@ -356,8 +403,9 @@ impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
         self.blit_pipeline = Some(blit_pipeline);
         self.blit_bind_group_layout = Some(blit_bind_group_layout);
 
-        // 通知应用 resize
-        self.app.on_resize(size.width as f32, size.height as f32);
+        // 通知应用 resize（逻辑尺寸：与 Scene/事件坐标同一空间）
+        let (lw, lh) = self.logical_size(size.width, size.height);
+        self.app.on_resize(lw, lh);
 
         // 创建按需重绘回调，供应用的信号系统使用
         let window_ref = self.window.as_ref().unwrap().clone();
@@ -436,8 +484,14 @@ impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
                         self.vello_target = Some(target);
                         self.vello_target_view = Some(view);
                     }
-                    self.app
-                        .on_resize(new_size.width as f32, new_size.height as f32);
+                    let (lw, lh) = self.logical_size(new_size.width, new_size.height);
+                    self.app.on_resize(lw, lh);
+                    // 视口变了 flex 要重排：必须请求重绘，否则窗口放大后
+                    // 布局停留在旧帧（"窗口一放大布局不跟随"的直接原因）。
+                    if let Some(window) = &self.window {
+                        self.needs_redraw.set(true);
+                        window.request_redraw();
+                    }
                 }
             }
             WindowEvent::ModifiersChanged(mods) => {
@@ -549,14 +603,33 @@ impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // 非 Poll 模式下不需要主动请求重绘
         self.sync_ime_allowed();
         self.sync_ime_cursor_area();
+
+        // 定时唤醒：事件循环即将阻塞时先跑一次 UI 线程数据泵（排空后台通道），
+        // 再按应用给出的下一时刻安排 `WaitUntil`；应用不关心定时则回到纯 `Wait`。
+        self.app.on_wake();
+        match self.app.next_wake() {
+            Some(at) => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
+            None => event_loop.set_control_flow(ControlFlow::Wait),
+        }
     }
 }
 
 impl<A: WyApp> AppState<A> {
+    /// 物理像素 → 逻辑尺寸（Scene 与事件坐标共用逻辑空间）。
+    fn logical_size(&self, width: u32, height: u32) -> (f32, f32) {
+        let scale = self
+            .window
+            .as_ref()
+            .map(|w| w.scale_factor() as f32)
+            .unwrap_or(1.0);
+        let scale = scale.max(f32::EPSILON);
+        (width as f32 / scale, height as f32 / scale)
+    }
+
     /// 同步应用期望的 IME 允许状态到窗口（仅在变化时调用 winit API）。
     fn sync_ime_allowed(&mut self) {
         let want = self.app.ime_allowed();
@@ -617,7 +690,13 @@ impl<A: WyApp> AppState<A> {
         //    有 tracker 时：绘制闭包在依赖变化时才会重跑，其余帧复用缓存 Scene；
         //    无 tracker 时：每次直接重建（兼容无追踪的简单绘制路径）。
         let tracker_guard = self.redraw_tracker.clone();
-        let (w, h) = (width as f32, height as f32);
+        // Scene 坐标是**逻辑**坐标（`execute_scene` 传 scale 统一放大到物理像素），
+        // 所以给应用绘制用的尺寸也要是逻辑尺寸，才能与事件坐标（同样转成逻辑）对上。
+        let scale = window.scale_factor() as f32;
+        let (w, h) = (
+            width as f32 / scale.max(f32::EPSILON),
+            height as f32 / scale.max(f32::EPSILON),
+        );
         let mut owned_scene = Scene::new();
         let tracked: Option<std::cell::Ref<'_, Scene>> = match &tracker_guard {
             Some(tracker) => {
@@ -813,13 +892,24 @@ impl<A: WyApp> AppState<A> {
     /// 创建 blit 渲染管线：将 Rgba8Unorm 中间纹理 blit 到 surface 纹理。
     ///
     /// 使用全屏三角形 + 纹理采样，兼容任意 surface 格式。
+    ///
+    /// surface 若是 `*Srgb` 格式，着色器会先把中间纹理里的 sRGB 值解码回 linear
+    /// （见 [`BLIT_WGSL`]），交给硬件做唯一一次编码。
     fn create_blit_pipeline(
         device: &wgpu::Device,
         surface_format: wgpu::TextureFormat,
     ) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
+        let wgsl = BLIT_WGSL.replace(
+            "/*SRGB*/false",
+            if surface_format.is_srgb() {
+                "true"
+            } else {
+                "false"
+            },
+        );
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("blit_shader"),
-            source: wgpu::ShaderSource::Wgsl(BLIT_WGSL.into()),
+            source: wgpu::ShaderSource::Wgsl(wgsl.into()),
         });
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

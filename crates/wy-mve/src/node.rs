@@ -14,12 +14,15 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::context::NodeContext;
-use wy_layout::{AlignItem, DirectionJustify};
+use wy_layout::{
+    AlignItem, DirectionJustify, FlexChildConvert, FlexLayout, FlexObject, LayoutInsideObject,
+};
 
 type ArgChildrenFn = Rc<dyn Fn(&mut NodeContext)>;
 type DrawFn = Rc<dyn Fn(&mut dyn std::any::Any)>;
 type HitTestFn = Rc<dyn Fn(f32, f32) -> bool>;
 type ClickFn = Rc<dyn Fn(&mut PointerEvent)>;
+type HoverFn = Rc<dyn Fn(bool)>;
 type KeyFn = Rc<dyn Fn(&mut KeyEvent) -> bool>;
 /// IME 输入法事件处理（组合态文本上报）。
 type ImeFn = Rc<dyn Fn(&mut ImeEvent) -> bool>;
@@ -38,9 +41,24 @@ pub type DynNum = Rc<dyn Fn() -> f32>;
 /// 动态布尔属性（对应 Kotlin `open val hide: Boolean get() = ...`）。
 pub type DynBool = Rc<dyn Fn() -> bool>;
 
+/// 上下文提供值的一条记录：`(类型 id, 值)`。
+///
+/// `ctx.provide(..)` 沿节点树向下传值，接收方用 `ctx.consume::<T>()` 取回。
+type ProvidedEntry = (std::any::TypeId, Rc<dyn std::any::Any>);
+/// 上下文提供值的快照（物化期沿树向下 seed）。
+///
+/// 声明为 `pub` 是为了让外部 crate 的 `Node { .., ..Node::default() }`
+/// 结构体更新语法继续可用；业务代码不该读写它。
+pub type ProvidedSnapshot = Rc<Vec<ProvidedEntry>>;
+
 /// 节点是否参与事件命中（有 handler 才算可命中）。
 pub fn has_handler(node: &Node) -> bool {
-    node.on_click_fn.is_some() || node.on_down_fn.is_some() || node.on_up_fn.is_some()
+    node.on_click_fn.is_some()
+        || node.on_down_fn.is_some()
+        || node.on_up_fn.is_some()
+        || node.on_hover_fn.is_some()
+        || node.on_hover_move_fn.is_some()
+        || node.on_wheel_fn.is_some()
 }
 
 /// Node：UI 元素的具象类型。
@@ -59,8 +77,24 @@ pub struct Node {
     pub on_down_fn: Option<ClickFn>,
     /// 释放事件。
     pub on_up_fn: Option<ClickFn>,
-    /// 指针移动事件（按下捕获期间派发，拖选用）。
+    /// 指针移动事件（**按下捕获期间**派发：拖选、拖拽）。
+    ///
+    /// 不按键的悬停移动走 [`Node::on_hover_move_fn`]，两者语义不同，
+    /// 避免文本框这类"移动即扩选"的节点在悬停时被误触发。
     pub on_move_fn: Option<ClickFn>,
+    /// 悬停移动事件（**未按下**时指针在节点上移动，携带局部坐标）。
+    ///
+    /// 引擎沿悬停链派发（叶→根）。用于十字线、悬停读数、tooltip——
+    /// 这类"指针在哪"的信息如果不给节点，组件就只能自己读全局光标，
+    /// 又退回手算坐标。
+    pub on_hover_move_fn: Option<ClickFn>,
+    /// 滚轮事件（`PointerEvent::wheel` 为带符号滚动量，正数向下/放大）。
+    pub on_wheel_fn: Option<ClickFn>,
+    /// 悬停变化（`true` = 指针进入，`false` = 离开）。
+    ///
+    /// 引擎在 `CursorMoved` 时比对命中链差异后派发，对应浏览器
+    /// `pointerenter` / `pointerleave`（不冒泡，只发给链上真正声明了的节点）。
+    pub on_hover_fn: Option<HoverFn>,
     /// 按键事件。
     pub key_fn: Option<KeyFn>,
     /// IME 输入法组合事件（组合文本 / 光标偏移；返回 true 表示已消费）。
@@ -79,6 +113,15 @@ pub struct Node {
     pub hidden: bool,
     /// 跳过自身绘制（但子节点仍绘制）。
     pub skip_draw: bool,
+    /// 是否裁剪子树（overflow hidden，滚动容器用）。
+    ///
+    /// 绘制期把自身 + 子节点限制在布局盒内（[`Scene::push_clip`]），
+    /// 命中测试同样以布局盒为界——溢出内容既看不见也点不到。
+    pub clip: bool,
+    /// 绝对定位（Kotlin `notInLayout`）：不参与父容器 flex 排布与自然尺寸，
+    /// 由 `x`/`y` 直接定位；绘制/命中仍按文档序（后声明在上）。
+    /// 浮层、滚动条这类覆盖元素用它脱离布局流。
+    pub not_in_layout: bool,
     /// 焦点顺序（显式 Tab 顺序，None = 按文档顺序）。
     pub focus_order: Option<i32>,
     /// 是否为焦点陷阱（模态窗口内焦点不外泄）。
@@ -115,6 +158,11 @@ pub struct Node {
     pub height_fn: Option<DynNum>,
     /// 动态间距（覆盖 `gap`，对应 Kotlin `override val gap get() = ...`）。
     pub gap_fn: Option<DynNum>,
+    /// 动态伸展权重（覆盖 `grow`）。
+    ///
+    /// 可拖动分栏需要它：拖动时改的是"这块占多少"，而不是某个像素坐标；
+    /// 没有动态 grow 就只能退回给子节点算绝对高度。
+    pub grow_fn: Option<DynNum>,
     /// 动态隐藏（覆盖 `hidden`，对应 Kotlin `override val hide get() = ...`）。
     pub hide_fn: Option<DynBool>,
     /// 整体尺寸来源（覆盖推导链，对应 Kotlin `override fun argSize`）。
@@ -122,12 +170,38 @@ pub struct Node {
     /// 自然尺寸测量：文本等内容型节点的 intrinsic 尺寸来源；
     /// `node_size` 优先取它，其次才用 `width`/`height`。
     pub measure_fn: Option<MeasureFn>,
+    /// 从父上下文继承的 `provide` 快照（见 [`stamp_provided`]）。
+    ///
+    /// 只在物化期使用：本节点的子节点构建时用它 seed 上下文，
+    /// 于是 `ctx.provide(..)` 的值能沿树下传给任意深度的 `ctx.consume`。
+    ///
+    /// 声明为 `pub` 是为了让外部 crate 的 `Node { .., ..Node::default() }`
+    /// 结构体更新语法继续可用；业务代码不该读写它。
+    #[doc(hidden)]
+    pub provided: Option<ProvidedSnapshot>,
     /// 子节点缓存：构建期由 `arg_children_fn` 产出，之后复用。
     pub children: Rc<RefCell<Option<Vec<ChildSlot>>>>,
     /// 节点实例标识：克隆共享，用于依赖比对（复刻 Kotlin 引用相等语义）。
     pub identity: Rc<()>,
+    /// 语义标签（可选）：给节点起个名字，便于测试与调试按名字定位。
+    ///
+    /// UI 里同类控件往往有很多个（多个输入框、多个按钮），按几何特征
+    /// 反推"哪个是哪个"既脆弱又难读；给关键控件打个 `tag`，测试就能
+    /// 精确断言"点到的是哪一个"。
+    pub tag: Option<&'static str>,
     /// 声明为隐藏节点的记录（供调试）。
     pub _dummy: Cell<()>,
+    /// 最近一次绘制分配的布局盒（引擎在绘制期写入；**局部尺寸**，不含父偏移）。
+    ///
+    /// 组件在**事件期/绘制期**需要知道"父容器实际分了我多大"（scroll 的滚动
+    /// 上限、滑块几何，grow 填充类布局都靠它）时读它——布局盒每帧随 flex
+    /// 重算，构建期根本不知道。绘制前读取返回 `ZERO`。
+    ///
+    /// **必须是 `Rc`**：`Node` 的克隆被放进树里（引擎遍历的是克隆），
+    /// 组件自身也持有克隆。若用普通 `Cell`，克隆之间各写各的——
+    /// 引擎写树里的那个、组件读自己手里的那个，**永远对不上**，
+    /// `last_box` 机制等于失效（scroll 几何恒为 0、浮层翻转无从判断）。
+    pub last_box: Rc<Cell<LayoutBox>>,
 }
 
 impl Clone for Node {
@@ -140,6 +214,9 @@ impl Clone for Node {
             on_down_fn: self.on_down_fn.as_ref().map(Rc::clone),
             on_up_fn: self.on_up_fn.as_ref().map(Rc::clone),
             on_move_fn: self.on_move_fn.as_ref().map(Rc::clone),
+            on_hover_move_fn: self.on_hover_move_fn.as_ref().map(Rc::clone),
+            on_wheel_fn: self.on_wheel_fn.as_ref().map(Rc::clone),
+            on_hover_fn: self.on_hover_fn.as_ref().map(Rc::clone),
             key_fn: self.key_fn.as_ref().map(Rc::clone),
             ime_fn: self.ime_fn.as_ref().map(Rc::clone),
             ime_cursor_fn: self.ime_cursor_fn.as_ref().map(Rc::clone),
@@ -148,6 +225,8 @@ impl Clone for Node {
             focusable: self.focusable,
             hidden: self.hidden,
             skip_draw: self.skip_draw,
+            clip: self.clip,
+            not_in_layout: self.not_in_layout,
             focus_order: self.focus_order,
             focus_trap: self.focus_trap,
             selection_enabled: self.selection_enabled,
@@ -167,12 +246,16 @@ impl Clone for Node {
             width_fn: self.width_fn.as_ref().map(Rc::clone),
             height_fn: self.height_fn.as_ref().map(Rc::clone),
             gap_fn: self.gap_fn.as_ref().map(Rc::clone),
+            grow_fn: self.grow_fn.as_ref().map(Rc::clone),
             hide_fn: self.hide_fn.as_ref().map(Rc::clone),
             size_fn: self.size_fn.as_ref().map(Rc::clone),
             measure_fn: self.measure_fn.as_ref().map(Rc::clone),
+            provided: self.provided.as_ref().map(Rc::clone),
+            tag: self.tag,
             children: Rc::clone(&self.children),
             identity: Rc::clone(&self.identity),
             _dummy: Cell::new(()),
+            last_box: Rc::clone(&self.last_box),
         }
     }
 }
@@ -209,6 +292,9 @@ impl Default for Node {
             on_down_fn: None,
             on_up_fn: None,
             on_move_fn: None,
+            on_hover_move_fn: None,
+            on_wheel_fn: None,
+            on_hover_fn: None,
             key_fn: None,
             ime_fn: None,
             ime_cursor_fn: None,
@@ -217,6 +303,8 @@ impl Default for Node {
             focusable: false,
             hidden: false,
             skip_draw: false,
+            clip: false,
+            not_in_layout: false,
             focus_order: None,
             focus_trap: false,
             selection_enabled: true,
@@ -236,12 +324,16 @@ impl Default for Node {
             width_fn: None,
             height_fn: None,
             gap_fn: None,
+            grow_fn: None,
             hide_fn: None,
             size_fn: None,
             measure_fn: None,
+            provided: None,
+            tag: None,
             children: Rc::new(RefCell::new(None)),
             identity,
             _dummy: Cell::new(()),
+            last_box: Rc::new(Cell::new(LayoutBox::ZERO)),
         }
     }
 }
@@ -282,6 +374,27 @@ impl Node {
     pub fn run_on_move(&self, event: &mut PointerEvent) {
         if let Some(f) = &self.on_move_fn {
             f(event);
+        }
+    }
+
+    /// 触发滚轮回调（`event.wheel` 为带符号滚动量）。
+    pub fn run_wheel(&self, event: &mut PointerEvent) {
+        if let Some(f) = &self.on_wheel_fn {
+            f(event);
+        }
+    }
+
+    /// 触发悬停移动回调（未按下时的指针移动）。
+    pub fn run_hover_move(&self, event: &mut PointerEvent) {
+        if let Some(f) = &self.on_hover_move_fn {
+            f(event);
+        }
+    }
+
+    /// 触发悬停变化回调（`entered` = 指针进入）。
+    pub fn run_hover(&self, entered: bool) {
+        if let Some(f) = &self.on_hover_fn {
+            f(entered);
         }
     }
 
@@ -343,6 +456,15 @@ impl Node {
         }
     }
 
+    /// 伸展权重（动态 `grow_fn` 优先，回落静态 `grow`）。
+    pub fn effective_grow(&self) -> f32 {
+        if let Some(f) = &self.grow_fn {
+            f()
+        } else {
+            self.grow
+        }
+    }
+
     /// 布局位置 X（动态 `x_fn` 优先，回落静态 `x`；复刻 Kotlin `argPosition(Direction.x)`）。
     pub fn pos_x(&self) -> f32 {
         if let Some(f) = &self.x_fn {
@@ -377,6 +499,14 @@ impl Node {
         } else {
             self.height
         }
+    }
+
+    /// 最近一次绘制分配的布局盒（局部尺寸；绘制前为 `ZERO`）。
+    ///
+    /// 引擎在布局盒分配之后、绘制子树之前写入；事件回调（滚轮/点击）
+    /// 与 `draw`/`hide_fn` 里读到的都是上一帧的实际分配值。
+    pub fn last_box(&self) -> LayoutBox {
+        self.last_box.get()
     }
 }
 
@@ -423,6 +553,8 @@ pub struct PointerEvent {
     pub root_y: f32,
     /// 按下时 Shift 是否按住（shift+点击扩选，引擎在分发前填充）。
     pub shift: bool,
+    /// 滚轮增量（正 = 向下/缩小，负 = 向上/放大）；非滚轮事件为 0。
+    pub wheel: f32,
     pub stopped: bool,
 }
 
@@ -434,6 +566,7 @@ impl PointerEvent {
             root_x: x,
             root_y: y,
             shift: false,
+            wheel: 0.0,
             stopped: false,
         }
     }
@@ -457,10 +590,33 @@ pub fn flatten(slots: &[ChildSlot], out: &mut Vec<Node>) {
     }
 }
 
+/// 把 `provided` 快照盖到一批 slot 的静态节点上。
+///
+/// `Node` 之间的父子关系只在 slot 列表里体现，没有反向指针；而子节点是
+/// **延迟**物化的（`materialize` 在绘制/命中时才跑），那时父上下文早已消失。
+/// 所以在父上下文还活着的时候把快照盖到子节点上，子节点物化时就能用它
+/// seed 自己的上下文——`provide` 因此能沿树向下传。
+/// 单个 slot 版：供 [`NodeContext::push_slot`] 用（节点进入上下文的那一刻盖章）。
+pub(crate) fn stamp_slot(slot: ChildSlot, provided: &crate::context::Provided) -> ChildSlot {
+    if provided.is_empty() {
+        return slot;
+    }
+    match slot {
+        ChildSlot::Node(mut n) => {
+            n.provided = Some(std::rc::Rc::new(provided.clone()));
+            ChildSlot::Node(n)
+        }
+        other => other,
+    }
+}
+
 /// 一次性构建节点子结构：执行 `arg_children_fn` 并缓存结果。
 ///
 /// 复刻 Kotlin `Node.children` 的惰性 memo：只执行一次，之后每次复用。
 /// 对静态 `Value` 子树递归构建；动态区域不在此展开（渲染期实时求值）。
+///
+/// 上下文继承链：本节点带入的 [`Node::provided`] → seed 本次构建的 `cx` →
+/// 构建结束后把 `cx.provided` 盖到产出的子节点上，于是 `provide` 逐级下传。
 pub fn materialize(node: &Node) {
     let cache = node.children.borrow();
     if cache.is_some() {
@@ -469,7 +625,13 @@ pub fn materialize(node: &Node) {
     drop(cache);
 
     let mut cx = NodeContext::new();
+    if let Some(inherited) = node.provided.as_ref() {
+        cx.provided = (**inherited).clone();
+    }
     node.run_arg_children(&mut cx);
+    // 不再二次盖章：每个节点在 **push 进 cx 的那一刻** 就由 `push_slot` 盖上了
+    // 当时的 provide 快照（那才是最准确的——它包含此前所有 provide，
+    // 也只包含此前）。在这里重盖会覆盖掉子组件自己 provide 的那一层。
     *node.children.borrow_mut() = Some(cx.into_slots());
 
     let cache = node.children.borrow();
@@ -507,67 +669,369 @@ pub fn children_nodes(node: &Node) -> Vec<Node> {
 /// 4. `width_fn`/`height_fn` 动态值
 /// 5. 静态 `width`/`height`
 pub fn node_size(node: &Node) -> (f32, f32) {
-    if let Some(f) = &node.size_fn {
-        return f();
-    }
-    match node.layout {
-        Some(Layout::Row) => {
-            let gap = node.gap();
-            let children = children_nodes(node);
-            let mut x = 0.0;
-            let mut h = 0.0;
-            let mut count = 0;
-            for c in &children {
-                if c.is_hidden() {
-                    continue;
-                }
-                let (cw, ch) = node_size(c);
-                x += cw + gap;
-                if ch > h {
-                    h = ch;
-                }
-                count += 1;
-            }
-            let w = if count == 0 { 0.0 } else { x - gap };
-            (w, h)
-        }
-        Some(Layout::Column) => {
-            let gap = node.gap();
-            let children = children_nodes(node);
-            let mut y = 0.0;
-            let mut w = 0.0;
-            let mut count = 0;
-            for c in &children {
-                if c.is_hidden() {
-                    continue;
-                }
-                let (cw, ch) = node_size(c);
-                y += ch + gap;
-                if cw > w {
-                    w = cw;
-                }
-                count += 1;
-            }
-            let h = if count == 0 { 0.0 } else { y - gap };
-            (w, h)
-        }
-        None => {
-            if let Some(m) = &node.measure_fn {
-                let (w, h) = m();
-                (
-                    w.max(node.effective_width()),
-                    h.max(node.effective_height()),
-                )
+    // 显式声明的宽高优先于"子节点撑起"（Kotlin `argWidth`/`argHeight` 覆盖 `sizeFromChildren`）。
+    // 没有这条，`vbox { width: 286.0 }` 这种"固定宽列"会被子节点撑成 0 宽。
+    let declared = (node.effective_width(), node.effective_height());
+    // 子节点撑起的自然尺寸（容器语义；叶子为 0）
+    let natural = match node.layout {
+        Some(layout) => {
+            let (nw, nh) = natural_size_of(layout, node);
+            // 容器没有子节点时退化为叶子语义：仍以 `measure` / 声明尺寸兜底。
+            // 否则 `node {}` 这类「自绘叶子」一旦默认带 `layout`，就会因无子节点塌成 0 尺寸，
+            // 既画不出也点不中。有子节点时才用容器自然尺寸撑开。
+            if nw <= 0.0 && nh <= 0.0 {
+                (0.0, 0.0)
             } else {
-                (node.effective_width(), node.effective_height())
+                (nw, nh)
             }
         }
+        None => (0.0, 0.0),
+    };
+    // `measure_fn`（内容测量，如文本）——叶子节点的自然尺寸来源。
+    let measured = node.measure_fn.as_ref().map(|m| m());
+
+    if let Some(f) = &node.size_fn {
+        let (sw, sh) = f();
+        // **`size` 逐维覆盖**：某一维给 0 表示"这一维不设固定值"，
+        // 回退到该维的自然/声明尺寸。
+        //
+        // 早先 `size` 是整体覆盖，于是 `size: (0.0, 0.0)`（本意是"宽度交给
+        // flex 均分"）把**高度也清零**——卡片塌成 0 高、内容溢出、间隔错乱。
+        // 逐维回退后，`size: (0.0, 0.0)` 表示"两维都不设固定值，都由
+        // flex/内容决定"，正是等分卡片想要的语义。
+        let w = if sw > 0.0 {
+            sw
+        } else if natural.0 > 0.0 {
+            natural.0
+        } else if let Some((mw, _)) = measured {
+            mw
+        } else {
+            declared.0
+        };
+        let h = if sh > 0.0 {
+            sh
+        } else if natural.1 > 0.0 {
+            natural.1
+        } else if let Some((_, mh)) = measured {
+            mh
+        } else {
+            declared.1
+        };
+        return (w, h);
     }
+
+    if node.layout.is_some() {
+        let (natural_w, natural_h) = natural;
+        if natural_w <= 0.0 && natural_h <= 0.0 {
+            if let Some((w, h)) = measured {
+                return (w.max(declared.0), h.max(declared.1));
+            }
+            return declared;
+        }
+        return (
+            if declared.0 > 0.0 {
+                declared.0
+            } else {
+                natural_w
+            },
+            if declared.1 > 0.0 {
+                declared.1
+            } else {
+                natural_h
+            },
+        );
+    }
+    if let Some((w, h)) = measured {
+        (w.max(declared.0), h.max(declared.1))
+    } else {
+        declared
+    }
+}
+
+/// 布局容器由子节点撑起的自然尺寸（不含显式宽高覆盖）。
+fn natural_size_of(layout: Layout, node: &Node) -> (f32, f32) {
+    let gap = node.gap();
+    let pad = node.padding.max(0.0);
+    let children = children_nodes(node);
+    let mut main = 0.0f32;
+    let mut cross = 0.0f32;
+    let mut count = 0;
+    for c in &children {
+        // 隐藏与绝对定位（浮层/滚动条）都不占布局空间
+        if c.is_hidden() || c.not_in_layout {
+            continue;
+        }
+        let (cw, ch) = node_size(c);
+        match layout {
+            Layout::Row => {
+                main += cw + gap;
+                cross = cross.max(ch);
+            }
+            Layout::Column => {
+                main += ch + gap;
+                cross = cross.max(cw);
+            }
+        }
+        count += 1;
+    }
+    let main = if count == 0 { 0.0 } else { main - gap };
+    // 容器自身内边距必须算进自然尺寸（外尺寸 = 内容 + 上下/左右 padding）：
+    // 否则「声明式自绘 + 可嵌套」的 `node {}`（如带 `padding` 的 `card`）在去掉
+    // 固定高度后，自然尺寸不含 padding，背景比内容小、子节点溢出背景，且同行卡片
+    // 因内容高度不同而出现高度不齐、视觉间隔不均。这里补全 padding，让嵌套容器
+    // 的尺寸语义与 `layout_boxes`（父分配时先扣自身 padding 再给子节点）一致。
+    match layout {
+        Layout::Row => (main + pad * 2.0, cross + pad * 2.0),
+        Layout::Column => (cross + pad * 2.0, main + pad * 2.0),
+    }
+}
+
+/// 节点在父容器内的布局盒（相对父节点原点）。
+///
+/// 这是 flex 排布的**结果**：主轴位置由 [`layout_boxes`] 按 `grow`/`gap`/`justify`
+/// 分配，交叉轴由 `align_self`/`align_items` 决定尺寸与偏移。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LayoutBox {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl Default for LayoutBox {
+    fn default() -> Self {
+        Self::ZERO
+    }
+}
+
+impl LayoutBox {
+    /// 全零盒（不参与布局的子节点）。
+    pub const ZERO: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        width: 0.0,
+        height: 0.0,
+    };
+
+    pub fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+}
+
+thread_local! {
+    /// 当前正在绘制的节点所分到的布局盒。
+    ///
+    /// 组件在 `draw` 里需要知道"我多大"才能排版自己的内容（画网格、算行高、
+    /// 裁切）。没有它，组件只能回头读窗口尺寸自己手算坐标——那就退回绘制式写法了。
+    static CURRENT_BOX: Cell<LayoutBox> = const { Cell::new(LayoutBox::ZERO) };
+}
+
+/// 当前绘制节点分到的布局盒（宽高即父容器分给它的尺寸）。
+///
+/// 只在 `draw` 期间有效；在布局期调用返回 `ZERO`。
+pub fn current_box() -> LayoutBox {
+    CURRENT_BOX.with(|c| c.get())
+}
+
+/// 在"当前盒"作用域内执行 `f`，返回后恢复外层盒（嵌套绘制用）。
+pub fn with_box<R>(b: LayoutBox, f: impl FnOnce() -> R) -> R {
+    let prev = CURRENT_BOX.with(|c| c.replace(b));
+    let out = f();
+    CURRENT_BOX.with(|c| c.set(prev));
+    out
+}
+
+/// flex 配置：把 `Node` 列表适配成 `wy-layout` 的 [`FlexChildConvert`]。
+struct FlexCfg<'a> {
+    children: &'a [Node],
+    main: &'a [f32],
+    gap: f32,
+    justify: DirectionJustify,
+}
+
+impl FlexChildConvert<usize> for FlexCfg<'_> {
+    fn index(&self, child: &usize) -> usize {
+        *child
+    }
+    fn grow(&self, child: &usize) -> f32 {
+        self.children[*child].effective_grow()
+    }
+    fn outer_size(&self, child: &usize) -> f32 {
+        self.main[*child]
+    }
+    fn ignore(&self, child: &usize) -> bool {
+        let c = &self.children[*child];
+        c.is_hidden() || c.not_in_layout
+    }
+}
+
+impl FlexObject<usize> for FlexCfg<'_> {
+    fn gap(&self) -> f32 {
+        self.gap
+    }
+    fn direction_justify(&self) -> DirectionJustify {
+        self.justify
+    }
+}
+
+/// 按容器角色 + 可用尺寸计算每个子节点的布局盒。
+///
+/// - 主轴：`wy_layout::FlexLayout` 分配（`grow` 吃剩余空间，`gap` 由容器给，
+///   `justify` 决定无 grow 时的对齐）。
+/// - 交叉轴：`align_self` 优先，其次容器的 `align_items`；`Stretch` 撑满交叉轴。
+/// - `padding` 先从可用尺寸里扣掉，再加回到偏移上。
+///
+/// 可用尺寸为 0（未知）时退回"自然尺寸顺排"，与 [`layout_offsets`] 一致。
+pub fn layout_boxes(node: &Node, avail: (f32, f32), children: &[Node]) -> Vec<LayoutBox> {
+    let Some(layout) = node.layout else {
+        return vec![LayoutBox::ZERO; children.len()];
+    };
+    if children.is_empty() {
+        return Vec::new();
+    }
+    let pad = node.padding.max(0.0);
+    let gap = node.gap();
+    let inner_w = (avail.0 - pad * 2.0).max(0.0);
+    let inner_h = (avail.1 - pad * 2.0).max(0.0);
+    let (main_avail, cross_avail) = match layout {
+        Layout::Row => (inner_w, inner_h),
+        Layout::Column => (inner_h, inner_w),
+    };
+
+    // 自然尺寸（hidden / not_in_layout 视作 0，不占 flex 空间）
+    let natural: Vec<(f32, f32)> = children
+        .iter()
+        .map(|c| {
+            if c.is_hidden() || c.not_in_layout {
+                (0.0, 0.0)
+            } else {
+                node_size(c)
+            }
+        })
+        .collect();
+    let main: Vec<f32> = natural
+        .iter()
+        .map(|&(w, h)| match layout {
+            Layout::Row => w,
+            Layout::Column => h,
+        })
+        .collect();
+    let cross: Vec<f32> = natural
+        .iter()
+        .map(|&(w, h)| match layout {
+            Layout::Row => h,
+            Layout::Column => w,
+        })
+        .collect();
+
+    // 主轴：走真正的 flex（grow/justify）分配
+    let idx: Vec<usize> = (0..children.len()).collect();
+    let cfg = FlexCfg {
+        children,
+        main: &main,
+        gap,
+        justify: node.justify,
+    };
+    let flex = if main_avail > 0.0 {
+        Some(FlexLayout::new(
+            &cfg,
+            &LayoutInsideObject::new(&idx, main_avail),
+        ))
+    } else {
+        None
+    };
+
+    let mut out = Vec::with_capacity(children.len());
+    let mut cursor = 0.0f32;
+    for (i, child) in children.iter().enumerate() {
+        if child.is_hidden() {
+            out.push(LayoutBox::ZERO);
+            continue;
+        }
+        // 绝对定位子节点（浮层/滚动条）：不参与 flex，布局盒归零、
+        // 位置统一交给绘制/命中的 `pos_x`/`pos_y` 叠加（与 `vbox_at` 同机制，
+        // 避免偏移被 layout_boxes 和 draw_node 各加一遍）。
+        //
+        // 未声明任何尺寸（宽高均为 0）的绝对定位子节点**撑满父容器内区**：
+        // dialog/dropdown 这类"铺满窗口的遮罩层"因此天然跟随窗口尺寸——
+        // 声明了任一尺寸的（如滚动条滑块）仍用自身自然尺寸。
+        if child.not_in_layout {
+            let (dw, dh) = (child.effective_width(), child.effective_height());
+            let (w, h) = if dw <= 0.0 && dh <= 0.0 {
+                (inner_w, inner_h)
+            } else {
+                node_size(child)
+            };
+            out.push(LayoutBox::new(0.0, 0.0, w, h));
+            continue;
+        }
+        // 主轴位置/尺寸：flex 结果优先，退化时按自然尺寸顺排
+        let (main_pos, main_len) = match (&flex, main_avail > 0.0) {
+            (Some(f), true) => {
+                let r = f.result();
+                let p = r.positions.get(i).copied().flatten();
+                let l = r.child_lengths.get(i).copied().flatten();
+                match (p, l) {
+                    (Some(p), Some(l)) => (p, l),
+                    // 该子节点被 flex 忽略（理论上不会，hidden 已提前处理）
+                    _ => {
+                        let o = (cursor, main[i]);
+                        cursor += main[i] + gap;
+                        o
+                    }
+                }
+            }
+            _ => {
+                let o = (cursor, main[i]);
+                cursor += main[i] + gap;
+                o
+            }
+        };
+
+        // 交叉轴：对齐策略。显式声明了交叉轴位置（`x`/`y` 或对应动态属性）的节点
+        // 由自己定位，不参与自动对齐——对应 Kotlin 里 `argPosition` 覆盖 `align` 的行为。
+        let explicit_cross = match layout {
+            Layout::Row => child.y_fn.is_some() || child.y != 0.0,
+            Layout::Column => child.x_fn.is_some() || child.x != 0.0,
+        };
+        let align = child.align_self.unwrap_or(node.align_items);
+        let (cross_len, cross_pos) = if explicit_cross {
+            (cross[i], 0.0)
+        } else {
+            match align {
+                AlignItem::Stretch => {
+                    let len = if cross_avail > 0.0 {
+                        cross_avail
+                    } else {
+                        cross[i]
+                    };
+                    (len, 0.0)
+                }
+                AlignItem::Start => (cross[i], 0.0),
+                AlignItem::Center => (cross[i], ((cross_avail - cross[i]) / 2.0).max(0.0)),
+                AlignItem::End => (cross[i], (cross_avail - cross[i]).max(0.0)),
+            }
+        };
+
+        out.push(match layout {
+            Layout::Row => LayoutBox::new(pad + main_pos, pad + cross_pos, main_len, cross_len),
+            Layout::Column => LayoutBox::new(pad + cross_pos, pad + main_pos, cross_len, main_len),
+        });
+    }
+    out
 }
 
 /// 对扁平化子节点计算一维布局偏移（主轴依次排布，Cross 轴对齐到 0）。
 ///
 /// `gap` 由调用方从节点读取（`Node::gap`，动态属性优先）。
+///
+/// 不知道容器尺寸时的退化实现，保留给不参与 flex 的调用方；
+/// 有可用尺寸时请用 [`layout_boxes`]（支持 `grow`/`justify`/`align`）。
 pub fn layout_offsets(layout: Layout, gap: f32, children: &[Node]) -> Vec<(f32, f32)> {
     match layout {
         Layout::Row => {
@@ -641,4 +1105,34 @@ pub enum ImeEvent {
     },
     /// 组合确认文本。
     Commit(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn last_box_is_shared_across_clones() {
+        // 回归：`last_box` 若用普通 `Cell`，克隆之间各写各的——
+        // 引擎写的是「树里那个克隆」，组件读的是「自己手里那个」，
+        // 两者永远对不上，`last_box` 机制等于失效
+        // （scroll 的滚动上限恒为 0、浮层无法判断可视区做翻转）。
+        let n = Node::default();
+        let clone = n.clone();
+
+        n.last_box.set(LayoutBox::new(0.0, 0.0, 120.0, 80.0));
+
+        assert_eq!(
+            clone.last_box(),
+            LayoutBox::new(0.0, 0.0, 120.0, 80.0),
+            "克隆应看到同一份布局盒"
+        );
+        assert_eq!(n.last_box(), clone.last_box());
+    }
+
+    #[test]
+    fn last_box_defaults_to_zero() {
+        let n = Node::default();
+        assert_eq!(n.last_box(), LayoutBox::ZERO);
+    }
 }

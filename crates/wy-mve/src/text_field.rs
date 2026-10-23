@@ -282,13 +282,19 @@ pub fn text_field_opts(
             } else {
                 border_color
             };
-            scene.fill_rect(Rect::new(0.0, 0.0, opts.width, opts.height), bg_color);
-            scene.stroke_round_rect(
-                Rect::new(0.0, 0.0, opts.width, opts.height),
-                4.0,
-                border,
-                1.0,
+            // 实际尺寸：绘制期用引擎分配盒（被父容器 Stretch/grow 拉伸时跟随），
+            // 未绘制过回落声明尺寸
+            let b = crate::current_box();
+            let (fw, fh) = (
+                if b.width > 0.0 { b.width } else { opts.width },
+                if b.height > 0.0 {
+                    b.height
+                } else {
+                    opts.height
+                },
             );
+            scene.fill_rect(Rect::new(0.0, 0.0, fw, fh), bg_color);
+            scene.stroke_round_rect(Rect::new(0.0, 0.0, fw, fh), 4.0, border, 1.0);
 
             let top = text_top(&opts);
             let text = s.editable.text();
@@ -364,10 +370,9 @@ pub fn text_field_opts(
     };
 
     let hit_test_fn = {
-        let opts = Rc::clone(&opts);
-        Rc::new(move |x: f32, y: f32| {
-            (0.0..opts.width).contains(&x) && (0.0..opts.height).contains(&y)
-        })
+        // 边界由引擎的 `in_layout_box`（实际分配盒）判定，这里恒真——
+        // opts.width 是构建期声明值，被 Stretch 拉伸后不再等于实际宽度。
+        Rc::new(move |_x: f32, _y: f32| true)
     };
 
     // --- 点击：聚焦 + 多击手势（单击定位 / 双击选词+拖词 / 三击选段） ---
@@ -1099,15 +1104,13 @@ mod tests {
     // --- 命中测试边界（对齐 Kotlin LayoutNode.acceptHit） ---
 
     #[test]
-    fn hit_test_is_bounded_to_size() {
-        // 默认 240x34。命中必须限制在自身尺寸内，否则嵌套布局里会“越界抢点击”
-        // （文本字段会截获其下方/相邻按钮的点击，焦点错乱）。
+    fn hit_test_is_shape_only_bounds_by_engine() {
+        // 命中形状恒真：**边界由引擎的 `in_layout_box`（实际分配盒）判定**——
+        // 输入框会被父容器 Stretch/grow 拉伸，构建期声明的 `opts.width` 不再
+        // 等于实际宽度，组件自判边界会"看得见点不中"或"越界抢点击"。
         let n = text_field(String::new, |_| {});
-        assert!(n.run_hit_test(10.0, 10.0), "内部命中");
-        assert!(n.run_hit_test(239.0, 33.0), "右下内缘命中");
-        assert!(!n.run_hit_test(-1.0, 10.0), "左侧越界不命中");
-        assert!(!n.run_hit_test(10.0, -1.0), "上方越界不命中");
-        assert!(!n.run_hit_test(241.0, 10.0), "右侧越界不命中");
-        assert!(!n.run_hit_test(10.0, 1000.0), "下方越界不命中");
+        assert!(n.run_hit_test(10.0, 10.0), "形状恒真，边界交给引擎");
+        assert!(n.run_hit_test(9999.0, 9999.0), "越界与否由引擎布局盒判定");
+        assert!(n.run_hit_test(-1.0, -1.0), "同上");
     }
 }

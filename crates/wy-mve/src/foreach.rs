@@ -71,6 +71,7 @@ impl<K: PartialEq, T: PartialEq> PartialEq for ForEachModal<K, T> {
 /// 从而 memo 短路、per-item 信号驱动局部重绘。
 pub fn render_for_each<K, T>(
     slots: &mut Vec<ChildSlot>,
+    provided: &crate::context::Provided,
     for_each: impl Fn(&mut dyn FnMut(K, T)) + 'static,
     creater: impl Fn(K, Rc<RefCell<T>>, &mut NodeContext) + 'static,
 ) where
@@ -79,6 +80,8 @@ pub fn render_for_each<K, T>(
 {
     // 跨轮保活的 key → holder 池。
     let prev: HolderPool<K, T> = Rc::new(RefCell::new(Vec::new()));
+    // 父链 provide 快照：下面的 memo/闭包都是 `'static`，先拿到所有权
+    let provided = provided.clone();
 
     let list = Memo::new({
         let prev = Rc::clone(&prev);
@@ -130,7 +133,8 @@ pub fn render_for_each<K, T>(
             e.destroyed.set(true);
         }
         for e in modal.fresh.iter() {
-            let mut cx = NodeContext::new();
+            // 每一项都在"父链 provide 快照"上开上下文：行内 `ctx.consume` 可用
+            let mut cx = NodeContext::inherit(&provided);
             creater(e.key.clone(), Rc::clone(&e.value), &mut cx);
             *e.nodes.borrow_mut() = Some(cx.into_slots());
         }

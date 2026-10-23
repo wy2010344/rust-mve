@@ -53,7 +53,10 @@ impl ChildArg {
     }
 
     /// 在父上下文中就地展开 slot。
-    fn push_slots(self, cx: &mut NodeContext) {
+    ///
+    /// 公开供 `rsx!` 使用：给组件标签挂布局属性（`grow` / `width`…）时，
+    /// 需要先把 ctx 组件跑进一个"自己的作用域"，再把产出的节点搬回父上下文。
+    pub fn push_slots(self, cx: &mut NodeContext) {
         (self.0)(cx);
     }
 }
@@ -102,6 +105,68 @@ impl From<Node> for Slot {
 impl From<ChildArg> for Slot {
     fn from(c: ChildArg) -> Self {
         Slot::Many(c)
+    }
+}
+
+/// 把闭包参数类型钉死为 `bool`（`rsx!` 的 `on_hover` 用）。
+///
+/// 没有它，`on_hover: move |entered| { .. }` 无法编译：宏把用户闭包存进
+/// `let __f = ..` 再 move 进 `Rc<dyn Fn(bool)>`，而 Rust 不会从"被捕获后再调用"
+/// 反推闭包参数类型（实测 `let f = |x| ..; let g = move || f(true);` 报 E0282）。
+#[doc(hidden)]
+pub fn __fn_bool<F: Fn(bool)>(f: F) -> F {
+    f
+}
+
+/// 把闭包参数类型钉死为 `&mut PointerEvent`（`on_wheel` / 拖拽三件套用）。
+#[doc(hidden)]
+pub fn __fn_ptr<F: Fn(&mut crate::PointerEvent)>(f: F) -> F {
+    f
+}
+
+/// 把闭包参数钉死为 `(f32, f32)`（`on_move` 用：节点内局部坐标 x/y）。
+#[doc(hidden)]
+pub fn __fn_xy<F: Fn(f32, f32)>(f: F) -> F {
+    f
+}
+
+/// 把闭包参数钉死为 `&mut KeyEvent`（`on_key` 用）。
+#[doc(hidden)]
+pub fn __fn_key<F: Fn(&mut crate::KeyEvent) -> bool>(f: F) -> F {
+    f
+}
+
+/// `#[component]` 函数体的返回值约定（带 `ctx` 时）。
+///
+/// ctx 组件的 body 在挂载期执行，两种写法都合法：
+/// - **产出节点**：`-> impl Into<Slot>`（`Node` / `Slot` / `Vec<Node>`），由框架注入父容器；
+/// - **纯注入**：以 `;` 结尾返回 `()`，节点已通过 `ctx.child(..)` 自行注入。
+pub trait IntoSlot {
+    /// 转成可注入的 [`Slot`]（`()` → 空注入）。
+    fn into_slot(self) -> Slot;
+}
+
+impl IntoSlot for Slot {
+    fn into_slot(self) -> Slot {
+        self
+    }
+}
+
+impl IntoSlot for Node {
+    fn into_slot(self) -> Slot {
+        Slot::One(self)
+    }
+}
+
+impl IntoSlot for ChildArg {
+    fn into_slot(self) -> Slot {
+        Slot::Many(self)
+    }
+}
+
+impl IntoSlot for () {
+    fn into_slot(self) -> Slot {
+        Slot::Many(ChildArg::new(|_| {}))
     }
 }
 
@@ -159,6 +224,12 @@ pub trait Children {
 impl Children for ChildSlot {
     fn push_slots(self, cx: &mut NodeContext) {
         cx.push_slot(self);
+    }
+}
+
+impl Children for Node {
+    fn push_slots(self, cx: &mut NodeContext) {
+        cx.push_slot(ChildSlot::Node(self));
     }
 }
 
@@ -356,6 +427,34 @@ mod macro_alias {
     pub fn fc__focus_trap(children: impl Children + 'static) -> Node {
         super::focus_trap(children)
     }
+    /// `rsx! { node { .. } }` —— **自绘容器（匿名组件）**：既能画自己，也能装子节点。
+    ///
+    /// 对应 Kotlin 的 `object : Node() { override val … }` / `Box { drawBg(); content() }`：
+    /// 不需要名字、就地定义、就地使用，且动态属性（`width: gap.get()` 这类表达式）
+    /// 自动包成 `*_fn`，天然就是「每次重绘按帧重算」的 getter 语义——
+    /// 即 `#[getter]` 在 `node` 上**已经内置**，不必再写注解。
+    ///
+    /// 两种用法互不冲突：
+    /// - **纯叶子**（不带子节点）：只承载 `draw` / 尺寸 / 事件，尺寸优先取声明值或
+    ///   `measure`（与以往一致）。
+    /// - **自绘容器**（带子节点）：子节点按 `Column` 在自身的布局盒内排布，
+    ///   `draw` 画背景、子组件叠在上层——一个"卡片/面板"就出来了，
+    ///   且 `for_each` / 其它 `#[component]` 都能平滑嵌套进来。
+    #[must_use]
+    pub fn fc__node(children: impl Children + 'static) -> Node {
+        // `arg_children_fn` 是 `Fn`（可能被多次调用），而 `Children` 是一次性的，
+        // 用 `RefCell<Option>` 延迟消费（与 `box_with` 同款防御）。
+        let children = std::cell::RefCell::new(Some(children));
+        Node {
+            layout: Some(crate::node::Layout::Column),
+            arg_children_fn: std::rc::Rc::new(move |cx: &mut crate::NodeContext| {
+                if let Some(children) = children.borrow_mut().take() {
+                    children.push_slots(cx);
+                }
+            }),
+            ..Node::default()
+        }
+    }
     /// `rsx! { btn { .. } }` → `fc::btn`。
     #[must_use]
     pub fn fc__btn(label: impl Fn() -> String + 'static, on_click: impl Fn() + 'static) -> Slot {
@@ -489,6 +588,329 @@ mod tests {
     use wy_signal::{GetValue, Signal};
 
     // ===== rsx! 宏行为测试 =====
+
+    // ===== `#[component]` 的 ctx 形态（对应 ooc `fc` 的 ctx 形参） =====
+
+    /// 首参 `ctx: &mut NodeContext` → body 推迟到挂载期，可自行注入子节点。
+    ///
+    /// 这是 ooc `fc $ [ctx, ... => ctx.addNode(..)]` 的等价形态：
+    /// 组件不再"返回一个节点"，而是"往父容器里放节点"。
+    #[test]
+    fn ctx_component_injects_children_at_mount() {
+        use crate::{component, label, rsx};
+
+        #[component]
+        fn pair(ctx: &mut NodeContext) {
+            ctx.child(label(|| "a".into()));
+            ctx.child(label(|| "b".into()));
+        }
+
+        let node = rsx! {
+            vbox {
+                pair {}
+            }
+        }
+        .into_node();
+        assert_eq!(children_nodes(&node).len(), 2, "ctx.child 注入两个子节点");
+    }
+
+    /// ctx 组件的普通参数仍走 Props（只是不进 builder 的字段语义变了）。
+    #[test]
+    fn ctx_component_still_takes_props() {
+        use crate::{component, label, rsx};
+
+        #[component]
+        fn titled(ctx: &mut NodeContext, title: String) {
+            ctx.child(label(move || title.clone()));
+        }
+
+        let node = rsx! {
+            vbox {
+                titled { title: "hello".to_string() }
+            }
+        }
+        .into_node();
+        assert_eq!(children_nodes(&node).len(), 1);
+    }
+
+    /// `#[getter]`：调用处既能传裸值也能传闭包，框架都按取值闭包处理。
+    ///
+    /// 这是「属性即表达式、自动按帧重算」的落地：组件作者在 prop 上标
+    /// `#[getter]`，调用处就不必再写 `move || ...`。
+    #[test]
+    fn getter_prop_accepts_value_or_closure() {
+        use crate::{component, rsx, PointerEvent};
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let sink: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+
+        #[component]
+        fn tagger(#[getter] text: String, sink: Rc<RefCell<Vec<String>>>) {
+            rsx! {
+                node {
+                    on_click: move || sink.borrow_mut().push(text()),
+                }
+            }
+            .into_node()
+        }
+
+        // 裸值：`"hi".to_string()` 应被自动包成 `move || "hi".to_string()`
+        let s1 = Rc::clone(&sink);
+        let v = rsx! {
+            vbox {
+                tagger { text: "hi".to_string(), sink: s1 }
+            }
+        }
+        .into_node();
+        let leaf = children_nodes(&v);
+        leaf[0].run_on_click(&mut PointerEvent::new(1.0, 1.0));
+        assert_eq!(
+            *sink.borrow(),
+            vec![String::from("hi")],
+            "裸值 → 自动取值闭包"
+        );
+
+        // 闭包：原有 `|| ...` 写法继续可用
+        sink.borrow_mut().clear();
+        let s2 = Rc::clone(&sink);
+        let c = rsx! {
+            vbox {
+                tagger { text: || "cb".to_string(), sink: s2 }
+            }
+        }
+        .into_node();
+        let leaf = children_nodes(&c);
+        leaf[0].run_on_click(&mut PointerEvent::new(1.0, 1.0));
+        assert_eq!(*sink.borrow(), vec![String::from("cb")], "闭包写法继续可用");
+    }
+
+    /// ctx 组件内 `render_for_each`：信号变化 → 动态区域重建。
+    ///
+    /// 普通组件做不到这件事——它拿不到 ctx，只能由调用方把 `for_each(..)`
+    /// 当 children 传进来。
+    #[test]
+    fn ctx_component_render_for_each_tracks_signal() {
+        use crate::{component, label, rsx};
+        use wy_signal::{create_signal, SetValue};
+
+        #[component]
+        fn rows(ctx: &mut NodeContext, source: impl Fn() -> Vec<String>) {
+            ctx.render_for_each(
+                move |emit| {
+                    for s in source() {
+                        emit(s.clone(), s);
+                    }
+                },
+                |_k, item, cx| cx.child(label(move || item.borrow().clone())),
+            );
+        }
+
+        let data = create_signal(vec![String::from("x")]);
+        let node = rsx! {
+            vbox {
+                rows { source: move || data.get() }
+            }
+        }
+        .into_node();
+        assert_eq!(children_nodes(&node).len(), 1);
+        data.set(vec![String::from("x"), String::from("y")]);
+        assert_eq!(children_nodes(&node).len(), 2, "信号变化 → 区域重建");
+    }
+
+    // ===== `provide` / `consume`：跨层级透传 =====
+
+    /// `provide` 的值要能穿过**嵌套容器**到达深层组件。
+    ///
+    /// 容器是延迟物化的（`materialize` 在绘制期才跑），那时父上下文早已消失，
+    /// 所以 `provided` 必须随节点往下盖一层快照——这条测试就是盯这条链。
+    #[test]
+    fn provided_value_reaches_deep_child() {
+        use crate::{component, label, rsx};
+        use std::cell::RefCell;
+
+        // 最里层：只靠 consume 取值，不接任何 prop
+        #[component]
+        fn leaf(ctx: &mut NodeContext, sink: Rc<RefCell<Vec<String>>>) {
+            let v = ctx.consume::<String>().cloned().unwrap_or_default();
+            sink.borrow_mut().push(v);
+            ctx.child(label(String::new));
+        }
+
+        let seen: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink = Rc::clone(&seen);
+        let node = render_root(move |cx| {
+            cx.provide(String::from("deep"));
+            cx.child(rsx! {
+                vbox {
+                    vbox {
+                        vbox {
+                            leaf { sink: Rc::clone(&sink) }
+                        }
+                    }
+                }
+            });
+        })
+        .nodes();
+        // 逐层触发物化：provide 的继承正是发生在这一步
+        let l1 = children_nodes(&node[0]);
+        let l2 = children_nodes(&l1[0]);
+        let _ = children_nodes(&l2[0]);
+        assert_eq!(*seen.borrow(), vec![String::from("deep")]);
+    }
+
+    /// `provide` 的值要能进到 `for_each` 的**每一项**里。
+    ///
+    /// 列表项是动态区域，构建时机比普通子节点更晚（信号变化才建），
+    /// 这条测试保证它们拿到的也是同一份父链快照。
+    #[test]
+    fn provided_value_reaches_for_each_rows() {
+        use crate::{component, label, rsx};
+        use std::cell::RefCell;
+        use wy_signal::create_signal;
+
+        let seen: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let data = create_signal(vec![String::from("a"), String::from("b")]);
+
+        #[component]
+        fn rows(ctx: &mut NodeContext, sink: Rc<RefCell<Vec<String>>>) {
+            let source = ctx
+                .consume::<wy_signal::Signal<Vec<String>>>()
+                .copied()
+                .expect("应能 consume 到数据源信号");
+            ctx.render_for_each(
+                move |emit| {
+                    for s in source.get() {
+                        emit(s.clone(), s);
+                    }
+                },
+                move |_k, item, cx| {
+                    let v = cx.consume::<String>().cloned().unwrap_or_default();
+                    sink.borrow_mut().push(format!("{v}:{}", item.borrow()));
+                    cx.child(label(String::new));
+                },
+            );
+        }
+
+        let sink2 = Rc::clone(&seen);
+        let node = render_root(move |cx| {
+            cx.provide(String::from("tag"));
+            cx.provide(data);
+            cx.child(rsx! {
+                vbox {
+                    rows { sink: Rc::clone(&sink2) }
+                }
+            });
+        })
+        .nodes();
+        let _ = children_nodes(&node[0]);
+        assert_eq!(
+            *seen.borrow(),
+            vec![String::from("tag:a"), String::from("tag:b")]
+        );
+    }
+
+    /// 面板 provide 的值要能到达**它自己 push 的普通容器**里的 `for_each` 项。
+    ///
+    /// 与上一个测试的区别：这里组件注入的是一个**普通 vbox**（不是子组件），
+    /// vbox 的子节点是在绘制期物化的——`provided` 必须靠节点上的快照往下带。
+    #[test]
+    fn provided_reaches_for_each_inside_pushed_container() {
+        use crate::{component, for_each, label, rsx, vbox};
+        use std::cell::RefCell;
+
+        let seen: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+
+        #[component]
+        fn panel(ctx: &mut NodeContext, sink: Rc<RefCell<Vec<String>>>) {
+            ctx.provide(String::from("panel"));
+            let rows = for_each(
+                move |emit| {
+                    for s in ["a", "b"] {
+                        emit(s, s.to_string());
+                    }
+                },
+                move |_k, _v, cx| {
+                    let got = cx.consume::<String>().cloned().unwrap_or_default();
+                    sink.borrow_mut().push(got);
+                    cx.child(label(String::new));
+                },
+            );
+            // 把动态区域塞进一个普通容器再注入——finance 的 panel_with 就是这么做的
+            ctx.child(vbox([rows]));
+        }
+
+        let sink2 = Rc::clone(&seen);
+        let root = render_root(move |cx| {
+            cx.child(rsx! { vbox { panel { sink: Rc::clone(&sink2) } } });
+        });
+        let top = root.nodes();
+        let l1 = children_nodes(&top[0]);
+        eprintln!("DBG l1={}", l1.len());
+        for n in &l1 {
+            eprintln!("DBG   kid -> {}", children_nodes(n).len());
+        }
+        assert_eq!(
+            *seen.borrow(),
+            vec![String::from("panel"), String::from("panel")],
+            "面板 provide 的值应到达它 push 的容器里的 for_each 项"
+        );
+    }
+
+    /// 项内 `provide` 只覆盖自己这一支，不污染兄弟。
+    #[test]
+    fn provided_in_one_scope_does_not_leak_to_sibling() {
+        use crate::{component, label, rsx};
+        use std::cell::RefCell;
+
+        #[derive(Clone, PartialEq)]
+        struct Cfg(String);
+
+        // 读 Cfg：读不到就记 "-"
+        #[component]
+        fn reader(ctx: &mut NodeContext, sink: Rc<RefCell<Vec<String>>>) {
+            let v = ctx
+                .consume::<Cfg>()
+                .map(|c| c.0.clone())
+                .unwrap_or_else(|| "-".into());
+            sink.borrow_mut().push(v);
+            ctx.child(label(String::new));
+        }
+
+        // 覆盖 Cfg 后再放一个 reader
+        #[component]
+        fn overrider(ctx: &mut NodeContext, sink: Rc<RefCell<Vec<String>>>) {
+            ctx.provide(Cfg("inner".into()));
+            ctx.child(rsx! { reader { sink: sink } });
+        }
+
+        let seen: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let (s1, s2, s3) = (Rc::clone(&seen), Rc::clone(&seen), Rc::clone(&seen));
+        let node = render_root(move |cx| {
+            cx.provide(Cfg("outer".into()));
+            cx.child(
+                rsx! {
+                    vbox {
+                        reader { sink: Rc::clone(&s1) }
+                        overrider { sink: Rc::clone(&s2) }
+                        reader { sink: Rc::clone(&s3) }
+                    }
+                }
+                .into_node(),
+            );
+        })
+        .nodes();
+        let _ = children_nodes(&node[0]);
+        assert_eq!(
+            *seen.borrow(),
+            vec![
+                String::from("outer"),
+                String::from("inner"),
+                String::from("outer")
+            ],
+            "项内 provide 只覆盖自己"
+        );
+    }
 
     #[test]
     fn rsx_vbox_with_text_and_button() {
@@ -1123,5 +1545,181 @@ mod tests {
         let first = children_nodes(&n).len();
         materialize(&n);
         assert_eq!(children_nodes(&n).len(), first);
+    }
+
+    /// `draw:` 属性：宏内完成 downcast，闭包直接拿到 `&mut Scene`。
+    ///
+    /// 这是「组件化而不退回绘制」的关键一环——自绘组件不必再手写
+    /// `Node { draw_fn: Rc::new(|any| { let Some(s) = any.downcast_mut() .. }) }`。
+    #[test]
+    fn rsx_draw_attr_gets_scene_directly() {
+        use crate::rsx;
+        use std::cell::Cell;
+        use std::rc::Rc;
+        use wy_render::{Color, Rect, Scene};
+
+        let hits = Rc::new(Cell::new(0));
+        let h = Rc::clone(&hits);
+        let slot = rsx! {
+            vbox {
+                width: 40.0,
+                height: 10.0,
+                draw: move |s: &mut Scene| {
+                    h.set(h.get() + 1);
+                    s.fill_rect(Rect::new(0.0, 0.0, 5.0, 5.0), Color::from_u32(0xFF0000FF));
+                }
+            }
+        };
+        let node = slot.into_node();
+        let mut scene = Scene::new();
+        node.run_draw(&mut scene);
+        assert_eq!(hits.get(), 1, "draw 闭包应被调用");
+        assert_eq!(scene.len(), 1, "应记录一个图元");
+    }
+
+    /// `..items`：把动态子节点列表展开进 rsx 的容器。
+    #[test]
+    fn rsx_spread_expands_slot_list() {
+        use crate::rsx;
+
+        let extras: Vec<Slot> = vec![
+            Slot::One(crate::text(|| String::from("a"))),
+            Slot::One(crate::text(|| String::from("b"))),
+        ];
+        let slot = rsx! {
+            vbox {
+                label("head")
+                ..extras
+                label("tail")
+            }
+        };
+        let n = slot.into_node();
+        assert_eq!(children_nodes(&n).len(), 4, "1 + 2 + 1");
+    }
+
+    /// `node { .. }`：不带子节点时仍是「自绘叶子」——尺寸取声明值、`draw` 照常跑；
+    /// 只是它现在默认带 `Column` layout 以便随时容纳子组件（纯叶子形态不变）。
+    #[test]
+    fn rsx_node_leaf_still_self_draws() {
+        use crate::rsx;
+        use wy_render::{Color, Rect, Scene};
+
+        let slot = rsx! {
+            hbox {
+                node {
+                    width: 6.0,
+                    height: 16.0,
+                    draw: |s: &mut Scene| {
+                        s.fill_rect(Rect::new(0.0, 0.0, 1.0, 16.0), Color::WHITE);
+                    },
+                }
+            }
+        };
+        let n = slot.into_node();
+        let kids = children_nodes(&n);
+        assert_eq!(kids.len(), 1);
+        assert_eq!(
+            kids[0].layout,
+            Some(crate::node::Layout::Column),
+            "node 默认带 Column layout（可装子节点）"
+        );
+        assert!((kids[0].width - 6.0).abs() < 1e-6);
+        let mut scene = Scene::new();
+        kids[0].run_draw(&mut scene);
+        assert_eq!(scene.len(), 1, "纯叶子 draw 仍被调用");
+    }
+
+    /// `node { .. }` 带子节点时成为「自绘容器」：子组件按 Column 排布在自身盒内，
+    /// 且 `draw` 画背景、子节点叠在上层——对应 Kotlin `Box { drawBg(); content() }` 的匿名类写法，
+    /// `#[component]` / `for_each` 等都能平滑嵌套进来。
+    #[test]
+    fn rsx_node_nests_children_as_container() {
+        use crate::rsx;
+        use wy_render::{Color, Rect, Scene};
+
+        let slot = rsx! {
+            hbox {
+                node {
+                    width: 40.0,
+                    height: 60.0,
+                    draw: |s: &mut Scene| {
+                        let b = crate::current_box();
+                        s.fill_rect(
+                            Rect::new(0.0, 0.0, b.width, b.height),
+                            Color::from_u32(0x223344FF),
+                        );
+                    },
+                    label("a")
+                    label("b")
+                }
+            }
+        };
+        let n = slot.into_node();
+        let kids = children_nodes(&n);
+        assert_eq!(kids.len(), 1, "hbox 里是一个 node 容器");
+        let container = &kids[0];
+        assert_eq!(container.layout, Some(crate::node::Layout::Column));
+        // 子节点被排进 node 内部
+        let inner = children_nodes(container);
+        assert_eq!(inner.len(), 2, "node 容器容纳了两个 label");
+        // 容器自身的 draw 先画背景
+        let mut scene = Scene::new();
+        container.run_draw(&mut scene);
+        assert_eq!(scene.len(), 1, "node 自身的 draw 画了背景");
+    }
+
+    /// 组件是「布局节点」：`grow` / `width` 这类通用属性直接作用在组件根节点上，
+    /// 不必为每个组件单独开 `w`/`h` prop。
+    #[test]
+    fn rsx_component_accepts_layout_attrs() {
+        use crate::component;
+        use crate::rsx;
+
+        #[component]
+        fn hint_box(label: String) -> Node {
+            crate::text(move || label.clone())
+        }
+
+        let slot = rsx! {
+            vbox {
+                hint_box { label: "x".to_string(), grow: 1.0, width: 30.0 }
+            }
+        };
+        let n = slot.into_node();
+        let kids = children_nodes(&n);
+        assert_eq!(kids.len(), 1);
+        assert!((kids[0].grow - 1.0).abs() < 1e-6);
+        assert!((kids[0].width - 30.0).abs() < 1e-6);
+    }
+
+    /// `on_down` / `on_up` / `on_drag_move`：拖拽手势三件套。
+    #[test]
+    fn rsx_drag_handlers_wire_gesture() {
+        use crate::node::PointerEvent;
+        use crate::rsx;
+        use std::rc::Rc;
+
+        let log: Rc<std::cell::RefCell<Vec<&'static str>>> =
+            Rc::new(std::cell::RefCell::new(Vec::new()));
+        let (d, u, m) = (Rc::clone(&log), Rc::clone(&log), Rc::clone(&log));
+        let slot = rsx! {
+            vbox {
+                width: 6.0,
+                on_down: move |_ev: &mut PointerEvent| {
+                    d.borrow_mut().push("down");
+                },
+                on_up: move |_ev: &mut PointerEvent| {
+                    u.borrow_mut().push("up");
+                },
+                on_drag_move: move |_ev: &mut PointerEvent| {
+                    m.borrow_mut().push("move");
+                },
+            }
+        };
+        let node = slot.into_node();
+        node.run_on_down(&mut PointerEvent::new(1.0, 2.0));
+        node.run_on_move(&mut PointerEvent::new(3.0, 4.0));
+        node.run_on_up(&mut PointerEvent::new(3.0, 4.0));
+        assert_eq!(*log.borrow(), vec!["down", "move", "up"]);
     }
 }

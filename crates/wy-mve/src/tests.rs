@@ -468,3 +468,113 @@ fn dynamic_gap_drives_layout_offsets() {
     let offsets = layout_offsets(Layout::Row, container.gap(), &children);
     assert_eq!(offsets[1].0, 10.0, "gap 变化后布局偏移立即更新");
 }
+
+// ===== flex 排布（grow / justify / align / padding）=====
+
+use crate::{layout_boxes, AlignItem, LayoutBox};
+
+/// 造一个固定尺寸的普通节点。
+fn fixed(w: f32, h: f32) -> Node {
+    Node {
+        width: w,
+        height: h,
+        ..Node::default()
+    }
+}
+
+#[test]
+fn grow_takes_remaining_main_axis_space() {
+    let a = fixed(100.0, 20.0);
+    let mut b = fixed(0.0, 20.0);
+    b.grow = 1.0;
+    let row = crate::hbox_gap(10.0, vec![a.clone(), b.clone()]);
+    let boxes = layout_boxes(&row, (400.0, 100.0), &[a, b]);
+    assert_eq!(boxes[0].width, 100.0);
+    assert_eq!(boxes[0].x, 0.0);
+    // 400 - 100 - gap(10) = 290
+    assert_eq!(boxes[1].width, 290.0);
+    assert_eq!(boxes[1].x, 110.0);
+}
+
+#[test]
+fn grow_split_by_weight() {
+    let mut a = fixed(0.0, 10.0);
+    let mut b = fixed(0.0, 10.0);
+    a.grow = 1.0;
+    b.grow = 3.0;
+    let row = crate::hbox_gap(0.0, vec![a.clone(), b.clone()]);
+    let boxes = layout_boxes(&row, (400.0, 10.0), &[a, b]);
+    assert_eq!(boxes[0].width, 100.0);
+    assert_eq!(boxes[1].width, 300.0);
+}
+
+#[test]
+fn padding_insets_children() {
+    let a = fixed(50.0, 20.0);
+    let mut row = crate::hbox_gap(0.0, vec![a.clone()]);
+    row.padding = 8.0;
+    row.align_items = AlignItem::Start;
+    let boxes = layout_boxes(&row, (200.0, 100.0), &[a]);
+    assert_eq!(boxes[0].x, 8.0);
+    assert_eq!(boxes[0].y, 8.0);
+}
+
+#[test]
+fn align_stretch_fills_cross_axis() {
+    let a = fixed(50.0, 20.0);
+    let mut row = crate::hbox_gap(0.0, vec![a.clone()]);
+    row.align_items = AlignItem::Stretch;
+    let boxes = layout_boxes(&row, (200.0, 100.0), &[a]);
+    assert_eq!(boxes[0].height, 100.0);
+    assert_eq!(boxes[0].y, 0.0);
+}
+
+#[test]
+fn align_center_is_default_and_explicit_position_wins() {
+    // 无显式 y：交叉轴居中
+    let a = fixed(50.0, 20.0);
+    let row = crate::hbox_gap(0.0, vec![a.clone()]);
+    let boxes = layout_boxes(&row, (200.0, 100.0), &[a]);
+    assert_eq!(boxes[0].y, 40.0);
+
+    // 有显式 y：自己定位，不参与自动对齐
+    let mut b = fixed(50.0, 20.0);
+    b.y = 5.0;
+    let row = crate::hbox_gap(0.0, vec![b.clone()]);
+    let boxes = layout_boxes(&row, (200.0, 100.0), &[b]);
+    assert_eq!(boxes[0].y, 0.0);
+}
+
+#[test]
+fn current_box_is_visible_inside_with_box() {
+    let seen = std::cell::Cell::new(LayoutBox::ZERO);
+    crate::with_box(LayoutBox::new(0.0, 0.0, 320.0, 240.0), || {
+        seen.set(crate::current_box());
+    });
+    assert_eq!(seen.get().width, 320.0);
+    assert_eq!(seen.get().height, 240.0);
+    // 作用域外恢复
+    assert_eq!(crate::current_box(), LayoutBox::ZERO);
+}
+
+#[test]
+fn rsx_supports_flex_attrs_and_generic_events() {
+    use crate::{rsx, text};
+    let slot = rsx! {
+        hbox {
+            gap: 8.0,
+            grow: 1.0,
+            padding: 4.0,
+            align_items: AlignItem::Stretch,
+            on_click: move || {},
+            on_hover: move |_entered: bool| {},
+            text(|| String::from("x"))
+        }
+    };
+    let node = slot.into_node();
+    assert_eq!(node.grow, 1.0);
+    assert_eq!(node.padding, 4.0);
+    assert_eq!(node.align_items, AlignItem::Stretch);
+    assert!(node.on_click_fn.is_some(), "容器应能直接绑点击");
+    assert!(node.on_hover_fn.is_some(), "容器应能直接绑悬停");
+}
