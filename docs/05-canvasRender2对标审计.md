@@ -413,3 +413,522 @@ P0 + P1 已完成：`rect` / `rich_text` / `wrapped_text` 三个基础组件里�
 1. **是否 `node2.create` 组合？** 组件里出现 `let mut n = Node {..}` 就是偏离。
 2. **属性是否 `Get<T>`？** 静态 `Color` / `f32` 字段在 TS 里都是 getter。
 3. **尺寸是否走 `size(d)`？** 出现 `measure_fn` 就是走了旧槽位。
+
+---
+
+## 7. 本轮增量（2026-11-01）：浮层滚动条 · 裁剪顺序 · 帧唤醒
+
+本轮以「整页移植 `apps/mve-vite-demo/src/pages/canvas-render2/`」为驱动，把对齐
+从"逐个组件"推进到"整页跑起来"。结论按**谁的错改谁**记：
+
+### 7.1 新增 `OverlayScrollBar.ts` → `overlay_scroll_bar.rs`（✅ 结构对齐）
+
+| TS | Rust | 说明 |
+|---|---|---|
+| `ScrollBarStyle2` / `overlayScrollBarStyle` | `ScrollBarStyle2` / `ScrollBarStyle2::macos()` | 13 个字段逐一对应 |
+| `ThumbGeo2` | `ThumbGeo` | 私有结构，四字段同名 |
+| `inBand` / `geoOf` / `positionOf` | 同名局部函数 | 全部从容器的 `inner_size` / `content_size` / `max_scroll` 派生 |
+| `alphaOf` + `fade/dragging/hovering` | 同形 | `dragging/hovering` 用 `Rc<Cell<bool>>`（事件驱动重绘，无需信号） |
+| `acceptHit` / `mouseDown` / `draw` / `focusable` / `selectionEnabled` | 同名 props | — |
+
+两处**不得不**结构差异（已在文件头注明）：
+
+1. **动画**：TS 用 `requestAnimationFrame` 逐帧写信号；Rust 没有帧回调。落点是
+   新增 `animation.rs`：`Fade` 把「浮现 → 保持 → 淡出」写成**读时按墙钟求值**的
+   纯函数（跳过帧不错位、重复调用幂等），并用 `FrameTick` 向宿主登记"下一帧几点"；
+   引擎 `Node2App::next_wake/on_wake` 把该截止时刻与光标闪烁取最小值、到点重绘。
+   这不是新增一套动画框架，而是复用了光标闪烁**已有**的定时唤醒通道。
+2. **注销**：TS 在 `ctx.addDestroy` 摘全局监听器；Rust 组件没有析构钩子。为此刻意
+   给 `Node2` 加了 `downgrade() -> Node2Weak`：长生命周期的全局回调只捕获弱引用，
+   节点消失后第一次被调用就地注销自己（否则注册表只增不减，`Fade` 还会一直排唤醒）。
+
+### 7.2 `Scroll.ts` 补齐两处（Rust 侧漏的实现）
+
+| TS | 本轮补齐 |
+|---|---|
+| `addActivityListener(listener): EmptyFun` | `Scroll2::add_activity_listener(Rc<dyn Fn()>) -> ActivityListener`（RAII，`Drop` 即退订） |
+| `parentScroll` + `scroll()` 的剩余量转交 | `Scroll2::with_parent` / `parent_scroll`，`scroll()` 把 `delta - real` 交给外层 |
+
+顺带钉住 TS 源码里那行注释的坑：`scroll()` 绕过了 `set_value` 的钳制计算，**活动
+通知要自己补**——漏了它，滚轮滚动时浮层滚动条不会浮现（`activity_fires_on_scroll_and_on_set_value`）。
+
+### 7.3 Rust 侧缺陷：`clip` 把节点自己裁掉了（已修）
+
+`render_node2` 原先把 `push_clip(inner)` 放在**父循环**里包住 `child.render_node2(..)`，
+于是带 `clip` 的容器连自己的圆角背景与边框一起被内盒裁掉。表现：`canvas2-todo`
+里"卡片不见了、条目直接浮在页面上"。
+
+这不是像素误读——三个独立的证据都指向同一处：
+
+1. 第 400 行扫描：`x=50..57` 是页面底色（应为卡片白 + 边框）；
+2. 列 `x=50` 全列都是页面底色（卡片左边框整段消失）；
+3. 关掉 `clip: true` 后卡片立刻出现（尺寸/位置一直是对的，只有绘制被裁）。
+
+正确语义是 TS 的 `drawAtParent`：**裁剪发生在子节点绘制前、容器自身绘制后**。
+所以 `clip` 只夹后代。已加回归门 `clip_bounds_children_but_not_self`：断言图元顺序
+是「卡片底色 → ClipPush → 子节点图元 → ClipPop」，且裁剪盒 = 内盒、入出栈配平。
+
+### 7.4 新增示例 `crates/wy-app/examples/canvas2-todo/`
+
+| TS | Rust |
+|---|---|
+| `todo-store.ts` | `store.rs`（信号 + 快照撤销/重做 + 双主题调色板 + `TextDefaults` 回写） |
+| `todo-item.ts` | `item.rs`（Path2 复选框命中 / 链接片段 / 删除按钮） |
+| `todo-list.ts` | `list.rs`（`create_scroll` + `scroll_content` + `for_each_node` + `overlay_scroll_bar` + 空态） |
+| `todo-toolbar.ts` | `toolbar.rs`（`text_button` 胶囊 + 四块工具栏） |
+| `view.ts` | `main.rs`（根就是那棵 flex 列 + 页面底色） |
+
+暂未移植：`todo-editor.ts`（编辑器面板）、`todo-demos.ts`（`modifierHud` /
+`nowrapDemo` / `nestedScrollDemo`）——前者依赖编辑器 + IME，后者依赖修饰键 HUD。
+
+验证（`--snapshot 480x900`）：
+
+- 卡片 276..616、内盒 284..608、行 58..422（= 380−2×8）→ **浮层滚动条确实不占布局宽度**；
+- `--scroll 150`：滑块 y=375..561（长 187 = 316×324/546，偏移 87 = (316−187)×150/222），
+  与手算一致 → 几何派生正确；
+- `--select`：图元 233 → 255，标题/统计/每一行/每个按钮各自铺出高亮 → **跨组件选择在
+  滚动列表里同样成立**（每行是独立 `richTextNode`，范围由管理器按文档序派生）。
+
+---
+
+## 8. 写法回归修正（2026-11-01）：把 builder 链改回声明式组件
+
+本轮没有任何视觉改动，**输出与上一轮逐像素相同**（三张快照 diff = 0）。修的是
+写法：上一轮移植 `canvas2-todo` / `canvas2-demo` 时，我在示例里写回了
+
+```rust
+RectNodeArg::builder().background(..).rest(Node2Props::builder().width(..).build()).build().build()
+```
+
+以及一个手搓的 `ButtonArg { label: Rc<dyn Fn() -> String>, .. }` 结构体 + `.mount(c)`
+流水线。这正是本仓库已经淘汰的过程式写法（`#[rec]` 的 builder 是**宏的产物**，
+不是给人手写的接口）。修正后：
+
+| 位置 | 改前 | 改后 |
+|---|---|---|
+| 组件外壳 | `RectNodeArg::builder().rest(Node2Props::builder()..)` | `rect_node! { background: .., width: .., children: vec![..] }` |
+| 纯容器 | `Node2Props::builder()..build()` | `node2! { .. }` |
+| 文本 | `RichTextNodeArg::builder()..` | `rich_text_node! { spans: vec![..], .. }` |
+| 图片 | `ImageNodeArg::builder()..` | `image_node! { image: .., radius: .. }` |
+| 按钮 | `fn text_button(arg: ButtonArg) -> Fc` | `#[rec] fn text_button(#[getter] label, #[props(default)] primary, #[getter] active, #[getter] disabled, on_click)` → `text_button! { .. }` |
+| 工具栏外壳 | `fn bar(children: Vec<Fc>)` | `#[rec] fn bar(children: Vec<Fc>)` → `bar! { children: vec![..] }` |
+| 分支 | `if_node(..).mount(cx)` | `cx.child(if_node(..))` |
+| **根** | `Node2Props::builder()..build()` + `build_root_node2` | `build_root_fc(node2! { .. })` |
+
+### 8.1 新增 `build_root_fc`（补的是入口，不是抽象）
+
+`build_root_node2(root_arg: Node2Props, page: impl FnOnce(&mut NodeContext))` 要求
+调用方在**声明树之外**再写一份 props，于是每个示例的根都退化成一串
+`Node2Props::builder()`。新增的 `build_root_fc(page: Fc)` 让根就是 `node2! { .. }`
+本身（TS `renderCanvas({ .., children: [..] })` 的直译）。
+
+实现绕了一层"探针父"：`Fc` 是 `FnOnce(&mut NodeContext)` 的黑盒，造出的节点只经
+`Node2::mount` 挂到上下文携带的父上、**不返回句柄**。所以给它一个一次性父，
+节点挂上来后立刻 `Node2::detach()` 断开——产物与 `build_root_node2` 同构
+（`parent().is_none()`、已 `expand_node2`）。回归门
+`node2::tests::build_root_fc_makes_a_parentless_expanded_root` 锁这三条：
+无父、子节点已展开、能出图元。
+
+### 8.2 两个使用陷阱（都是宏的既定语义，写错才踩）
+
+1. **`$crate::XxxArg` 指 crate 根**：组件放在子模块（`toolbar::text_button`）时，
+   `!` 宏里的 `$crate::TextButtonArg` 找不到该类型，报
+   `cannot find TextButtonArg in $crate`。解法是根上再导出一次：
+   `pub use toolbar::{BarArg, TextButtonArg};`（`finance/main.rs` 早有同样一行）。
+2. **`#[getter]` 字段写的是"值表达式"，不是闭包**：宏自己会包 `move ||`，
+   写 `spans: move || vec![..]` 就变成"返回闭包的闭包"（`expected Vec<..>, found
+   closure`）。只有声明成 `impl Fn() -> T` 的字段（如 `wrapped_text_node` 的
+   `spans`）才由调用方直接给闭包——同一个文件里两种写法并存，差别只在签名。
+
+### 8.3 验证
+
+| 检查 | 结果 |
+|---|---|
+| `canvas2-demo --snapshot 520x820` | 与改前逐像素相同（32 个图元） |
+| `canvas2-todo --snapshot 480x900` | diff = 0（233 个图元） |
+| `--scroll 150` | diff = 0（234 个图元） |
+| `--select` | diff = 0（255 个图元，跨组件高亮照旧） |
+| `cargo test --workspace --lib` | **523 passed** |
+| `cargo test -p wy-app --example finance` | 68 passed |
+| 两个示例的 clippy | 零告警 |
+
+---
+
+## 9. 写法修正（2026-11-01）：`wrapped_text_node` 继承 `rich_text_node`，不是 `node2`
+
+同 §8，本轮**零视觉改动**（两张快照 diff = 0）。修的是继承层级选错了。
+
+### 9.1 问题
+
+TS 的声明写得很直白：
+
+```ts
+interface WrappedTextNodeArg extends Omit<RichTextNodeArg, 'spans'> { .. }
+```
+
+`RichTextNodeArg` 自己又 `extends Partial<Node2Arg>`。也就是**三层**：
+`WrappedTextNodeArg` → `RichTextNodeArg` → `Node2Arg`。
+
+Rust 侧当时写成 `#[rec(extends = node2)]`，等于跳过中间一层，然后把
+`RichTextNodeArg` 的字段**手抄**了 6 个当"透传"（`selection_color` / `auto_width` /
+`max_lines` / `ellipsis` / `text_align` / `selection_manager`）——抄的时候就漏了
+`no_wrap`，`node_ref` 也没有入口（只能内部自建、调用方拿不到句柄）。凡"手抄一份
+别人的字段"，漏是迟早的事。
+
+### 9.2 修法（改的是宏，不是抄得更全一点）
+
+1. `extends.rs` 从「只有 `node2` 一张表」扩成 `BaseSpec { props, fields, parent }`：
+   一个基类可以自带「再上一层」的字段表。`rich_text_node` 登记为
+   `props = RichTextNodeArg`、`fields = 它的 9 个自有字段`、`parent = NODE2_FIELDS`。
+   顺带解决基类 props 名字不一定是 `<Pascal>Props` 的问题（`rich_text_node` 的
+   props 叫 `RichTextNodeArg`）。
+2. `rules.rs` 的 `!` 宏从两桶扩成**三桶**（own / base / node），并按基类给出终局
+   表达式：
+   - `node2`：`.rest(Node2Props::builder() $base .build())`
+   - 二级：`.rest(RichTextNodeArg::builder() $base .rest(Node2Props::builder() $node .build()) .build())`
+   终局分**两条**（`$node` 空 / 非空）：空时不能补一份 `Node2Props::default()`，
+   否则 `..rest` 带进来的 node2 参数会被覆盖式 setter 整份冲掉。
+3. `wrapped_text.rs` 变成 `#[rec(extends = rich_text_node)]`，函数体只剩一件事：
+   `spans` 没给就补一段合成的。原来那串
+   `RichTextNodeArg::builder().rest(rest)...build().build()`（§8 里唯一保留的 builder）
+   随之消失——**库内最后一处手写 builder 也没有了**。
+
+### 9.3 调用点的连带简化
+
+`spans` 现在是继承来的 `#[getter]` 字段，调用处写**值表达式**（`spans: vec![..]` /
+`spans: { .. }`），不再手写闭包。`canvas2-todo` 的 `item.rs` / `toolbar.rs` 各改了
+一处（`spans: move || { .. }` → `spans: { .. }`），与其它 getter 字段终于同构。
+
+### 9.4 回归门（`wrapped_text::tests`，5 条）
+
+| 测试 | 锁什么 |
+|---|---|
+| `inherits_rich_text_params_not_just_node2` | `no_wrap` 等**只存在于 RichTextNodeArg** 的 key 能被写出并生效（同文本单行 vs 折行高度差） |
+| `inherited_node_ref_points_at_the_tree_node` | `node_ref` 走同一条继承通道，且拿到的是树上那个真节点 |
+| `synthesizes_one_span_when_spans_absent` | 没写 `spans` → 由 text 合成一段（TS `?? [singleSpan()]`） |
+| `explicit_spans_wins_over_text` | 写了 `spans` 就以它为准（`text` 被忽略） |
+| `rest_of_wrapped_text_seeds_the_base_args` | `..rest`（`RichTextNodeArg`）展开成基类 builder 的 `from_props`，且与祖父字段并存 |
+
+验证：`cargo test --workspace --lib` **528 passed**（+5）；finance 68 passed；
+`canvas2-todo` 233 图元 / `canvas2-demo` 32 图元，两张快照与改前 **diff = 0**。
+
+### 9.5 顺带核对：`editable_text_node` 不改
+
+TS `EditableTextNodeArg extends Partial<Node2Arg>` —— 它是**直接**挂在 `node2` 上的，
+中间没有富文本那一层。所以 Rust 侧继续 `extends = node2` 是对的（这一条是查过
+源码才不改的，不是漏改）。
+
+---
+
+## 10. `omit(..)`：把 TS 的 `extends Omit<Base, 'k'>` 补上（2026-11-01）
+
+§9 只做到「继承到最近那一层」，但 TS 的声明还有后半句：
+
+```ts
+interface WrappedTextNodeArg extends Omit<RichTextNodeArg, 'spans'> { .. }
+```
+
+`Omit` 不是装饰：`spans` 被从基类里**摘出去**重新声明（改为可空），再在函数体里
+`{ ...rest, spans: () => spans?.() ?? [singleSpan()] }` 落地。缺了它，「继承」
+就变成「整份照抄」，与源码一一对不上。
+
+### 10.1 语法与产物
+
+```rust
+#[rec(extends = rich_text_node, omit(spans))]
+pub fn wrapped_text_node(.., #[getter] spans: Vec<RichTextSpan>) -> Fc
+```
+
+| TS | Rust |
+|---|---|
+| `extends Omit<RichTextNodeArg, 'spans'>` | `extends = rich_text_node, omit(spans)` |
+| `spans?: GetValue<RichTextSpan[] \| undefined>` | `#[getter] spans: Vec<RichTextSpan>`（三态之「无默认的 getter」→ `Option<Get<..>>`，与基类同一类型） |
+| `const { .., spans, ...rest } = arg` | 宏不再把 `spans` 转发进 `RichTextNodeArg::builder()`，它只落在自有字段上 |
+| `{ ...rest, spans: () => spans?.() ?? [singleSpan()] }` | `rest.spans = Some(spans.unwrap_or_else(合成一段))` |
+| `Omit` 后可省的名字必须存在（类型系统保证） | 编译期校验：拼错直接报错并列出可省略的字段名 |
+
+实现落在三处，都不涉及运行期：
+
+1. `attr.rs`：解析 `omit(a, b)`（组件级唯一的分组写法，因为 `Omit` 本身就是点名）；
+   空括号、无 `extends` 而写 `omit`、写成 `omit = ..` 都是编译错误。
+2. `extends.rs`：`base_arms_for(base, omit)` 跳过被点名的字段——**两层一起过滤**
+   （基类自有 + 再上一层 `node2`），所以 `omit(children)` 对 `extends = node2` 同样有效。
+   `validate_omit` 负责「名字必须是基类真有的」。
+3. `rules.rs` / `mod.rs`：把 `omit` 透传进模板。自有字段分支本来就排在基类分支之前，
+   `omit` 之后不会再有同名基类分支与它并存（此前即使并存也是静默双份，靠顺序取胜）。
+
+### 10.2 TS 侧另一处 `Omit`：不需要跟
+
+`canvasRender2/Renderer.ts` 里还有一处：
+
+```ts
+export interface RendererArgs extends Omit<Partial<Node2Arg>, 'x' | 'y' | 'width' | 'height'> {
+  canvas: HTMLCanvasElement;
+}
+```
+
+它是**宿主入口**（画布尺寸由 viewport 决定，所以把这四个位置/尺寸项省掉），对应
+Rust 的 `Node2App::new(..).with_size(..)`——不是 `#[rec]` 组件，没有 `!` 宏与
+`rest`，因此不涉及本次的 `omit`。语法上多条也是支持的（`omit(a, b, c)`），
+`extends = node2` 时甚至可以省掉 `node2` 层的字段（如 `omit(children)`）。
+
+### 10.3 一处**必须说明**的残余差异
+
+TS 的 `Omit` 是**类型级**的：`rest` 的类型里根本没有 `spans` 这一格。
+Rust 的 `rest: RichTextNodeArg` 仍是完整类型，`rest.spans` 字段存在、入场恒为 `None`。
+也就是说，「省掉的字段不能从 `..rest` 进来」这件事，在这里由 **`!` 宏的表面**保证，
+而不是由类型保证。要做到类型级，得为每个 `omit` 生成一份新的 props 结构体
+（`Omit<Base, k>` 的展开），代价是基类 props 的类型名不再可预测、且 `rest.build()`
+要跨类型重组——收益只在校验强度上，暂时不做，如实记在这里。
+
+### 10.4 回归门
+
+| 层 | 测试 | 锁什么 |
+|---|---|---|
+| 宏 | `extends::tests::omit_drops_the_base_arm` | 被 omit 的字段不再生成转发分支，其它字段照旧 |
+| 宏 | `extends::tests::omit_reaches_the_grandparent_layer` | `omit` 覆盖 `node2` 那一层 |
+| 宏 | `extends::tests::validate_omit_rejects_unknown_names` | 拼错当场报错并列出候选 |
+| 宏 | `extends::tests::validate_omit_accepts_known_names` | 合法名（含跨层）不误报 |
+| 组件 | `wrapped_text::tests::explicit_spans_wins_over_text` | 自有 `spans` 生效（不是被合成段冲掉） |
+| 组件 | `wrapped_text::tests::own_spans_wins_over_rest_spans` | 自有 > `..rest`（TS `{...rest, spans}` 顺序） |
+| 组件 | `wrapped_text::tests::rest_spans_is_ignored_under_omit` | `Omit` 后 `rest.spans` 这条车道是死的 |
+| 组件 | `wrapped_text::tests::rest_of_wrapped_text_seeds_the_base_args` | 省一个字段 ≠ 关掉整条通道（`node_ref` 仍能从 `..rest` 进来） |
+
+验证：`cargo test --workspace --lib` **534 passed**；`cargo test -p wy-mve-macros` 4 passed；
+finance 68 passed；`canvas2-todo` 233 图元 / `canvas2-demo` 32 图元，两张快照 **diff = 0**
+（`omit` 是参数口径的整理，不改布局）。
+
+## 11. `todo-demos.ts` 移植（2026-11-01）：三块演示 + 两个真实缺陷
+
+`pages/canvas-render2/todo-demos.ts` 那块「新特性演示」落在
+`crates/wy-app/examples/canvas2-todo/demos.rs`：
+
+| TS | Rust |
+|---|---|
+| `modifierHud()`：`ctrl/shift/alt/meta` + `pressedSignal` | `modifier_hud()`：读 `modifiers()` / `pressed_node()` |
+| `registerKeyPress` / `notifyKeyPress` | `register_key_press` + 线程局部 `LAST_KEY`（按 `Rc` 引用同一性去重，句柄必须留住） |
+| `nowrapDemo()`：`noWrap` + `grow` | `nowrap_demo()` |
+| `nestedScrollDemo()`：`createScroll(c, 'y', undefined, parentScroll)` | `nested_scroll_demo()`：`Scroll2::with_parent` |
+
+移植过程里撞出两个**实现缺陷**，都不是"少抄一点"能解释的：
+
+### 11.1 缺陷一：`ScrollContent.drawAtParent` 没有对应实现
+
+TS 的裁剪不在容器上，而在**滚动内容节点**上（`assemble.ts`：
+`save → drawAtParent(剪) → translate → draw → restore`），用的是**父**的内盒、
+发生在 `translate` 之前。Rust 早先把裁剪全压在容器的 `clip` 上，
+于是「内容节点要求裁到父框」这件事无处表达，嵌套滚动里内容直接溢出卡片。
+
+修法：`Node2Props::clip_to_parent`（对应 TS `drawAtParent` 的这条用法），
+在父的绘制循环里于 `push_transform` **之前**压栈、用父的 padding inner 盒，
+绘制完再弹。容器不需要写 `clip`——`todo-list.ts` 里也没有。
+
+顺带补齐同一函数的 `acceptClip`：命中门控以**父（容器）inner 区**判定，
+`hitest` 传进来的坐标本来就相对父，正好同义。
+
+### 11.2 缺陷二：行节点写了 `layout` 导致宽度塌回文本宽
+
+嵌套滚动里"内层条目"宽度只有 78px（文本宽），而不是父分配的 336px。
+根因是 Rust 侧给行节点写了 `layout: flex!{}`，而 TS 里这些矩形**不写 layout**
+（= 绝对定位）→ `defaultSize` 走 `sizeFromParent` 拿父布局分配的子尺寸。
+有 layout 的节点 `allows_size_from_children()` 为真 → 走 `sizeFromChildren`
+→ 塌到内容宽。去掉 layout 即恢复。
+
+结论：**「宽度应该跟着父走」的行不要挂空 flex**；`layout` 的有无就是
+TS 里"容器 / 被摆放的子项"这条分界。
+
+### 11.3 验证
+
+- `--nested 100` → 内层真实滚动 100 / 内层 100 / 外层 0（内层够滚，剩余量为 0）
+- `--nested 300` → 内层 224（= 524 − 300）/ 外层 76（= 300 − 224）——剩余量确实
+  经 `parentScroll` 交给了外层，与手算一致。
+- 快照 480×1240 共 389 图元；`clip_to_parent_clips_this_branch_to_parent_inner`
+  锁定裁剪盒 = 父内盒 `(10, 10, 180, 80)` 与入出栈配平。
+
+## 12. `todo-editor.ts` 移植（2026-11-01）：编辑器面板
+
+`pages/canvas-render2/` 最后一块没搬的组件。逐行对照后没有新的引擎能力要补——
+面板本身就是 `rect_node` + `editable_text_node` 的组合，落在
+`crates/wy-app/examples/canvas2-todo/editor.rs`。
+
+| TS | Rust |
+|---|---|
+| `draftText` / `noteText` / `secretText` | 三个线程局部 `Signal<String>`（`DRAFT` / `NOTE` / `SECRET`） |
+| `fieldLabel(text)` | [`field_label`]（宽度走 `FIELD_WIDTH`） |
+| `interface FieldArg` | `struct FieldArg` + `FieldArg::single(..)` / `::multi(..)` |
+| `textField(arg)` | `text_field(arg)` |
+| `editorPanel()` | `editor_panel()` |
+
+### 12.1 TS 侧一处自相矛盾（两侧一起修）
+
+备注框的占位文案写的是 **「多行备注：Enter 换行，Ctrl+Enter 加入列表」**，但
+`textField` 调用里**没传 `onSubmit`**——多行里按 Ctrl+Enter 什么都不会发生。
+按「双向检测，错的改对面」的口径，TS 与 Rust 一起补上：
+
+```ts
+// apps/mve-vite-demo/src/pages/canvas-render2/todo-editor.ts
+onSubmit() {
+  const v = noteText.get().trim();
+  if (!v) return;
+  addTodo(v);
+  noteText.set('');
+},
+```
+
+提交语义与单行新增框完全一致（`trim` 后非空才加，加完清空）。`tsc --noEmit` 通过。
+
+### 12.2 内层显式尺寸不是"没用好布局"
+
+TS 给内层编辑器写的是 `width: 342`（= 356 − 6×2 − 1×2）与 `height: height - 14`。
+这不是手算偷懒：`EditableTextController::size` 在没有显式宽高时**按段落量出来的宽高
+报数**（`LayoutSize::inside`），并不向父内容盒拉伸。空文本时量出来是 0，
+所以"省掉它、交给 `sizeFromParent`"会直接得到 0 宽输入框。两侧都是这个语义，
+因此照抄，并在函数文档里写明理由（`editor_fields_keep_their_width_and_focus_order`
+这条测试就是这条结论的门）。
+
+### 12.3 面板高度来自子节点
+
+`rectNode` 不写 `height`：竖向 flex、四个子节点都没有 `grow` →
+`allows_size_from_children()` 为真 → 高度由子节点撑起。Rust 走的是同一条
+`default_size` 路径，`editor_panel_stacks_title_and_three_fields` 锁住
+「高度 = padding×2 + 子节点之和 + gap×3」。
+
+### 12.4 回归门
+
+| 层 | 测试 | 锁什么 |
+|---|---|---|
+| 组件 | `editable_text_node::tests::enter_submits_single_line_and_ctrl_enter_submits_multi_line` | 单行回车提交不换行；多行裸回车换行、Ctrl+Enter 提交 |
+| 示例 | `editor::tests::editor_panel_stacks_title_and_three_fields` | 标题 + 三字段、gap 8、字段高 `lines×20+12`、面板高由子节点撑起 |
+| 示例 | `editor::tests::editor_fields_keep_their_width_and_focus_order` | 内层宽 342（**空文本也不塌**）、`focus_order` 1/2/3 |
+| 示例 | `editor::tests::all_three_editors_are_focusable` | 三个字段（含掩码）都能点进去 |
+
+验证：`cargo test --workspace --lib` **536 passed**（新增 1 条编辑器测试）；
+`cargo test -p wy-app --example canvas2-todo` 3 passed；finance 68 passed；
+`tsc --noEmit` 通过。快照 480×1240 共 427 图元，`docs/shot-canvas2-todo{,-scroll,-select,-editor}.png`。
+
+---
+
+## 13. 交互缺陷修复（2026-11-01 晚）：按键双发与 resize 不重排
+
+用户实测报的两条，都不在组件层，而在**引擎/框架层**，因此单侧对读源码看不出来。
+
+### 13.1 一次按键走了两格：`Pressed` + `Released` 都派发
+
+**现象**：编辑器里按一次方向键，光标跳两格；退格删两个字符；回车提交两次。
+正文字符不明显——因为字符走 IME `Commit`，不在这条路上。
+
+**根因**：winit 对同一枚键发两条 `KeyboardInput`（`Pressed`、`Released`），
+`runner.rs` 的 `WindowEvent::KeyboardInput` 分支把两条都翻译并转给
+`app.handle_key_event`。`KeyEvent` 虽然有 `pressed` 字段，但只有 v1 的
+`text_input` 在 `Char` 分支里用过，方向键/退格分支根本没看。
+
+**修法**（`crates/wy-engine/src/runner.rs`）：只在 `Pressed` 派发，
+并在 `WyApp::handle_key_event` 的 rustdoc 里写死契约「一次物理按键只调一次，
+实现方不要再检查按下状态」。松开事件不产生按键语义。
+
+**判定口径**：新增任何事件派发入口前，先数一数同一个物理动作会被调用几次。
+详见 `docs/08-实现原则.md` §6。
+
+### 13.2 改窗口大小布局不跟随，点一下才变
+
+**现象**：拖动窗口边缘放大，内容停在旧布局；随便点一下（触发 hover/selection
+之类的信号）才重排。
+
+**根因**：绘制缓存 `RecordMemo<Scene>` 的失效条件**只有信号**。
+`resize → on_resize → viewport.set → request_redraw` 这条链路上没有任何信号变化，
+于是 `record()` 判定"依赖没变"，直接复用按旧 `(w,h)` 录的 Scene；
+`Node2App::draw`（含 `clear_layout_memo()`、`viewport.set`）根本没被调用。
+点击会产生信号变化 → 追踪器重录 → 布局跟上。这与"点一下才改变"完全吻合。
+
+**修法**
+
+| 层 | 改动 |
+|---|---|
+| `wy-signal` | `RecordMemo::invalidate()` + `dirty` 标志：一次性置脏，下次 `record()` 必重录 |
+| `wy-engine/redraw_tracker` | `RedrawTracker::invalidate()` 透传 |
+| `wy-engine/runner` | `Resized` 与 `ScaleFactorChanged` 分支在 `request_redraw` 前置脏 |
+
+**为什么不做成"自动感知"**：`w/h/scale` 不是信号，追踪器没有合法途径看见它们。
+把帧环境也做成信号会污染整个响应式模型；显式 `invalidate` 是这类情况的正确形状。
+
+**判定口径**：引入缓存前先列全部输入维度（信号/帧环境/字体/locale/主题），
+信号之外的必须留失效口子。详见 `docs/08-实现原则.md` §7。
+
+### 13.3 回归门
+
+| 层 | 测试 | 锁什么 |
+|---|---|---|
+| `wy-signal` | `record_memo::tests::reuses_the_cache_when_nothing_changed` | 无变化不重录 |
+| `wy-signal` | `record_memo::tests::invalidate_forces_exactly_one_rerun` | 置脏必重录、且只重录一次 |
+| `wy-signal` | `record_memo::tests::invalidate_still_reports_change_for_following_signal_updates` | 重复置脏每次生效（依赖边没丢） |
+| `wy-engine` | `redraw_tracker::tests::cache_is_reused_until_invalidated` | 同上，在 Scene 缓存的真实形态上 |
+
+验证：`cargo test --workspace --lib` **540 passed**（+4）；示例快照 480×1240
+修复前后 **diff = 0**（427 图元），确认这两处改动不动视觉。
+
+### 13.4 原则沉淀
+
+新增 `docs/08-实现原则.md`（10 条 + AI 失效模式自查表 + 动手前五问），
+`AGENTS.md` 指向它并修正了过时的"本环境无 toolchain"一节。
+---
+
+## 14. 写法清理与空行缺陷（2026-11-01 深夜）
+
+### 14.1 手写 builder 清零：`Props::builder()` 只是宏的机械通道
+
+**质疑**：`Node2Props::builder()` 还有残留，主要在测试里。
+
+**核查结论**：产品代码早就是零，但测试与 doc 示例里还有 10 处手写 builder
+（`node2_app.rs` 1 处 doc + 1 处测试、`image_node.rs` 3、`rich_text.rs` 2、
+`wrapped_text.rs` 3）。`node2!` 宏展开**本身就是** `Node2Props::builder() ...
+.build().build()`——所以 builder 不能删，它是 `!` 宏的机械通道；但**手写**它就是
+过程式装配，而且测试/文档的示范价值不分生产与测试。
+
+| 处理 | 位置 |
+|---|---|
+| doc 示例改 `build_root_fc(node2! { .. })` | `wy-engine/src/node2_app.rs` |
+| 测试改 `build_root_fc(rect_node! { children: vec![rich_text_node! {..}] })` | `node2_app.rs`、`rich_text.rs` |
+| 测试改 `image_node! { .. }` | `image_node.rs` |
+| `..rest` 载荷改结构体字面量（宏产节点、不产 props） | `wrapped_text.rs` |
+| `builder()` / `build()` 加 `#[doc(hidden)]` + 「不要手写」文档 | `wy-mve-macros/src/rec/codegen.rs` |
+
+自检：`grep -rn "::builder()" crates/` 现在只命中注释。
+
+### 14.2 空行上上下键：行号不能拿光标矩形去反推
+
+**现象**：文本里有空行时，上键跳不过空行（原地不动），下键从空行直接跳到文末。
+
+**排版层是好的**（已实测 `a\n\nb` → 3 条 `LineMetric`，空行有行盒、区间 `[2,3)`）。
+坏在两处都在"用几何反查"：
+
+1. `caret_line_index` 拿光标矩形竖直中心去碰行盒。空行没有字形簇，
+   `rects_for_range` 返回空 → `caret_rect` 回退到"前一格" → 光标矩形落在
+   **上一行末尾** → 行号少算一行 → 上键 `j = i - 1` 撞到 `-1` 直接 return。
+2. `move_to_line` 用 `glyph_position_at_coordinate(px, y)` 全段落找簇。
+   空行上 `Cluster::from_point` 返回 `None`，兜底分支是"`dy >= 0` → 文末"，
+   于是"下键从空行直接跳到最后一行"。
+
+**修法**（把"行"当索引而不是几何）：
+
+| 层 | 新增 / 改动 | 作用 |
+|---|---|---|
+| `wy-text` | `TextParagraph::line_index_of_byte` | 按字节偏移查行；空行有归属（`start <= byte < end`），文末归最后一行 |
+| `wy-text` | `TextParagraph::position_in_line` | 行内按 x 取偏移，**行范围当硬边界**；空行短路返回行首 |
+| `wy-text` | `TextParagraph::is_blank_line` | 行内只有 `\r`/`\n`（或空区间）即空行 |
+| `editable_text_node` | `caret_line_index()` 改按偏移；`move_to_line` 用 `position_in_line` | 上下键 / PageUp/Down 全部受益 |
+| `editable_text_node` | `caret_rect` 空行返回行盒零宽矩形 | 光标画在空行行首，而不是上一行末尾（IME 候选窗也跟着对） |
+
+### 14.3 回归门
+
+| 层 | 测试 | 锁什么 |
+|---|---|---|
+| `wy-text` | `blank_lines_are_real_lines` | 空行有独立行盒与字节区间 |
+| `wy-text` | `line_index_of_byte_lands_on_blank_lines` | 空行不被跳过、文末归最后一行 |
+| `wy-text` | `position_in_line_never_leaves_the_line` | 空行只返回行首，绝不兜底到文末 |
+| `wy-text` | `blank_line_detection_covers_trailing_newline` | `"a\n"` 的末尾空行 |
+| `wy-mve` | `vertical_moves_stop_on_blank_lines` | `a\n\nb` 上/下逐行推进，停在空行 |
+| `wy-mve` | `trailing_blank_line_is_reachable_and_escapable` | 末尾空行可停留、可离开 |
+
+验证：`cargo test --workspace --lib` **546 passed**；`--example canvas2-todo` 3 passed；
+`wy-mve-macros` 4 passed；`--fill "note=第一行\n\n第三行"` 出图确认空行占位正常
+（427 图元，字体排版与行距不变）。

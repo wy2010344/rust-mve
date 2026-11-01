@@ -54,6 +54,7 @@ AI 无法从代码里自推的内容才值得写在这里。
 
 - 声明式构造风格：节点用 `node2! { .. }` 命名参数宏（字段即 getter，写表达式不写值），
   拒绝链式/fluent builder。组件是 `#[rec]` 注解的普通函数，直接返回 `Fc`。
+  反例与判定口径见 `docs/08-实现原则.md` §1。
 - 单文件超 ~300 行时拆分模块；`lib.rs` 只做模块入口。
 - 每个 crate 之间通过清晰 `pub` 接口交互，避免循环依赖。
 - 只改与需求相关的最少代码；确需大改先说明再动手。
@@ -62,15 +63,35 @@ AI 无法从代码里自推的内容才值得写在这里。
 
 ## 协作方式（从实际教训总结）
 
+**动手前先读 `docs/08-实现原则.md`。** 那里是验收标准，不是背景资料；本项目
+每一次返工都能归到它的某一条被跳过。
+
 - **先评估再动手**：改动前先说明 understood 与潜在影响，尤其关注 Rust 所有权/生命周期（信号系统大量用 `Rc<RefCell>`/`thread_local`）。
-- **从 Kotlin 对照理解**：本项目本质是复刻，遇到 Rust 侧语义不清时，先读对应 Kotlin 源码（`wy-helper-kotlin`）对照，再实现，必要时补测试。这是本项目验证正确性的主路径。
+- **从 TS/Kotlin 对照理解**：本项目本质是复刻，遇到 Rust 侧语义不清时，先读对应源码再实现。这是验证正确性的主路径。
+- **对齐是双向的**：TS、Kotlin、Rust 谁错改谁，不许用"TS 就是这么写的"当挡箭牌（TS 里真有过 bug：占位文案承诺 Ctrl+Enter 却没接 `onSubmit`）。
 - **及时问用户**：实现方向有歧义、或需要大范围改动时，先问再做，别闷头写。
+
+### 三条最容易复发的红线
+
+1. **不要退化成 builder / pipeline。** 只要开始写"构造对象 → 改字段 → append 子节点"、
+   出现 `set_*` / `append` / `mount` / controller，就已经偏离声明式树形结构，
+   停下来重写成 `node2! { .. }` / `#[rec] fn` 返回 `Fc`。**测试与文档示例同样算数**
+   （`Props::builder()` 是 `!` 宏的机械通道，已 `#[doc(hidden)]`，手写即违规）。
+2. **不要手算尺寸。** 先分清这个尺寸是**输入**（空态量不出来，必须写并注释）
+   还是**结果**（父分配 / 子节点撑起，交给布局）。有 `layout` = 容器
+   （`sizeFromChildren`），无 `layout` = 被摆放（`sizeFromParent`）。
+3. **不要只改单侧。** 发现 Rust 与 TS 不一致时，先判定谁对，再改对应那一侧。
 
 ---
 
-## 验证策略（本环境无 Rust toolchain）
+## 验证策略
 
-- 当前环境（termux proot）没有 `cargo`/`rustc`，**无法本地编译/运行/测试**。
-- 因此在无 toolchain 环境里，交付前用人工方式核验：对照相关 crate 的 `pub` API 签名、`wy-layout` 布局算法手算校验、核对 Kotlin 语义。
-- 有工具链的地方（真机/CI/用户终端）仍需跑 `cargo check`、`cargo test`、`cargo fmt --check`、`cargo clippy -- -D warnings`。
-- 无法本地验证时必须**明确说明**，不得假装已通过。
+- 本机**有** cargo/rustc：改完必须真的跑，不许"应该没问题"。
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets`（不留新告警）
+  - `cargo test --workspace --lib` + 相关 `--example` 测试
+  - 涉及绘制的改动：出快照并比对图元数 / `diff`（`--snapshot`、`--snapshot-size`）
+- 跨仓库改动（`es-pseudo-monorepo` 的 TS 侧）要确认落盘：`git status`、`tsc --noEmit`。
+- 修 bug 必须伴随一条能复现它的测试；只改代码不加测试视为没修完。
+- 确实无法本地验证时（缺依赖、缺 GPU 等）必须**明确说明哪一步没验证**，不得假装已通过。
+- 交付前删掉临时调试开关（`--dump`、临时 `eprintln`）。
