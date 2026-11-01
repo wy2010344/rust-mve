@@ -3,7 +3,7 @@
 **纯 Rust 的信号驱动 UI 框架：树只建一次，改数据只重画该重画的那部分。**
 
 [![CI](https://github.com/wy2010344/rust-mve/actions/workflows/ci.yml/badge.svg)](https://github.com/wy2010344/rust-mve/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-537%20passing-brightgreen)](https://github.com/wy2010344/rust-mve/actions/workflows/ci.yml)
+[![tests](https://img.shields.io/badge/tests-546%20passing-brightgreen)](https://github.com/wy2010344/rust-mve/actions/workflows/ci.yml)
 [![clippy](https://img.shields.io/badge/clippy-0%20warnings-brightgreen)](https://github.com/wy2010344/rust-mve/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
@@ -138,6 +138,12 @@ cargo run -p wy-app --example finance
 # 看板 / 表单 / 待办（shadcn 风格）
 cargo run -p wy-app --example shadcn
 
+# 待办清单（对标 mve-vite-demo 的 canvas-render2：跨项选择、嵌套滚动、输入面板）
+cargo run -p wy-app --example canvas2-todo
+
+# 基础元素展示（矩形 / 图片 / 富文本 / 跨组件选择）
+cargo run -p wy-app --example canvas2-demo
+
 # 最小示例（纯 Node2 运行时）
 cargo run -p wy-app --example node2-counter
 ```
@@ -173,6 +179,7 @@ cargo run -p wy-app --example node2-counter
 | | |
 |---|---|
 | [DESIGN.md](DESIGN.md) | **取舍记录**——为什么这样而不那样（面试官更想看这个） |
+| [docs/08-实现原则.md](docs/08-实现原则.md) | **实现红线**——10 条原则、AI 失效模式自查表、动手前五问 |
 | [docs/07-旧体系迁移实测.md](docs/07-旧体系迁移实测.md) | 从 v1 迁到 canvasRender2 的实测记录与硬规律 |
 | [docs/05-canvasRender2对标审计.md](docs/05-canvasRender2对标审计.md) | 与 TS canvasRender2 的逐项对标 |
 | [docs/01-ooc与rust-mve写法对照.md](docs/01-ooc与rust-mve写法对照.md) | 两种声明式写法的对照 |
