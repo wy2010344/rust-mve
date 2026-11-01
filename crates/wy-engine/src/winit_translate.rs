@@ -86,7 +86,7 @@ pub fn translate_modifiers(state: &winit::keyboard::ModifiersState) -> u32 {
 /// 「这枚按键**实际产生了什么文本**」。中文输入法组合期间，字母键与"空格确认"
 /// 都被输入法拿走（Windows 上 IME 吃掉 `WM_CHAR`），此时 `text` 是 `None`；
 /// 只看 `logical_key` 就会把它们当普通字符插进正文——"拼音字母跑进输入框"
-/// "空格确认也插了一个空格"正是这条路径。见 [`translate_key_with_ime`]。
+/// "空格确认也插了一个空格"正是这条路径。见 `translate_key_with_ime`。
 pub fn translate_key_event(
     key_event: &winit::event::KeyEvent,
     modifiers: winit::keyboard::ModifiersState,

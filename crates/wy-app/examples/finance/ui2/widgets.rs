@@ -287,7 +287,7 @@ pub fn list_row(
     highlight: impl Fn() -> bool + 'static,
 ) -> Fc {
     let hover = Signal::new(false);
-    let hover_read = hover.clone();
+    let hover_read = hover;
     let hl = Rc::new(highlight);
 
     node2! {
@@ -391,7 +391,7 @@ pub fn tab_of(
     // 每个 getter / 回调闭包各拿一份句柄：同一个 `Rc` 被两处捕获就得多给一份
     // （`active` 要给 draw 和 color，`label` 要给宽计算和文本）。
     let active_draw = Rc::clone(&active);
-    let hover_draw = hover.clone();
+    let hover_draw = hover;
     let label_text = Rc::clone(&label);
     let active_color = Rc::clone(&active);
 
@@ -467,9 +467,9 @@ pub fn chip_custom(
     let hover = Signal::new(false);
     // 同 `tab_of`：`active` / `hover` 要给 draw 和 color 两处，各备一份。
     let active_draw = Rc::clone(&active);
-    let hover_draw = hover.clone();
+    let hover_draw = hover;
     let active_color = Rc::clone(&active);
-    let hover_color = hover.clone();
+    let hover_color = hover;
 
     node2! {
         width: w,
@@ -544,7 +544,7 @@ pub fn dots_btn_ev(
     const H: f32 = 20.0;
     let hover = Signal::new(false);
     // draw 里要读两次 hover，而 `on_hover` 已经把 `hover` 搬走了：先留一份。
-    let hov = hover.clone();
+    let hov = hover;
     node2! {
         debug_name: tag.to_string(),
         width: w,
@@ -580,7 +580,7 @@ pub fn toggle_chip(
     let active: Rc<dyn Fn() -> bool> = Rc::new(active);
     let active_draw = Rc::clone(&active);
     let active_color = Rc::clone(&active);
-    let hover_draw = hover.clone();
+    let hover_draw = hover;
 
     node2! {
         width: w,

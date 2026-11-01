@@ -354,7 +354,7 @@ impl Node2 {
 
     /// 容器布局策略（TS `arg.layout ?? absoluteLayoutDirection`）。
     ///
-    /// 没声明就是[`absolute`](crate::canvas_render2::node2::absolute)（绝对定位）——
+    /// 没声明就是[`absolute`]（绝对定位）——
     /// 不是"没有布局"，而是**一条具体的布局策略**，所以这里没有 `Option`。
     #[must_use]
     pub fn layout(&self) -> crate::canvas_render2::node2::LayoutDir2 {
@@ -723,7 +723,7 @@ impl Node2 {
 
     /// 显式挂一个子节点（构建期之外用：单测、动态追加）。
     ///
-    /// 与 [`Self::attach_to`] 等价，只是方向反过来，且是公开的——正常声明式
+    /// 与 `Self::attach_to` 等价，只是方向反过来，且是公开的——正常声明式
     /// 组装走 `Node2Props::children`，这里给需要"先建父、再挂子"的场景用。
     pub fn push_child(&self, child: &Node2) {
         child.attach_to(self);

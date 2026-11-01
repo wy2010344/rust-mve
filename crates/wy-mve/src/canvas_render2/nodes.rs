@@ -71,7 +71,7 @@ where
 /// 布局/间距/背景全由调用方在 `rest` 里声明（背景就是 `rest.draw` 自己画）。
 /// Rust 侧画布尺寸由引擎按视口分配给根，不需要 `width`/`height`。
 ///
-/// 返回 [`Fc`](crate::Fc)，作为根 child 直接喂给 `Node2App`（不再有 `.of()`）。
+/// 返回 [`Fc`]，作为根 child 直接喂给 `Node2App`（不再有 `.of()`）。
 #[must_use]
 pub fn render_canvas2(rest: Node2Props, children: Vec<Fc>) -> Fc {
     // TS `{ ...rest, children }`：结构体更新语法就是它。

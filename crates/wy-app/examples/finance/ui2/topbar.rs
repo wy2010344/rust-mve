@@ -204,10 +204,7 @@ fn source_seg(model: Rc<Model>, ctl: Rc<Ctl>, seg: Source) -> Fc {
         width: SEG_W,
         height: SEG_H,
         cursor: CursorType::Pointer,
-        on_hover: {
-            let hover = hover.clone();
-            move |on| hover.set(on)
-        },
+        on_hover: move |on| hover.set(on),
         mouse_click: {
             let m_click = Rc::clone(&model);
             let seg_click = seg_click.clone();
@@ -223,7 +220,6 @@ fn source_seg(model: Rc<Model>, ctl: Rc<Ctl>, seg: Source) -> Fc {
         layout: flex! { direction: Layout::Row, align_item: AlignItem::Center, direction_justify: DirectionJustify::Center, align_fix: true },
         draw: {
             let m_draw = Rc::clone(&model);
-            let hover = hover.clone();
             move |s: &mut Scene, n: &Node2| {
                 let _ = n;
                 let on = m_draw.source.get() == seg_draw;
@@ -239,7 +235,7 @@ fn source_seg(model: Rc<Model>, ctl: Rc<Ctl>, seg: Source) -> Fc {
             font_size: 9.0,
             color: {
                 let m_color = Rc::clone(&model);
-                let hover = hover.clone();
+                let hover = hover;
                 {
                     let on = m_color.source.get() == seg_color;
                     if on { theme::TEXT } else if hover.get() { theme::MUTED } else { theme::FAINT }

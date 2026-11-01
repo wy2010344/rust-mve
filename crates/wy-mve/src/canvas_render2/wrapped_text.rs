@@ -3,7 +3,7 @@
 //! TS 原文把 `text` + 样式参数合成**一个 span** 委托给 `richTextNode`，
 //! 因此自动获得 `richTextNode` 的全部能力（自动换行、`autoWidth`、
 //! 跨组件文本选择、双击选词等）：
-//! ```ignore
+//! ```text
 //! const { text = () => '', fontFamily = () => null, fontSize = () => 16,
 //!         fontWeight = () => 400, italic = () => false, color = () => textDefaults.text,
 //!         lineHeightMultiplier = () => 1.4, letterSpacing = () => 0, wordSpacing = () => 0,

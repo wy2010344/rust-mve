@@ -21,10 +21,13 @@ ureq = { workspace = true }
 serde_json = { workspace = true }
 
 # ---------------------------------------------------------------------------
-# 纯 Node2 运行时示例（`Node2App` + `build_root_node2`，不走 v1 `to_node`）
+# 示例入口的两种组织方式（Cargo 的自动发现规则不同，容易混淆）
 #
-# 统一放在 `examples/node2/`：子目录不会被 Cargo 自动发现，所以这里逐条声明
-# `path`；同目录的 `theme.rs` 是共享模块（各示例 `mod theme;`），不是示例本体。
+# 1. `examples/<name>/main.rs` —— **目录即示例**，自动发现，不必声明。
+#    本 crate 的 `finance` / `shadcn` / `canvas2-demo` / `canvas2-todo` 都是这种。
+# 2. `examples/<dir>/<file>.rs` —— **散文件放子目录**，不会被自动发现，
+#    必须逐条声明 `path`。下面的 `node2-*` 属于这种：几个最小示例平级摆放，
+#    共用同目录的 `theme.rs`（各示例 `mod theme;`，它不是示例本体）。
 # ---------------------------------------------------------------------------
 [[example]]
 name = "node2-counter"

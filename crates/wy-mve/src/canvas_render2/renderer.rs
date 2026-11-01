@@ -1,7 +1,7 @@
 //! canvasRender2 顶层工具（对标 TS `Renderer.ts` 的注册表 / 助手部分）。
 //!
 //! TS `Renderer.ts` 把"全局鼠标注册表 + 拖拽助手 + 连击计数"放在 `renderCanvas`
-//! 闭包里，组件经 `ctx.consume(globalMouse2Context)` 拿到 [`GlobalMouse2`]。
+//! 闭包里，组件经 `ctx.consume(globalMouse2Context)` 拿到 `GlobalMouse2`。
 //! Rust 的 `Node2` 组件只拿到 `node`、没有 `ctx`，所以这里用**模块级注册表**
 //! （线程局部）等价表达：组件调用 [`drag_mouse`] 注册全局 move/up，引擎在事件
 //! 循环里消费 [`dispatch_global_mouse_down`] / [`dispatch_global_mouse_move`] /
@@ -103,15 +103,21 @@ pub fn drag_mouse(change: impl Fn(f32, f32) + 'static) -> impl Fn() {
 // 连击计数（对标 TS `createClickCounter`）
 // ============================================================================
 
+/// 上一次点击的记忆：`(节点, x, y, 时间, 已累计的连击数)`。
+///
+/// 抽成别名只为读得顺——`Rc<RefCell<..>>` 写全了会把函数签名淹掉。
+type LastClick = Rc<RefCell<Option<(Node2, f32, f32, Instant, usize)>>>;
+
 /// 连击判定：同一叶子节点、400ms 内、位移 < 5px 则计数递增，否则重置
 /// （对标 Kotlin `ClickTracker` / TS `createClickCounter`）。
 ///
 /// 返回 `Fn(leaf, x, y) -> count`：`count >= 3` 三击选段、`== 2` 双击选词、
 /// `== 1` 单击。引擎的鼠标按下派发（`onMouseDown`）在 P5 接入选区会话时消费它。
-#[must_use]
+///
+/// 不写 `#[must_use]`：返回的 `impl Fn` 本身就是 `#[must_use]`，重复标注会
+/// 触发 `double_must_use` 之类的告警。
 pub fn create_click_counter() -> impl Fn(Option<Node2>, f32, f32) -> usize + 'static {
-    // (节点, x, y, 时间, 累计计数)
-    let last: Rc<RefCell<Option<(Node2, f32, f32, Instant, usize)>>> = Rc::new(RefCell::new(None));
+    let last: LastClick = Rc::new(RefCell::new(None));
     move |leaf: Option<Node2>, x: f32, y: f32| -> usize {
         let now = Instant::now();
         let count = {

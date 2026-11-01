@@ -57,7 +57,7 @@ fn clamp_boundary(text: &str, idx: usize) -> usize {
     i
 }
 
-/// [byte_idx] 处的光标盒（光标 / 选区 / IME 定位统一几何来源）。
+/// `byte_idx` 处的光标盒（光标 / 选区 / IME 定位统一几何来源）。
 ///
 /// 空文本回退为单行盒 `(0, 0, font_size * 1.2)`。
 pub fn caret_box(text: &str, font_size: f32, byte_idx: usize) -> CaretBox {
@@ -134,7 +134,7 @@ pub fn hit_point(text: &str, font_size: f32, x: f32, y: f32) -> usize {
     })
 }
 
-/// 第 [line_idx] 行的字形行盒 `(top, height)`；行不存在返回 `None`。
+/// 第 `line_idx` 行的字形行盒 `(top, height)`；行不存在返回 `None`。
 pub fn line_box(text: &str, font_size: f32, line_idx: usize) -> Option<(f32, f32)> {
     if text.is_empty() {
         return None;
@@ -175,7 +175,7 @@ pub fn line_height(font_size: f32) -> f32 {
     })
 }
 
-/// 光标在第 [text_idx] 个 UTF-8 字节处的 X 坐标（已排版文本前缀宽度）。
+/// 光标在第 `text_idx` 个 UTF-8 字节处的 X 坐标（已排版文本前缀宽度）。
 pub fn cursor_x(text: &str, font_size: f32, text_idx: usize) -> f32 {
     let mut idx = text_idx.min(text.len());
     while idx > 0 && !text.is_char_boundary(idx) {
@@ -186,7 +186,7 @@ pub fn cursor_x(text: &str, font_size: f32, text_idx: usize) -> f32 {
 
 /// 将文本内 X 坐标映射到最近的 UTF-8 字节索引（点击定位光标）。
 ///
-/// 从左往右累加每个字素簇的排版宽度，第一个累计超过 [x] 的簇起点即返回。
+/// 从左往右累加每个字素簇的排版宽度，第一个累计超过 `x` 的簇起点即返回。
 /// 单行 LTR 文本下结果与「最接近光标的字素簇边界」一致。
 pub fn index_at_x(text: &str, font_size: f32, x: f32) -> usize {
     if text.is_empty() || x <= 0.0 {

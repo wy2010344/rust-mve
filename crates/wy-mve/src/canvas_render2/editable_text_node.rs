@@ -31,7 +31,7 @@
 //!   Rust 段落是 `Rc<Layout>`（Drop 自动释放）、无定时器，编辑器句柄在 `build` 时
 //!   `register_editor`（节点 id 单调递增不复用，注册表条目有界）。引擎 `Node` 暂无
 //!   `on_destroy` 钩子，注销留待引擎补齐（见 #76）。
-//! - **段落缓存**：TS `memo` → 这里 [`ParagraphCache`]（按"显示文本 + 样式 + 排版宽 +
+//! - **段落缓存**：TS `memo` → 这里 `ParagraphCache`（按"显示文本 + 样式 + 排版宽 +
 //!   最大行数"失效重建），与 `rich_text` 同构。
 
 use std::cell::{Cell, RefCell};
@@ -1767,17 +1767,12 @@ impl Selectable2 for EditableTextController {
             return None;
         }
         let d = coerce(offset, 0, t.chars().count());
-        let start = {
-            let mut last = 0usize;
-            let mut idx = 0usize;
-            for c in t.chars().take(d) {
-                if c == '\n' {
-                    last = idx + 1;
-                }
-                idx += 1;
-            }
-            last
-        };
+        // 光标所在行的起点 = 光标之前**最后一个换行**之后的位置。
+        let start = t
+            .chars()
+            .take(d)
+            .enumerate()
+            .fold(0usize, |acc, (i, c)| if c == '\n' { i + 1 } else { acc });
         let nl = t
             .chars()
             .skip(d)

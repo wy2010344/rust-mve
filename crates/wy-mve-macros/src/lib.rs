@@ -8,9 +8,9 @@
 //!
 //! # 模块划分
 //!
-//! - [`util`]：crate 路径解析（`$crate` 在内部使用与外部使用两种情形下都成立）
+//! - `util`：crate 路径解析（`$crate` 在内部使用与外部使用两种情形下都成立）
 //!   与命名转换（`snake_case` → `PascalCase`）。
-//! - [`props`]：参数属性解析（`#[props(default = ..)]` / `#[getter]`）与类型判定。
+//! - `props`：参数属性解析（`#[props(default = ..)]` / `#[getter]`）与类型判定。
 //! - [`rec`]：`#[rec]` 的展开（产物：`XxxArg` + `XxxArgBuilder` + 同名 `!` 宏）。
 //!   按职责拆成 `attr`（组件级属性）/ `field`（**唯一的类型语义判定处**）/
 //!   `extends`（基类字段表）/ `codegen`（产物代码）/ `rules`（`!` 宏文本），

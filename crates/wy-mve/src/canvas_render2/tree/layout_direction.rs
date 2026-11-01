@@ -34,8 +34,8 @@ use crate::canvas_render2::node2::{
 /// TS 的两个成员都是 **getter**（`children()` / `innerSize()`），布局只在真正需要
 /// 的分支里才去问——这一点是 `defaultSize` 能成立的前提（容器"由子节点撑尺寸"时
 /// 绝不能回头问自己的尺寸，否则自递归），所以 Rust 侧**不能**退化成"先算好两个数
-/// 再传进来"。可用空间保留成闭包，由 [`wl::FlexLayout::new_lazy`] /
-/// [`wl::StackLayout::new_lazy`] 按分支求值。
+/// 再传进来"。可用空间保留成闭包，由 `wl::FlexLayout::new_lazy` /
+/// `wl::StackLayout::new_lazy` 按分支求值。
 pub struct LayoutInside2<'a> {
     /// 参与布局的子节点。
     pub children: &'a [Node2],

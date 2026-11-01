@@ -364,7 +364,7 @@ fn clip_bounds_children_but_not_self() {
     let mut scene = Scene::new();
     card.render_node2(&mut scene);
 
-    let idx = |pred: &dyn Fn(&Primitive) -> bool| scene.iter().position(|p| pred(p));
+    let idx = |pred: &dyn Fn(&Primitive) -> bool| scene.iter().position(pred);
     let card_at = idx(&|p| matches!(p, Primitive::Rect { color, .. } if *color == CARD))
         .expect("卡片自身底色必须画出来（被自己裁掉过就是这条挂了）");
     let clip_at = idx(&|p| matches!(p, Primitive::ClipPush { .. })).expect("应压入子节点裁剪");
@@ -449,7 +449,7 @@ fn clip_to_parent_clips_this_branch_to_parent_inner() {
     let mut scene = Scene::new();
     card.render_node2(&mut scene);
 
-    let idx = |pred: &dyn Fn(&Primitive) -> bool| scene.iter().position(|p| pred(p));
+    let idx = |pred: &dyn Fn(&Primitive) -> bool| scene.iter().position(pred);
     let card_at =
         idx(&|p| matches!(p, Primitive::Rect { color, .. } if *color == CARD)).expect("卡片底色");
     let clip_at = idx(&|p| matches!(p, Primitive::ClipPush { .. })).expect("应压入父盒裁剪");

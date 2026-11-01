@@ -5,7 +5,7 @@
 //! globalMouse / focusWalk / geometry / layoutAudit / engineGlobal`。
 //! Rust 侧按同一职责分文件落地，逐文件对齐。
 //!
-//! 注意边界：`Node2` **本体**仍在 [`crate::canvas_render2::node2`]——Rust 里它
+//! 注意边界：`Node2` **本体**仍在 [`mod@crate::canvas_render2::node2`]——Rust 里它
 //! 必须是一个具体类型，`tree/` 放的是"以节点为参数、只发消息"的算法与工厂，
 //! 与 TS 的分工一致。
 //!

@@ -71,7 +71,7 @@ mod tests {
     fn cache_is_reused_until_invalidated() {
         let calls = Cell::new(0);
         let tracker = RedrawTracker::new(Rc::new(|| {}));
-        let mut draw = || {
+        let draw = || {
             tracker.draw(|_s: &mut Scene| calls.set(calls.get() + 1));
         };
 

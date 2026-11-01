@@ -2,8 +2,11 @@
 //!
 //! 这是「旧模式」（`MveApp` + v1 `Node` 引擎）的替代运行时：一棵树就是
 //! [`wy_mve::canvas_render2::node2::Node2`]，绘制走 [`Node2::render_node2`]，
-//! 命中走 [`hit_path`]，指针走 [`tree::pointer`] 路由 + [`tree::dispatch`]，
-//! 键盘走 [`tree::keyboard::route_key_event`]，IME 走 [`focus::active_editor`]，
+//! 命中走 [`hit_path`]，指针走
+//! [`wy_mve::canvas_render2::tree::pointer`] 路由 +
+//! [`wy_mve::canvas_render2::tree::dispatch`]，
+//! 键盘走 [`wy_mve::canvas_render2::tree::keyboard::route_key_event`]，IME 走
+//! [`wy_mve::canvas_render2::focus::active_editor`]，
 //! resize 把视口写进一个共享 `Cell` 供根节点的 `width`/`height` 读取。
 //!
 //! 与 TS 对齐：画布根节点在原点 `(0,0)`、尺寸等于视口（对标 TS 画布给根
@@ -152,12 +155,18 @@ impl EditorSelectionRoute for EditorRoute {
     }
 }
 
+/// 重绘请求回调：由 runner 在首次绘制时装进来，节点/交互改状态后调它。
+///
+/// `Option` 是因为构造 `Node2App` 时还没有窗口；`Rc<RefCell<..>>` 是为了
+/// 让 `Node2App` 与 [`Node2Deps`] 共享同一个槽。
+type RedrawHook = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
+
 /// 指针路由的外部能力（[`PointerRouterDeps`]）。
 ///
 /// 与 [`Node2App`] 共享根节点、`viewport`、`redraw` 回调，以及少量命中会话状态。
 struct Node2Deps {
     root: Node2,
-    redraw: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
+    redraw: RedrawHook,
     pointer_select: Signal<Option<PointerSelect2>>,
     move_hit_test: Signal<Option<HitestResult2>>,
     cursor: Cell<CursorType>,
@@ -263,7 +272,7 @@ pub struct Node2App {
     root: Node2,
     viewport: Rc<Cell<(f32, f32)>>,
     router: PointerRouter2<Node2Deps>,
-    redraw: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
+    redraw: RedrawHook,
     /// 全局唯一的选中协调者（TS `Renderer.ts` 同位置）。
     selection: Rc<SelectionManager2>,
     /// 输入法组合进行中：键盘归输入法独占（`route_key_event` 会整条放弃）。
@@ -284,7 +293,7 @@ impl Node2App {
     pub fn new(factory: impl FnOnce(Rc<Cell<(f32, f32)>>) -> Node2) -> Self {
         let viewport = Rc::new(Cell::new((800.0, 600.0)));
         let root = factory(viewport.clone());
-        let redraw: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+        let redraw: RedrawHook = Rc::new(RefCell::new(None));
         // 选择会话的两份原始事实（选区由 SelectionManager 纯派生，与 TS 同）。
         let pointer_select: Signal<Option<PointerSelect2>> = create_signal(None);
         let move_hit_test: Signal<Option<HitestResult2>> = create_signal(None);
@@ -391,7 +400,7 @@ impl WyApp for Node2App {
                 false
             }
             WindowEvent::CursorMoved { position, .. } => {
-                let (x, y) = (position.x as f64, position.y as f64);
+                let (x, y) = (position.x, position.y);
                 self.last_cursor.set((x, y));
                 self.router.move_(&PointerInput2 {
                     x,
@@ -446,7 +455,7 @@ impl WyApp for Node2App {
             WindowEvent::MouseWheel { delta, .. } => {
                 let (dx, dy) = match delta {
                     MouseScrollDelta::LineDelta(_, y) => (0.0, *y as f64),
-                    MouseScrollDelta::PixelDelta(p) => (p.x as f64, p.y as f64),
+                    MouseScrollDelta::PixelDelta(p) => (p.x, p.y),
                 };
                 let (x, y) = self.last_cursor.get();
                 self.router.wheel(x, y, dx, dy, Some(PointerDevice::Mouse));

@@ -10,13 +10,13 @@
 //!   `release` 填入即定格（hover 自然失效）；press 落在可选文本之外 → 整个
 //!   选区为空（浏览器语义：点击空白清除）；
 //! - **键盘选择**：活跃编辑器的光标端点对直接派生（canvasRender2 暂无编辑器）；
-//! - **程序化指令**（[`Self::select_all`] / [`Self::select`] / [`Self::clear`]）：
+//! - **程序化指令**（[`SelectionManager2::select_all`] / [`SelectionManager2::select`] / [`SelectionManager2::clear`]）：
 //!   物化成一个 `programmatic` 信号，任何更高优先级的来源出现即自动失效。
 //!
 //! 以前这里是"节点注册 `get`/`clear` 贡献者 + 拼接文本"：那份实现不可能支持
 //! 跨节点连续拖选（每个节点只知道自己），且管理器持有的是副本而不是真相。
 //! 现在对齐 TS：节点只提供坐标换算与文本查询（[`Selectable2`]），范围分配由
-//! [`Self::range_of`] 按文档序纯派生。
+//! [`SelectionManager2::range_of`] 按文档序纯派生。
 //!
 //! # 可选能力怎么挂到节点上（与 TS 同一套）
 //!
@@ -101,7 +101,7 @@ pub fn as_selectable2(node: &Node2) -> Option<Rc<dyn Selectable2>> {
 // 管理器"放在线程局部——单线程 UI 下语义等价：`renderCanvas` 装了什么，
 // 子树里的 `richTextNode` 就消费什么。不装也能用：组件退化为"没有高亮"。
 thread_local! {
-    static CURRENT_MANAGER: RefCell<Option<Rc<SelectionManager2>>> = RefCell::new(None);
+    static CURRENT_MANAGER: RefCell<Option<Rc<SelectionManager2>>> = const { RefCell::new(None) };
 }
 
 /// 装上当前渲染器的选择管理器（渲染器启动时调用一次）。
@@ -364,7 +364,6 @@ impl SelectionManager2 {
         // `programmatic`，依赖在首次读取时自动收集（TS 的 memo 依赖同样靠读取建立）。
         let ranges = {
             let source = Rc::clone(&source);
-            let programmatic = programmatic;
             create_memo(move || Self::compute_ranges(&*source, programmatic.get()))
         };
         Self {

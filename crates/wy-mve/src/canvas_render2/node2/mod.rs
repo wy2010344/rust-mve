@@ -20,7 +20,7 @@
 //!
 //! `width()` / `x()` / `padding_inline_start()` 等都是**方法**：调用时求值。
 //! 显式给了读取式来源就用它；没给就回落到引擎在本帧绘制前写回的
-//! [`NodeGeom`]（= TS 里由 `layout` 推导出来的那一维）。
+//! [`crate::NodeGeom`]（= TS 里由 `layout` 推导出来的那一维）。
 //!
 //! 也就是说，`draw` 回调里 `self.width()` 拿到的是**本帧最终生效值**，
 //! 在 `width` 闭包里写 `node.width()` 则是递归（TS 同样栈溢出）——不做保护。
@@ -520,6 +520,10 @@ pub type Mouse2 = Rc<dyn Fn(&mut MouseEvent2)>;
 /// 节点只认协议事件，宿主 `KeyEvent` 到 [`KeyEvent2`] 的换算由引擎的
 /// `KeyEvent2::from_mve` 负责。
 pub type Key2 = Rc<dyn Fn(&KeyEvent2) -> bool>;
+/// 回调类型：IME 组合事件（返回 `true` = 已消费）。
+pub type Ime2 = Rc<dyn Fn(&mut ImeEvent) -> bool>;
+/// 回调类型：IME 候选窗定位——返回节点局部坐标的光标盒 `(x, y, w, h)`。
+pub type ImeCursor2 = Rc<dyn Fn() -> (f32, f32, f32, f32)>;
 
 /// `Node2` 的可变部分（构建期写入，之后只读）。
 struct Node2Data {
@@ -551,9 +555,9 @@ struct Node2Data {
     draw_at_parent: Option<Draw2>,
     handle_key: Option<Key2>,
     /// IME 组合事件（Rust 引擎经 `ime_fn` 上报；TS 编辑器经 `onComposing` 消费）。
-    ime: Option<Rc<dyn Fn(&mut ImeEvent) -> bool>>,
+    ime: Option<Ime2>,
     /// IME 候选窗定位（返回节点局部坐标的光标盒 `x,y,w,h`）。
-    ime_cursor: Option<Rc<dyn Fn() -> (f32, f32, f32, f32)>>,
+    ime_cursor: Option<ImeCursor2>,
     mouse_click: Option<Mouse2>,
     mouse_click_capture: Option<Mouse2>,
     mouse_down: Option<Mouse2>,

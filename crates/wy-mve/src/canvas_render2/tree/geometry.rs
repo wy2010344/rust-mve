@@ -4,7 +4,7 @@
 //! - **布局引擎那一半**（会向父级 / 子级递归索要尺寸位置）：
 //!   [`default_size`] / [`default_position`] / [`size_from_parent`] /
 //!   [`size_from_children`] / [`create_layout`] / [`layout_value`]，
-//!   以及布局依赖追踪器 [`layout_dep`] 与成环错误 [`LayoutCycleError`]；
+//!   以及布局依赖追踪器 `layout_dep` 与成环错误 [`LayoutCycleError`]；
 //! - **纯消息那一半**（只发 `children` / `acceptHit` / `x` / `y` / `padding`）：
 //!   [`hitest`] / [`hit_path`] / [`absolute_position`] /
 //!   [`clip_at_grad_parent_node`]。
@@ -53,7 +53,7 @@ pub fn layout_size(value: f32, from_inside: bool) -> LayoutSize {
 ///
 /// # 环闭合占位
 ///
-/// 构造进行中若再次被请求（父 → 子 → 父），返回一条 [`AbsoluteLayout`]：它
+/// 构造进行中若再次被请求（父 → 子 → 父），返回一条 `AbsoluteLayout`：它
 /// `child_size` 报错 → 上层落 0，与 TS "memo 结果还是 `undefined` → `?? 0`"
 /// 同效。这条路径只会出现在"子节点想问父级要尺寸、而父级正在测它"这一瞬，
 /// 此时父级本来就不会用到它的自然尺寸（grow 按权重分、Stretch 按父 inner 分）。
@@ -302,20 +302,18 @@ fn track_size<T>(node: &Node2, d: Axis, run: impl FnOnce() -> T) -> Option<T> {
                     .join(" → ")
             });
             panic!(
-                "布局依赖成环：{} 的尺寸依赖父级，而父级正在测量它。\n依赖链：{} → {}\n\
+                "布局依赖成环：{} [id={} parent={:?} layout={:?} kids={} exts={} decl={:?}] \
+                 的尺寸依赖父级，而父级正在测量它。\n依赖链：{} → {}\n\
                  修法（二选一）：\n  \
                  1) 让该节点有确定尺寸（不依赖父级）：返回 LayoutSize::outer(测得值)；\n  \
                  2) 让它成为 grow 子节点（grow(1.0)），由父级分配尺寸。",
-                format!(
-                    "{} [id={} parent={:?} layout={:?} kids={} exts={} decl={:?}]",
-                    describe_size_edge(node, d),
-                    node.id(),
-                    node.parent().map(|p| p.id()),
-                    node.layout().dir(),
-                    node.children().len(),
-                    node.exts().len(),
-                    node.declared(d)
-                ),
+                describe_size_edge(node, d),
+                node.id(),
+                node.parent().map(|p| p.id()),
+                node.layout().dir(),
+                node.children().len(),
+                node.exts().len(),
+                node.declared(d),
                 chain,
                 describe_size_edge(node, d)
             );
@@ -383,7 +381,7 @@ pub fn size_from_parent(node: &Node2, d: Axis) -> LayoutSize {
 /// 之所以不自递归，是因为 TS 的 `layoutX()` **只建对象**、结果在各方法里惰性求值。
 /// Rust 的 `FlexLayout` 是"构造即求值"：constructor 一进 grow 分支就要读容器
 /// 可用尺寸 → `size(node,d)` → `node.width()` → 又回到这里。所以判定必须走
-/// 工厂层的 [`LayoutFun2::allows_size_from_children`]（只看配置与子节点扩展），
+/// 工厂层的 `LayoutFun2::allows_size_from_children`（只看配置与子节点扩展），
 /// **绝不能**为了判定就先 `layout_value`。
 #[must_use]
 pub fn default_size(node: &Node2, d: Axis) -> LayoutSize {

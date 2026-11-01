@@ -1,7 +1,7 @@
 //! canvasRender2 的节点消息协议（TS `tree/protocol.ts` 的 1:1 Rust 复刻）。
 //!
 //! 这一层只有**类型与最外层数据载体**，没有任何树算法——算法在
-//! [`crate::canvas_render2::node2`]（测量 / 命中 / 装配）与未来会拆出的
+//! [`mod@crate::canvas_render2::node2`]（测量 / 命中 / 装配）与未来会拆出的
 //! `tree/*` 纯消息模块里，且全部只**向节点发消息**、不读对象结构。
 //!
 //! 移植契约（与 TS 同形）：
@@ -11,7 +11,7 @@
 //!    提供，所以每条消息**永远答得出来**。
 //!
 //! 指针事件 [`MouseEvent2`] 是协议层事件（对标 Kotlin `PointerEvent`）：节点钩子
-//! 收它，而不是宿主的原始事件。宿主（[`crate::canvas_render2::node2::Node2::to_node`]
+//! 收它，而不是宿主的原始事件。宿主（`crate::canvas_render2::node2::Node2::to_node`
 //! 的桥接 / `wy-engine` 的派发）负责把宿主事件翻译成 [`MouseEvent2`] 再派发。
 
 use std::cell::Cell;

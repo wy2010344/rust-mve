@@ -69,7 +69,7 @@ impl NodeContext {
     /// 提供值：本节点子树构建期间，后代节点可用 [`Self::consume`] 读取。
     ///
     /// 作用域是**当前上下文及其后代**：祖先 provide 的值会被子上下文继承
-    /// （见 [`Self::inherit_with_parent`]），所以在面板里 provide 一次，它内部的
+    /// （见 `Self::inherit_with_parent`），所以在面板里 provide 一次，它内部的
     /// 动态行、嵌套容器里的组件都能 consume 到。
     pub fn provide<T: 'static>(&mut self, value: T) {
         self.provided.push((TypeId::of::<T>(), Rc::new(value)));

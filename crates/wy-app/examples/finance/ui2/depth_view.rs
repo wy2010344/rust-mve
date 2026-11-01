@@ -128,15 +128,15 @@ fn full_btn(d: Rc<DepthState>) -> Fc {
     let hover = Signal::new(false);
 
     // getter 闭包会把捕获到的东西整体搬走，所以要用的信号先克隆出来。
-    let f_active = d.full.clone();
-    let f_click = d.full.clone();
+    let f_active = d.full;
+    let f_click = d.full;
 
     let active_active = Rc::new(move || f_active.get()) as Rc<dyn Fn() -> bool>;
     // 四个 getter / 回调各自一份，避免闭包互相抢。
     let active_draw = Rc::clone(&active_active);
     let active_text = Rc::clone(&active_active);
     let active_color = Rc::clone(&active_active);
-    let hover_draw = hover.clone();
+    let hover_draw = hover;
 
     node2! {
         debug_name: "depth-full".to_string(),

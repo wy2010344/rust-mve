@@ -1,4 +1,4 @@
-//! 第二代声明式基础节点组件 [`node2`]（对标 TS `canvasRender2` 的 `node2`）。
+//! 第二代声明式基础节点组件 [`node2()`]（对标 TS `canvasRender2` 的 `node2`）。
 //!
 //! TS 里 `node2` 是 `tfc(fn(ctx, node, arg: Node2Arg))`：把参数交给注入的 `node`，
 //! 再把 `children` 摊进父上下文。这里的 props **就是**那份参数——[`Node2Props`]

@@ -44,7 +44,7 @@ struct SignalInner<T> {
 ///
 /// # 生命周期
 ///
-/// `new` 用 [`Rc::leak`] 把 `SignalInner` 转为 `&'static`，句柄本身不拥有数据，
+/// `new` 用 `Rc::leak` 把 `SignalInner` 转为 `&'static`，句柄本身不拥有数据，
 /// 因此 `Signal` 可 `Copy` 而不会重复释放。代价：信号的值与订阅集在
 /// `Signal` 全部消失后仍不回收。对 UI 而言信号数量约等于组件实例数，
 /// 这个量级可以忽略；若将来需要精确回收，需改回 `Rc` 并放弃 `Copy`。

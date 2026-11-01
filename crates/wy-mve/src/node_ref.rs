@@ -261,7 +261,7 @@ impl Default for NodeRef {
     }
 }
 
-/// 提前释放 ref（TS `nodeOf` 的 Rust 版）。
+/// 提前释放 ref（TS `nodeOf` 的 Rust 版，按 Rust 命名写作 `node_of`）。
 ///
 /// 与 TS **逐字同构**：TS 是 `callback(node)(node)`——**同一个 `StoreRef` 两遍**：
 /// 一遍交给回调（供 `draw` / `width` / 事件在**运行期**读"最终生效的我"），
@@ -293,18 +293,4 @@ where
     // —— **立即**两步都做完，且两遍是同一个槽。
     let r = Ref2::<M>::new();
     callback(r.clone()).apply(r)
-}
-
-/// [`node_of`] 的**驼峰别名**，逐字对应 TS 的 `nodeOf`。
-///
-/// Rust 惯例是 snake_case，主名仍是 [`node_of`]；这个别名只为让移植 TS 代码时
-/// 能按原名书写。
-#[allow(non_snake_case)]
-#[must_use]
-pub fn nodeOf<M, G, T, B>(callback: G) -> B
-where
-    G: FnOnce(Ref2<M>) -> T,
-    T: NodeApply<M, B>,
-{
-    node_of(callback)
 }

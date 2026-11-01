@@ -103,9 +103,9 @@ pub fn dashboard(model: Rc<Model>, ctl: Rc<Ctl>, viewport: Rc<Cell<(f32, f32)>>)
     let m = Rc::clone(&model);
     let c = Rc::clone(&ctl);
 
-    let f_cond = full.clone();
-    let f_a = full.clone();
-    let f_b = full.clone();
+    let f_cond = full;
+    let f_a = full;
+    let f_b = full;
     let m_a = Rc::clone(&m);
     let m_b = Rc::clone(&m);
     let c_b = Rc::clone(&c);
@@ -200,7 +200,7 @@ fn normal_layout(
     // 中列两块面板各要一份 `Rc<Model>`（两个 `move` 闭包，不能共用一份）。
     let m_chart = Rc::clone(&model);
     let m_depth = Rc::clone(&model);
-    let f2 = full.clone();
+    let f2 = full;
     let center = stacked(
         move |cx| cx.child(chart_panel(Rc::clone(&m_chart), grow_y(center_split, true))),
         move |cx| {

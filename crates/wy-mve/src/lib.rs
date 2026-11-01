@@ -2,7 +2,7 @@
 //!
 //! **只有一套写法**：`canvasRender2`（对标 TS `canvasRender2`）。入口是
 //! [`Node2App`](../../wy_engine/node2_app/struct.Node2App.html) +
-//! [`build_root_node2`] + [`node2!`] + [`macro@rec`] + [`Fc`]。
+//! [`canvas_render2::build_root_node2`] + [`node2!`] + [`macro@rec`] + [`Fc`]。
 //!
 //! ```ignore
 //! use wy_mve::canvas_render2::build_root_node2;
@@ -46,7 +46,7 @@ pub mod primitives;
 
 pub use context::NodeContext;
 pub use icons::{draw_icon, Icon};
-pub use node_ref::{nodeOf, node_of, NodeGeom, NodeRef};
+pub use node_ref::{node_of, NodeGeom, NodeRef};
 pub use primitives::{CursorType, ImeEvent, Key, KeyEvent, Layout, LayoutBox, PointerButton};
 
 /// 新体系入口：基础元素 `node2`、`Fc`、`Node2` 声明模型、`scroll` 等，

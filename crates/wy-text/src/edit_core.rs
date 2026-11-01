@@ -1002,7 +1002,7 @@ impl EditCore {
             .set(cursor_pos.min(text.chars().count()));
     }
 
-    /// 结束组合态。[restore]=true 还原被替换原文（取消语义）；
+    /// 结束组合态。`restore = true` 还原被替换原文（取消语义）；
     /// false 移除预编辑窗口（正常提交，已确认文本由平台经常规插入路径另行写入）。
     /// 非组合态下为无害空操作。光标一律回到基座插入点。
     pub fn end_composition(&mut self, restore: bool) {

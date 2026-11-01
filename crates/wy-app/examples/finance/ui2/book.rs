@@ -328,7 +328,7 @@ fn side_list(b: Rc<BookState>, bid: bool) -> Fc {
 /// （要比 [`list_row`] 多一条"贴右生长"的深度条）。
 fn book_row(b: Rc<BookState>, data: Rc<RefCell<BookRow>>) -> Fc {
     let hover = Signal::new(false);
-    let hov_draw = hover.clone();
+    let hov_draw = hover;
 
     let b_click = Rc::clone(&b);
     let b_total = Rc::clone(&b);

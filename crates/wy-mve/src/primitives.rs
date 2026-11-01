@@ -103,7 +103,7 @@ pub enum ImeEvent {
     Enabled,
     /// 输入法已停用。
     Disabled,
-    /// 组合文本更新。[cursor] 为组合带内光标区间 `(start, end)`（字节，
+    /// 组合文本更新。`cursor` 为组合带内光标区间 `(start, end)`（字节，
     /// 对齐 winit `Ime::Preedit` 与 Parley `set_compose`）；`None` 表示隐藏光标。
     Preedit {
         /// 组合态文本（尚未提交）。

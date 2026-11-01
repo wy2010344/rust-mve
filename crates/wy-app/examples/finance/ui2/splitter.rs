@@ -8,6 +8,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use wy_mve::canvas_render2::node2::Draw2;
 use wy_mve::canvas_render2::protocol::MouseEvent2;
 // 拖拽必须走**全局**注册表：只沿命中链派发的 `mouse_move` 会在指针离开分割条
 // 那 6px 后断掉（见 `drag_global` 的文档）。
@@ -103,8 +104,12 @@ impl DragSpec {
 /// 避免 move/up 回调互相摘除时撞上重复借用）；差别只是松手还要复位 `active`
 /// 这类界面状态。
 fn drag_global(mv: impl Fn(f32, f32) + 'static, done: impl Fn() + 'static) {
-    let off_move: Rc<RefCell<Option<Box<dyn Fn()>>>> = Rc::new(RefCell::new(None));
-    let off_up: Rc<RefCell<Option<Box<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    // 注销句柄的槽：注册完才回填，摘除时取出并置空。
+    // （块内 `type` 不能挂 `///`，会触发 unused_doc_comments。）
+    type OffSlot = Rc<RefCell<Option<Box<dyn Fn()>>>>;
+
+    let off_move: OffSlot = Rc::new(RefCell::new(None));
+    let off_up: OffSlot = Rc::new(RefCell::new(None));
 
     let mv = register_move(Rc::new(mv));
     *off_move.borrow_mut() = Some(Box::new(mv));
@@ -181,7 +186,7 @@ pub fn gutter(value: Signal<f32>, spec: DragSpec, p: SizeProbe) -> Fc {
     // 交叉轴尺寸交给父布局的 `Stretch`，**不能**声明成 0：一旦声明，`width()`
     // 就直接返回它、压过 `Stretch`（`allow_size` 优先于 `default_size`），
     // 命中区会塌成一条零宽线。所以按轴分两支，只声明主轴那 6px。
-    let paint: Rc<dyn Fn(&mut Scene, &Node2)> = Rc::new(move |s: &mut Scene, n: &Node2| {
+    let paint: Draw2 = Rc::new(move |s: &mut Scene, n: &Node2| {
         if n.width() <= 0.0 || n.height() <= 0.0 {
             return;
         }

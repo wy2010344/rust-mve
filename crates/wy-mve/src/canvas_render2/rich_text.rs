@@ -1,7 +1,7 @@
 //! 富文本节点（对标 TS `canvasRender2/RichTextNode.ts`）。
 //!
 //! TS 原文的结构：
-//! ```ignore
+//! ```text
 //! export const richTextNode = tfc(function (ctx, node, arg: RichTextNodeArg) {
 //!   const { spans = .., selectionColor = .., autoWidth = .., maxLines = ..,
 //!           ellipsis = .., textAlign = .., ...rest } = arg;
@@ -28,7 +28,7 @@
 //!   `layoutValue(parent,'x').childSize(layoutIndex())` 且 `fromInside: false`，
 //!   即"外包宽 = 父分配宽"。Rust 引擎把父分配的外包宽写回 `NodeGeom.width`，
 //!   读它即为 `childSize`；主轴（父为 `Row`）例外，见 `size` 处的注释。
-//! - `memo(...)` → [`ParaCache`]（键：显示文本 + 排版宽 + 最大行数 + 省略号 +
+//! - `memo(...)` → `ParaCache`（键：显示文本 + 排版宽 + 最大行数 + 省略号 +
 //!   对齐 + 各 span 样式）。
 //! - `ctx.consume(selectionManagerContext)` → Rust 侧没有 context 读取通道，暂由
 //!   调用方显式注入（见 [`RichTextNodeArg::selection_manager`]）。
