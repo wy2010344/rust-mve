@@ -137,13 +137,69 @@ fn push_span_range(
 /// - `font_cx` — 全局字体上下文（可变引用，Parley 需要）。
 /// - `spans` — 文本片段列表（按顺序拼接）。
 /// - `max_width` — 最大宽度（`None` 表示不换行）。
-/// - `_max_lines` — 最大行数（预留：当前构建完整布局，不实现截断/省略号）。
+/// - `max_lines` — 最大行数（`usize::MAX` / `0` 表示不限；超出时按 `ellipsis` 截断）。
+/// - `ellipsis` — 省略号（截断时追加到可见文本末尾）。
 /// - `text_align` — 对齐方式。
+///
+/// 对标 TS `buildParagraph(spans, width, maxLines, ellipsis, align)`：Parley 没有
+/// `maxLines` 原语，因此截断在文本层做——先排出完整段落，若行数超限，就把
+/// 「第 `max_lines` 行的起始偏移」作为上界，二分出**最长的可见前缀**，再拼上
+/// 省略号重排。二分次数是 `log2(字节数)`，且结果被上层排版缓存持有，不会每帧重算。
 pub fn build_paragraph(
     font_cx: &mut FontContext,
     spans: &[TextSpan],
     max_width: Option<f32>,
-    _max_lines: usize,
+    max_lines: usize,
+    ellipsis: &str,
+    text_align: TextAlign,
+) -> Result<TextParagraph, TextError> {
+    if spans.is_empty() {
+        let empty: parley::Layout<[u8; 4]> = parley::Layout::new();
+        return Ok(TextParagraph::new(empty, String::new()));
+    }
+
+    let full = build_once(font_cx, spans, max_width, text_align)?;
+    if max_lines == 0 || max_lines == usize::MAX || full.line_metrics().len() <= max_lines {
+        return Ok(full);
+    }
+
+    // 第 `max_lines` 行的起点 = 第一个不可见字符（行索引 0-based）。
+    let total: usize = spans.iter().map(|s| s.text.len()).sum();
+    let cut = floor_char_boundary(spans, full.line_metrics()[max_lines].start_index.min(total));
+
+    // 二分：最大的 `len` 使得 `spans[..len] + ellipsis` 仍然不超过 `max_lines` 行。
+    let (mut lo, mut hi) = (0usize, cut);
+    let mut best: Option<TextParagraph> = None;
+    while lo <= hi {
+        let mid = lo + (hi - lo) / 2;
+        let at = floor_char_boundary(spans, mid);
+        let truncated = truncate_spans(spans, at, ellipsis);
+        let p = build_once(font_cx, &truncated, max_width, text_align)?;
+        if p.line_metrics().len() <= max_lines {
+            best = Some(p);
+            if at >= hi {
+                break;
+            }
+            lo = at + 1;
+        } else if at == 0 {
+            break;
+        } else {
+            hi = at - 1;
+        }
+    }
+    // 极端情况（连一个字符加省略号都超行）也至少返回省略号本身。
+    Ok(best.unwrap_or_else(|| {
+        let only = truncate_spans(spans, 0, ellipsis);
+        build_once(font_cx, &only, max_width, text_align)
+            .unwrap_or_else(|_| build_once(font_cx, &only, None, text_align).unwrap())
+    }))
+}
+
+/// 单次排版（不截断）：`buildParagraph` 的实际排版步骤。
+fn build_once(
+    font_cx: &mut FontContext,
+    spans: &[TextSpan],
+    max_width: Option<f32>,
     text_align: TextAlign,
 ) -> Result<TextParagraph, TextError> {
     if spans.is_empty() {
@@ -187,6 +243,59 @@ pub fn build_paragraph(
     Ok(TextParagraph::new(layout, full_text))
 }
 
+/// 把字节偏移吸附到最近的字符边界（向下）。
+fn floor_char_boundary(spans: &[TextSpan], offset: usize) -> usize {
+    let total: usize = spans.iter().map(|s| s.text.len()).sum();
+    let off = offset.min(total);
+    // 逐 span 定位 offset 落在哪个片段，再在该片段内吸附。
+    let mut base = 0usize;
+    for span in spans {
+        let end = base + span.text.len();
+        if off < end {
+            let local = off - base;
+            let mut l = local;
+            while l > 0 && !span.text.is_char_boundary(l) {
+                l -= 1;
+            }
+            return base + l;
+        }
+        if off == end {
+            return end;
+        }
+        base = end;
+    }
+    base
+}
+
+/// 取 `spans` 的前 `len` 字节，并在末尾追加 `ellipsis`。
+fn truncate_spans(spans: &[TextSpan], len: usize, ellipsis: &str) -> Vec<TextSpan> {
+    let mut out: Vec<TextSpan> = Vec::new();
+    let mut rem = len;
+    for span in spans {
+        if rem == 0 {
+            break;
+        }
+        let take = span.text.len().min(rem);
+        if take == 0 {
+            continue;
+        }
+        out.push(TextSpan {
+            text: span.text[..take].to_string(),
+            style: span.style.clone(),
+        });
+        rem -= take;
+    }
+    if let Some(last) = out.last_mut() {
+        last.text.push_str(ellipsis);
+    } else if !ellipsis.is_empty() {
+        out.push(TextSpan {
+            text: ellipsis.to_string(),
+            style: spans[0].style.clone(),
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,7 +304,7 @@ mod tests {
     #[test]
     fn build_empty_spans() {
         let mut fc = FontContext::new();
-        let p = build_paragraph(&mut fc, &[], None, 100, TextAlign::Start).unwrap();
+        let p = build_paragraph(&mut fc, &[], None, 100, "\u{2026}", TextAlign::Start).unwrap();
         assert_eq!(p.width(), 0.0);
         assert_eq!(p.height(), 0.0);
         assert!(p.line_metrics().is_empty());
@@ -208,7 +317,15 @@ mod tests {
             "Hello, world!",
             TextStyle::normal().with_font_size(16.0),
         )];
-        let p = build_paragraph(&mut fc, &spans, Some(500.0), 100, TextAlign::Start).unwrap();
+        let p = build_paragraph(
+            &mut fc,
+            &spans,
+            Some(500.0),
+            100,
+            "\u{2026}",
+            TextAlign::Start,
+        )
+        .unwrap();
         assert!(p.width() > 0.0);
         assert!(p.height() > 0.0);
         assert!(!p.line_metrics().is_empty());
@@ -223,7 +340,15 @@ mod tests {
             text,
             TextStyle::normal().with_font_size(16.0),
         )];
-        let p = build_paragraph(&mut fc, &spans, Some(100.0), 100, TextAlign::Start).unwrap();
+        let p = build_paragraph(
+            &mut fc,
+            &spans,
+            Some(100.0),
+            100,
+            "\u{2026}",
+            TextAlign::Start,
+        )
+        .unwrap();
         assert!(
             p.line_metrics().len() > 1,
             "长文本应该换行，实际行数: {}",
@@ -235,9 +360,24 @@ mod tests {
     fn build_with_different_alignments() {
         let mut fc = FontContext::new();
         let spans = vec![TextSpan::styled("test", TextStyle::normal())];
-        let p_start = build_paragraph(&mut fc, &spans, Some(200.0), 100, TextAlign::Start).unwrap();
-        let p_center =
-            build_paragraph(&mut fc, &spans, Some(200.0), 100, TextAlign::Center).unwrap();
+        let p_start = build_paragraph(
+            &mut fc,
+            &spans,
+            Some(200.0),
+            100,
+            "\u{2026}",
+            TextAlign::Start,
+        )
+        .unwrap();
+        let p_center = build_paragraph(
+            &mut fc,
+            &spans,
+            Some(200.0),
+            100,
+            "\u{2026}",
+            TextAlign::Center,
+        )
+        .unwrap();
         assert!(p_start.width() > 0.0);
         assert!(p_center.width() > 0.0);
     }
@@ -254,7 +394,15 @@ mod tests {
                     .with_font_weight(700),
             ),
         ];
-        let p = build_paragraph(&mut fc, &spans, Some(500.0), 100, TextAlign::Start).unwrap();
+        let p = build_paragraph(
+            &mut fc,
+            &spans,
+            Some(500.0),
+            100,
+            "\u{2026}",
+            TextAlign::Start,
+        )
+        .unwrap();
         assert!(p.width() > 0.0);
         assert_eq!(p.text(), "Hello world");
     }

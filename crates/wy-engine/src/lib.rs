@@ -4,7 +4,6 @@
 //!
 //! 核心类型：
 //! - [`Event`] / [`PointerEvent`] / [`KeyEvent`] — 统一事件模型
-//! - [`FocusManager`] — 焦点注册、Tab 遍历、焦点陷阱
 //! - [`AccessibilityBridge`] — Widget 树到 AccessKit 的映射
 //! - [`runner`] — winit + wgpu + Vello 应用运行器
 
@@ -13,13 +12,12 @@ pub use accesskit;
 mod accessibility;
 pub mod composition;
 mod event;
-mod focus;
 pub mod frame_source;
-pub mod mve_integration;
+pub mod ime_guard;
+pub mod node2_app;
 pub mod redraw_tracker;
 pub mod runner;
 pub mod winit_translate;
 
 pub use accessibility::{AccessNode, AccessRole, AccessibilityBridge};
 pub use event::{Event, Key, KeyEvent, PointerDevice, PointerEvent, PointerType};
-pub use focus::{focusable_nodes, tab_navigate, FocusManager, FocusPath};

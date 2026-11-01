@@ -105,22 +105,52 @@ pub struct FlexLayout {
     result: FlexResult,
     has_grow_children: bool,
     justify: DirectionJustify,
-    inner_size: f32,
+    /// 可用主轴空间。**惰性**：TS 的 `inside.innerSize()` 是 getter，只有
+    /// "有 grow 子节点"或"显式 justify"两种分支才会求值（`None` 即从未求值）。
+    inner_size: Option<f32>,
 }
 
 impl FlexLayout {
-    /// 根据容器配置与子容器立即计算布局。
+    /// 根据容器配置与子容器立即计算布局（可用空间已给定）。
     pub fn new<T>(arg: &dyn FlexObject<T>, inside: &LayoutInsideObject<T>) -> Self {
+        let v = inside.inner_size;
+        Self::new_lazy(arg, inside.children, || v)
+    }
+
+    /// 惰性版：可用空间 `inner_size` **只在真正需要的分支里求值一次**。
+    ///
+    /// 对标 TS `LayoutInsideObject<T>.innerSize()` —— 它是**惰性 getter**，
+    /// `FlexLayout` 只在两种分支里才去问容器尺寸：
+    /// - 存在 grow 子节点（要按剩余空间分配）；
+    /// - 显式 `directionJustify != 'grow'`（要按剩余空间对齐）。
+    ///
+    /// 这是 `canvasRender2` 的 `defaultSize` 能成立的前提：容器"由子节点撑开
+    /// 尺寸"时**绝不能**回头问自己的尺寸，否则自递归。`size_from_children()`
+    /// 里读 `inner_size` 的分支与这里求值的分支完全重合，故不会用到 `None`。
+    pub fn new_lazy<T>(
+        arg: &dyn FlexObject<T>,
+        children: &[T],
+        inner_size: impl FnOnce() -> f32,
+    ) -> Self {
         let gap = arg.gap();
         let reverse = arg.reverse();
         let justify = arg.direction_justify();
 
+        // 惰性求值器：至多调用一次，并把结果记下来（对应 TS 里 memo 的副作用）。
+        let mut once = Some(inner_size);
+        let mut stored: Option<f32> = None;
+        let mut ask_inner = || {
+            let v = (once.take().expect("布局可用空间只求值一次"))();
+            stored = Some(v);
+            v
+        };
+
         // 一次遍历：过滤 ignore 的子节点 + 是否存在 grow 子节点。
-        let flex_children: Vec<&T> = inside.children.iter().filter(|c| !arg.ignore(c)).collect();
+        let flex_children: Vec<&T> = children.iter().filter(|c| !arg.ignore(c)).collect();
         let flex_count = flex_children.len();
         let has_grow_children = flex_children.iter().any(|c| arg.grow(c) > 0.0);
 
-        let n = inside.children.len();
+        let n = children.len();
         let mut child_lengths = vec![None; n];
         let mut positions = vec![None; n];
         let mut length = 0.0f32;
@@ -134,7 +164,7 @@ impl FlexLayout {
 
         if has_grow_children {
             // 有 grow 子节点：非 grow 部分占自然尺寸，剩余空间按权重分给 grow。
-            let inside_size = inside.inner_size;
+            let inside_size = ask_inner();
             let mut grow_all = 0.0f32;
             let mut total_length = 0.0f32;
             let mut grow_of: Vec<f32> = vec![0.0; n];
@@ -183,7 +213,7 @@ impl FlexLayout {
             }
         } else {
             // 显式 justify：依据剩余空间决定起始偏移与间距。
-            let inside_size = inside.inner_size;
+            let inside_size = ask_inner();
             let mut t_gap = gap;
             let mut total_length = 0.0f32;
             for c in &flex_children {
@@ -235,7 +265,7 @@ impl FlexLayout {
             },
             has_grow_children,
             justify,
-            inner_size: inside.inner_size,
+            inner_size: stored,
         }
     }
 
@@ -250,7 +280,8 @@ impl Layout for FlexLayout {
         if self.justify == DirectionJustify::Grow && !self.has_grow_children {
             Ok(self.result.length)
         } else {
-            Ok(self.inner_size)
+            // 只有这条分支会读可用空间，而它正是构造时求过值的那条分支
+            Ok(self.inner_size.unwrap_or(self.result.length))
         }
     }
 

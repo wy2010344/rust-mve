@@ -3,7 +3,7 @@
 **纯 Rust 的信号驱动 UI 框架：树只建一次，改数据只重画该重画的那部分。**
 
 [![CI](https://github.com/wy2010344/rust-mve/actions/workflows/ci.yml/badge.svg)](https://github.com/wy2010344/rust-mve/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-673%20passing-brightgreen)](https://github.com/wy2010344/rust-mve/actions/workflows/ci.yml)
+[![tests](https://img.shields.io/badge/tests-537%20passing-brightgreen)](https://github.com/wy2010344/rust-mve/actions/workflows/ci.yml)
 [![clippy](https://img.shields.io/badge/clippy-0%20warnings-brightgreen)](https://github.com/wy2010344/rust-mve/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
@@ -20,31 +20,57 @@
 ## 30 秒看懂
 
 ```rust
-use wy_mve::{rsx, NodeContext};
+use wy_mve::{flex, node2, rec, wrapped_text_node, AlignItem, Fc, Layout, Node2, Scene};
 use wy_signal::{GetValue, SetValue, Signal};
 
-fn counter_ui(cx: &mut NodeContext, count: Signal<i32>) {
-    cx.child(rsx! {
-        vbox_at(350.0, 250.0) {
-            label(format!("Count: {}", count.get()))
-            hbox {
-                btn { label: "−", on_click: move || count.set(count.get() - 1) }
-                btn { label: "+", on_click: move || count.set(count.get() + 1) }
-            }
-        }
-    }.into_node());
+/// 一个按钮：圆角底板 + 居中文字，尺寸由文字撑开，点击改信号。
+#[rec]
+fn btn(text: String, on_click: impl Fn() + 'static) -> Fc {
+    node2! {
+        padding: 8.0,
+        layout: flex! { direction: Layout::Row, align_item: AlignItem::Center },
+        mouse_click: move |_e| on_click(),
+        draw: |s: &mut Scene, n: &Node2| {
+            s.fill_round_rect(Rect::new(0.0, 0.0, n.width(), n.height()), 8.0, ACCENT);
+        },
+        children: vec![wrapped_text_node! { text: text, font_size: 14.0, color: BG }],
+    }
+}
+
+/// 页面：节点只建一次，`count.get()` 在绘制期被记成依赖。
+fn counter(count: Signal<i32>) -> Fc {
+    node2! {
+        layout: flex! { direction: Layout::Column, align_item: AlignItem::Center, gap: 12.0 },
+        children: vec![
+            wrapped_text_node! { text: format!("Count: {}", count.get()), font_size: 28.0 },
+            node2! {
+                layout: flex! { direction: Layout::Row, gap: 8.0 },
+                children: vec![
+                    btn("−".to_string(), move || count.set(count.get() - 1)),
+                    btn("+".to_string(), move || count.set(count.get() + 1)),
+                ],
+            },
+        ],
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let count = Signal::new(0);
-    let app = wy_engine::mve_integration::MveApp::new(move |cx| counter_ui(cx, count));
-    wy_engine::runner::run(app)
+    let count = Signal::new(0i32);
+    let app = Node2App::new(move |viewport| {
+        build_root_node2(root_arg(viewport), move |cx| cx.child(counter(count)))
+    })
+    .with_size(420.0, 260.0)
+    .with_title("counter");
+    run(app)
 }
 ```
 
-**关键点不在语法，在最后一句。** `counter_ui` 只在启动时跑一次，
+**关键点不在语法，在最后一句。** `counter` 只在启动时跑一次，
 `count.get()` 被记成依赖；点 "+" 改的是信号，
-**重新执行的只有那句 `label(...)` 的求值，不是整棵树**。
+**重新执行的只有那句 `wrapped_text_node!` 的 `text` 求值，不是整棵树**。
+
+（完整可跑版见 [`examples/node2/counter.rs`](crates/wy-app/examples/node2/counter.rs)，
+含 `root_arg`、主题常量与 `#[rec]` 组件的完整定义。）
 
 ---
 
@@ -77,8 +103,8 @@ React 系的模型是「状态变了就重建组件树」。哪怕一个按钮�
 crates/
 ├── wy-signal/       信号系统：Signal / Memo / TrackSignal / 批量更新
 ├── wy-layout/       布局引擎：Flex / Stack / Absolute（一维，自研）
-├── wy-mve/          MVE 框架：Node 树、rsx! 组件、滚动容器、浮层
-├── wy-mve-macros/   proc-macro：rsx! 声明式语法、#[component]
+├── wy-mve/          MVE 框架：Node2 树、声明式组件、滚动容器、浮层
+├── wy-mve-macros/   proc-macro：`#[rec]` 命名参数组件宏
 ├── wy-render/       渲染管线：Scene 中间层、Vello 集成、离屏出图
 ├── wy-text/         文本排版：Parley shaping、字体缓存
 ├── wy-engine/       引擎整合：事件、焦点、无障碍（AccessKit）
@@ -112,8 +138,8 @@ cargo run -p wy-app --example finance
 # 看板 / 表单 / 待办（shadcn 风格）
 cargo run -p wy-app --example shadcn
 
-# 最小示例
-cargo run -p wy-app --example counter
+# 最小示例（纯 Node2 运行时）
+cargo run -p wy-app --example node2-counter
 ```
 
 需要 Rust 1.98+（仓库已用 `rust-toolchain.toml` 锁定版本）和一块能跑 wgpu 的显卡。
@@ -147,8 +173,8 @@ cargo run -p wy-app --example counter
 | | |
 |---|---|
 | [DESIGN.md](DESIGN.md) | **取舍记录**——为什么这样而不那样（面试官更想看这个） |
-| [docs/node-layer-gaps.md](docs/node-layer-gaps.md) | Node 层与 Kotlin 上游的复刻偏差及补齐方案 |
-| [docs/02-组件写法范式.md](docs/02-组件写法范式.md) | 组件写法与常见坑 |
+| [docs/07-旧体系迁移实测.md](docs/07-旧体系迁移实测.md) | 从 v1 迁到 canvasRender2 的实测记录与硬规律 |
+| [docs/05-canvasRender2对标审计.md](docs/05-canvasRender2对标审计.md) | 与 TS canvasRender2 的逐项对标 |
 | [docs/01-ooc与rust-mve写法对照.md](docs/01-ooc与rust-mve写法对照.md) | 两种声明式写法的对照 |
 | [docs/00-Rust-UI框架调研报告.md](docs/00-Rust-UI框架调研报告.md) | 生态调研 |
 | [AGENTS.md](AGENTS.md) | 项目约束与协作规范 |

@@ -19,3 +19,25 @@ env_logger = { workspace = true }
 # 行情示例（examples/finance）：只拉币安公开数据，不参与库编译。
 ureq = { workspace = true }
 serde_json = { workspace = true }
+
+# ---------------------------------------------------------------------------
+# 纯 Node2 运行时示例（`Node2App` + `build_root_node2`，不走 v1 `to_node`）
+#
+# 统一放在 `examples/node2/`：子目录不会被 Cargo 自动发现，所以这里逐条声明
+# `path`；同目录的 `theme.rs` 是共享模块（各示例 `mod theme;`），不是示例本体。
+# ---------------------------------------------------------------------------
+[[example]]
+name = "node2-counter"
+path = "examples/node2/counter.rs"
+
+[[example]]
+name = "node2-todo"
+path = "examples/node2/todo.rs"
+
+[[example]]
+name = "node2-scroll"
+path = "examples/node2/scroll.rs"
+
+[[example]]
+name = "node2-abs"
+path = "examples/node2/abs.rs"

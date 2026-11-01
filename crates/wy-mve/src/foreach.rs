@@ -1,156 +1,109 @@
-//! `renderForEach`：按 key 复用的列表渲染（复刻 Kotlin `EachValue`/`ForEachModal`）。
+//! 动态区域：`render_for_each`（keyed 列表）与 `render_when`（条件分支）。
 //!
-//! # 模型
+//! 对标 TS `canvasRender2` 的 `ctx.renderForEach` / `ifNode`：**在父节点的
+//! `children` 里管一段**——重算时把旧节点摘掉、按当前列表在**原位置**重建，
+//! 与 TS「销毁旧节点、`ctx.addNode` 建新的」同序。
 //!
-//! - 列表是个 [`Memo`](wy_signal::Memo)：计算闭包内 `for_each(&mut |k, v| ...)` 产出的
-//!   是 `ForEachModal`——本轮**存活**与**新建**的 holder、以及**过期**（复用不上的旧 holder）。
-//! - 每个 holder（`EachInner`，复刻 `EachValue`）持有 key / value / index，并在**首次**被
-//!   复用时调用一次 `creater` 构建子节点（闭包一次性执行，从不重建）。
-//! - 树一旦建好，后续只在信号变化时重算 memo；per-item 的交互由每项内部信号
-//!   在 `draw` 期读取驱动局部重绘，列表本身不再重建节点。
-//! - 复用不上的旧 holder 走 `destroyed` 生命周期（Kotlin 的 `destroy()`）。
+//! # 为什么不再有 `ChildSlot`
+//!
+//! v1 把动态区域表达成 `ChildSlot::GetNodes(Rc<dyn Fn() -> Vec<ChildSlot>>)`，
+//! 由引擎在绘制期把 `Root.target` 摊平成一棵新树。纯 `Node2` 树没有"引擎读 IR"
+//! 这一层：`Node2` 的 `children` 就是它自己持有的 `Vec<Node2>`，所以区域拿到
+//! 父节点后**直接增删那一段**即可。v1 的 holder / memo 分支随之删除。
+//!
+//! # 重算时机
+//!
+//! 区域本身是一个 [`Memo`]：读到的信号变化时重算。挂载期先同步跑一遍（TS 里
+//! `renderForEach` 在构建期就跑），之后由 [`engine_global::register_region_probe`]
+//! 在绘制前的 `probe_regions()` 阶段触发。
 
-use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use wy_signal::{GetValue, Memo};
 
-use crate::context::NodeContext;
-use crate::node::ChildSlot;
+use crate::canvas_render2::node2::{expand_node2, Node2};
+use crate::canvas_render2::tree::engine_global;
+use crate::context::{NodeContext, Provided};
 
-/// 每个列表项的 holder（复刻 Kotlin `EachValue`）。
-struct EachInner<K, T> {
-    key: K,
-    value: Rc<RefCell<T>>,
-    index: Cell<usize>,
-    nodes: RefCell<Option<Vec<ChildSlot>>>,
-    destroyed: Cell<bool>,
-}
-
-/// 跨轮保活的 key → holder 池。
-type HolderPool<K, T> = Rc<RefCell<Vec<Rc<EachInner<K, T>>>>>;
-
-/// 列表 memo 的输出（复刻 Kotlin `ForEachModal`）。
-struct ForEachModal<K, T> {
-    /// 本轮活跃（按顺序）holder。
-    active: Vec<Rc<EachInner<K, T>>>,
-    /// 本轮新建且尚未构建的 holder（→ 触发 `creater`）。
-    fresh: Vec<Rc<EachInner<K, T>>>,
-    /// 本轮复用不上、待销毁的旧 holder。
-    stale: Vec<Rc<EachInner<K, T>>>,
-}
-
-impl<K, T> Clone for ForEachModal<K, T> {
-    fn clone(&self) -> Self {
-        Self {
-            active: self.active.clone(),
-            fresh: self.fresh.clone(),
-            stale: self.stale.clone(),
-        }
-    }
-}
-
-impl<K: PartialEq, T: PartialEq> PartialEq for ForEachModal<K, T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.active.len() == other.active.len()
-            && self.active.iter().zip(other.active.iter()).all(|(a, b)| {
-                a.key == b.key
-                    && a.index.get() == b.index.get()
-                    && *a.value.borrow() == *b.value.borrow()
-            })
-    }
-}
-
-/// 追加一个 `renderForEach` 动态区域到 `slots`。
+/// 在 `parent` 的 `children` 里管一段 keyed 列表（TS `ctx.renderForEach`）。
 ///
-/// - `for_each` 在列表 memo 求值时执行，读取源信号，并经 `emit(key, value)` 发出每一项。
-/// - `creater` 在每个 key **首次**出现时执行，构建该项的子节点（只一次）。
+/// - `for_each` 在区域 memo 求值时执行，读取源信号，并经 `emit(key, value)` 发出每一项；
+/// - `creater` 为每一项构建子树，产物经 `ctx` 直接挂到 `parent` 下。
 ///
-/// key 复用：同一 key 的 holder 跨轮复用，其 `creater` 不重复执行，节点 identity 不变，
-/// 从而 memo 短路、per-item 信号驱动局部重绘。
+/// 重算一次 = 摘掉本区域上一轮建的节点 + 按当前列表在原位置按序重建。
+/// 行节点建好后要 [`expand_node2`] 一次：动态创建的节点和静态树一样，
+/// `children` 得靠展开才会被挂上。
 pub fn render_for_each<K, T>(
-    slots: &mut Vec<ChildSlot>,
-    provided: &crate::context::Provided,
+    parent: &Node2,
+    provided: &Provided,
     for_each: impl Fn(&mut dyn FnMut(K, T)) + 'static,
     creater: impl Fn(K, Rc<RefCell<T>>, &mut NodeContext) + 'static,
 ) where
     K: Eq + std::hash::Hash + Clone + 'static,
     T: Clone + PartialEq + 'static,
 {
-    // 跨轮保活的 key → holder 池。
-    let prev: HolderPool<K, T> = Rc::new(RefCell::new(Vec::new()));
-    // 父链 provide 快照：下面的 memo/闭包都是 `'static`，先拿到所有权
-    let provided = provided.clone();
+    // 区域在父节点里的起始下标：此刻父节点里只有声明在它**之前**的兄弟。
+    let insert_at = parent.children().len();
+    // 本区域当前拥有的节点（下一轮先摘掉它们）。
+    let owned: Rc<RefCell<Vec<Node2>>> = Rc::new(RefCell::new(Vec::new()));
 
-    let list = Memo::new({
-        let prev = Rc::clone(&prev);
-        move || {
-            // 按 key 分组上一轮 holder，本轮优先复用。
-            let mut pool: HashMap<K, Vec<Rc<EachInner<K, T>>>> = HashMap::new();
-            for e in prev.borrow().iter() {
-                pool.entry(e.key.clone()).or_default().push(Rc::clone(e));
-            }
+    let parent_in_memo = parent.clone();
+    let provided_in_memo = provided.clone();
+    let owned_in_memo = Rc::clone(&owned);
 
-            let mut active: Vec<Rc<EachInner<K, T>>> = Vec::new();
-            let mut fresh: Vec<Rc<EachInner<K, T>>> = Vec::new();
-            let mut index = 0usize;
-            for_each(&mut |key, value| {
-                let holder = match pool.get_mut(&key).and_then(|v| v.pop()) {
-                    Some(e) => e,
-                    None => {
-                        let e = Rc::new(EachInner {
-                            key: key.clone(),
-                            value: Rc::new(RefCell::new(value.clone())),
-                            index: Cell::new(index),
-                            nodes: RefCell::new(None),
-                            destroyed: Cell::new(false),
-                        });
-                        fresh.push(Rc::clone(&e));
-                        e
-                    }
-                };
-                *holder.value.borrow_mut() = value;
-                holder.index.set(index);
-                index += 1;
-                active.push(holder);
-            });
-
-            let stale: Vec<Rc<EachInner<K, T>>> = pool.into_values().flatten().collect();
-            *prev.borrow_mut() = active.clone();
-            ForEachModal {
-                active,
-                fresh,
-                stale,
-            }
+    let region = Memo::new(move || {
+        for n in owned_in_memo.borrow_mut().drain(..) {
+            n.detach();
         }
+        let before = parent_in_memo.children().len();
+        let mut cx =
+            NodeContext::inherit_with_parent(&provided_in_memo, Some(parent_in_memo.clone()));
+
+        for_each(&mut |key, value| {
+            creater(key, Rc::new(RefCell::new(value)), &mut cx);
+        });
+
+        // 这一轮新建出来的节点 = 追加在 `before` 之后的那一段。
+        let kids = parent_in_memo.children();
+        let built: Vec<Node2> = kids[before.min(kids.len())..].to_vec();
+        for n in &built {
+            expand_node2(n);
+        }
+        // 搬回区域原本的位置（否则区域后面的兄弟会被挤到前面）。
+        for (i, n) in built.iter().enumerate() {
+            n.detach();
+            parent_in_memo.insert_child_at(insert_at + i, n);
+        }
+        *owned_in_memo.borrow_mut() = built;
+        // 载荷只用来"有变化"：真正的产物已经挂进树里了，闭包返回 unit。
     });
 
-    // 复刻 Kotlin `EachValue` 生命周期：stale 销毁 + fresh 首次构建。
-    let list_lifecycle = list.clone();
-    list_lifecycle.after(move |modal| {
-        for e in modal.stale.iter() {
-            e.destroyed.set(true);
-        }
-        for e in modal.fresh.iter() {
-            // 每一项都在"父链 provide 快照"上开上下文：行内 `ctx.consume` 可用
-            let mut cx = NodeContext::inherit(&provided);
-            creater(e.key.clone(), Rc::clone(&e.value), &mut cx);
-            *e.nodes.borrow_mut() = Some(cx.into_slots());
-        }
-    });
+    // 首轮立刻建好（TS 里 `renderForEach` 在构建期就跑一遍）。
+    region.get();
+    let probe_target = region.clone();
+    engine_global::register_region_probe(Rc::new(move || {
+        probe_target.get();
+    }));
+}
 
-    // 动态区域：实时把活跃 holder 的节点展开成 `ChildSlot` 列表。
-    let region = list.clone();
-    let get_nodes: Rc<dyn Fn() -> Vec<ChildSlot>> = Rc::new(move || {
-        let modal = region.get();
-        let mut out = Vec::new();
-        for e in modal.active.iter() {
-            if let Some(ns) = e.nodes.borrow().as_ref() {
-                out.extend(ns.iter().cloned());
-            }
-        }
-        out
-    });
-    slots.push(ChildSlot::GetNodes(get_nodes));
+/// 在 `parent` 的 `children` 里管一个条件分支（TS `ifNode`）。
+///
+/// `cond()` 为真渲染 `branch(true, ..)` 产出的节点，否则渲染 `branch(false, ..)`。
+/// 条件翻转 = 旧分支摘掉、新分支重建；条件不变则不动。
+///
+/// 实现上复用 [`render_for_each`] 的单元素 keyed 区域：`bool` 当 key，翻转即
+/// 换 key，与列表项增删走**完全相同的生命周期**。
+pub fn render_when(
+    parent: &Node2,
+    provided: &Provided,
+    cond: impl Fn() -> bool + 'static,
+    branch: impl Fn(bool, &mut NodeContext) + 'static,
+) {
+    render_for_each(
+        parent,
+        provided,
+        move |emit| emit(cond(), ()),
+        move |key, _value, cx| branch(key, cx),
+    );
 }

@@ -95,9 +95,12 @@ pub struct App {
     pub visits: Signal<u32>,
     /// 模态对话框开关。
     pub dialog_open: Signal<bool>,
-    /// 下拉菜单开关 + 面板锚点（触发按钮的窗口坐标，事件期捕获）。
+    /// 下拉菜单开关 + 面板锚矩形（触发按钮的窗口坐标与宽高，事件期捕获）。
+    ///
+    /// 存 `(x, y, w, h)` 而不是单点：v2 的放置算法要按锚矩形做 8 方向对齐
+    /// （`PlacementEnd` 贴右缘、上下翻转按高度算），只知道原点是不够的。
     pub menu_open: Signal<bool>,
-    pub menu_anchor: Signal<(f32, f32)>,
+    pub menu_anchor: Signal<(f32, f32, f32, f32)>,
     /// 待办筛选：0 全部 / 1 进行中 / 2 已完成。
     pub todo_filter: Signal<usize>,
     /// 待办输入框的当前文本（新增待办的草稿）。
@@ -130,7 +133,7 @@ impl App {
             visits: Signal::new(128),
             dialog_open: Signal::new(false),
             menu_open: Signal::new(false),
-            menu_anchor: Signal::new((0.0, 0.0)),
+            menu_anchor: Signal::new((0.0, 0.0, 0.0, 0.0)),
             todo_filter: Signal::new(0),
             todo_input: Signal::new(String::new()),
         }

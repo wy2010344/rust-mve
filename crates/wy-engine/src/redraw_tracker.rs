@@ -43,6 +43,15 @@ impl RedrawTracker {
     pub fn scene(&self) -> std::cell::Ref<'_, Scene> {
         self.memo.borrow()
     }
+
+    /// 让缓存失效：下一帧必定重跑绘制闭包。
+    ///
+    /// **帧环境（视口尺寸 / 缩放比）不是信号**，追踪器看不见它。宿主在窗口
+    /// resize、DPI 变化后必须调这个，否则会复用上一帧按旧尺寸录的 Scene——
+    /// 现象就是"窗口拉大，内容不动；点一下（触发别的信号）才跟上"。
+    pub fn invalidate(&self) {
+        self.memo.invalidate();
+    }
 }
 
 impl Clone for RedrawTracker {
@@ -50,5 +59,32 @@ impl Clone for RedrawTracker {
         Self {
             memo: self.memo.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn cache_is_reused_until_invalidated() {
+        let calls = Cell::new(0);
+        let tracker = RedrawTracker::new(Rc::new(|| {}));
+        let mut draw = || {
+            tracker.draw(|_s: &mut Scene| calls.set(calls.get() + 1));
+        };
+
+        draw();
+        draw();
+        assert_eq!(calls.get(), 1, "无信号变化时复用缓存帧");
+
+        // 视口 / DPI 变化：环境不是信号，必须由宿主显式置脏。
+        tracker.invalidate();
+        draw();
+        assert_eq!(calls.get(), 2, "invalidate 后必须重跑绘制闭包");
+
+        draw();
+        assert_eq!(calls.get(), 2, "置脏是一次性的");
     }
 }

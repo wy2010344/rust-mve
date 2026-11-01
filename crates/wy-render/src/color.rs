@@ -53,6 +53,15 @@ impl Color {
         self.a
     }
 
+    /// 只换 alpha 通道，保留 RGB（对标 TS `withAlpha(color, alpha)`）。
+    ///
+    /// 浮层滚动条基色不带 alpha，透明度由 `idle/hover/drag` 三档另行给出——
+    /// 那正是"同一枚胶囊、不同时刻不同浓淡"的写法。
+    #[must_use]
+    pub const fn with_alpha(self, a: u8) -> Self {
+        Self { a, ..self }
+    }
+
     /// 提取红色通道（`[0, 255]`）。
     pub const fn red(self) -> u8 {
         self.r

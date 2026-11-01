@@ -23,13 +23,61 @@ pub enum AlignItem {
     Stretch,
 }
 
+impl AlignItem {
+    /// 把固定的 [`AlignItem`] 变成「逐子节点对齐」对象（对标 TS `alignSelf(item)`）。
+    ///
+    /// 逐子节点对齐与容器级 `alignItem` 的差别只在**来源**：容器级对所有子节点
+    /// 生效且不参与 `size()` 的"取最大子节点"计算；逐子节点的 `Align` 会让该子节点
+    /// 退出那次计算（`StackLayout::new_lazy` 里的 `arg.align(c).is_none()` 判断）。
+    ///
+    /// 返回 `&'static`：四种取值都是无状态的，没必要每次分配一个对象。
+    #[must_use]
+    pub fn as_align(&self) -> &'static dyn Align {
+        static CENTER: FixedAlign = FixedAlign(AlignItem::Center);
+        static START: FixedAlign = FixedAlign(AlignItem::Start);
+        static END: FixedAlign = FixedAlign(AlignItem::End);
+        static STRETCH: FixedAlign = FixedAlign(AlignItem::Stretch);
+        match self {
+            AlignItem::Center => &CENTER,
+            AlignItem::Start => &START,
+            AlignItem::End => &END,
+            AlignItem::Stretch => &STRETCH,
+        }
+    }
+}
+
+/// 由固定 [`AlignItem`] 构造的 [`Align`] 实现（TS `alignSelf(getAlign)` 的产物）。
+struct FixedAlign(AlignItem);
+
+impl Align for FixedAlign {
+    fn size(&self, size: f32) -> Option<f32> {
+        // TS `alignSelf().size`：只有 `stretch` 返回父给的尺寸，其余直接
+        // `throw 'you should make your own size'`——子节点得自己答交叉轴尺寸。
+        (self.0 == AlignItem::Stretch).then_some(size)
+    }
+
+    fn position(&self, size: f32, self_width: f32) -> f32 {
+        match self.0 {
+            AlignItem::Center => (size - self_width) / 2.0,
+            AlignItem::End => size - self_width,
+            // TS `alignSelf().position` 的 `else` 分支：start 与 stretch 都贴起点。
+            AlignItem::Start | AlignItem::Stretch => 0.0,
+        }
+    }
+}
+
 /// 自定义逐子节点对齐：给定交叉轴可用尺寸，计算子节点的尺寸与位置。
 ///
 /// 对应 Kotlin `com.wy.layout.Align`。调用方负责实现（可把子节点固有尺寸
 /// 闭包捕获进来）。
+///
+/// `size` 返回 `Option`：逐子节点对齐**不一定**给出交叉轴尺寸。TS `alignSelf()`
+/// 只在 `stretch` 时返回父给的尺寸，其余分支直接
+/// `throw 'you should make your own size'`；这里用 `None` 表达同一件事
+/// （`child_size` 报"无自身尺寸"，让上层去问子节点自己），比 panic 温和。
 pub trait Align {
-    /// 子节点在交叉轴上的尺寸。
-    fn size(&self, size: f32) -> f32;
+    /// 子节点在交叉轴上的尺寸；`None` = 本对齐不管尺寸，子节点自带。
+    fn size(&self, size: f32) -> Option<f32>;
     /// 子节点在交叉轴上的位置，`self_width` 为子节点自身宽度。
     fn position(&self, size: f32, self_width: f32) -> f32;
 }
@@ -83,17 +131,34 @@ pub struct StackLayout {
 }
 
 impl StackLayout {
-    /// 根据容器配置与子容器立即计算布局。
+    /// 根据容器配置与子容器立即计算布局（可用空间已给定）。
     pub fn new<T>(arg: &dyn StackObject<T>, inside: &LayoutInsideObject<T>) -> Self {
+        let v = inside.inner_size;
+        Self::new_lazy(arg, inside.children, || v)
+    }
+
+    /// 惰性版：可用空间 `inner_size` **只在 `align_fix` 时求值一次**。
+    ///
+    /// 对标 TS `LayoutInsideObject<T>.innerSize()` —— 它是**惰性 getter**，
+    /// `StackLayout` 只在 `alignFix`（交叉轴尺寸由外部给定）时才去问容器尺寸；
+    /// 否则交叉轴尺寸取自"非对齐子节点的最大尺寸"，与容器自身尺寸无关。
+    /// 这与 `canvasRender2` 的 `defaultSize` 配合：容器不会为了对齐子节点
+    /// 而回头问自己的尺寸，避免自递归。
+    pub fn new_lazy<T>(
+        arg: &dyn StackObject<T>,
+        children: &[T],
+        inner_size: impl FnOnce() -> f32,
+    ) -> Self {
         let align_fix = arg.align_fix();
         let align_item = arg.align_item();
 
         // 交叉轴尺寸：alignFix 时用外部 inner_size；否则取"非对齐子节点的最大尺寸"。
+        let mut once = Some(inner_size);
         let size_val = if align_fix {
-            inside.inner_size
+            (once.take().expect("布局可用空间只求值一次"))()
         } else {
             let mut w = 0.0f32;
-            for c in inside.children {
+            for c in children {
                 if !arg.ignore(c) && arg.align(c).is_none() {
                     w = w.max(arg.outer_size(c));
                 }
@@ -101,18 +166,18 @@ impl StackLayout {
             w
         };
 
-        let n = inside.children.len();
+        let n = children.len();
         let mut child_sizes = vec![None; n];
         let mut child_positions = vec![None; n];
 
-        for (i, c) in inside.children.iter().enumerate() {
+        for (i, c) in children.iter().enumerate() {
             if arg.ignore(c) {
                 continue; // 位置与尺寸均不可查询
             }
             if let Some(align) = arg.align(c) {
                 let s = align.size(size_val);
                 let p = align.position(size_val, arg.outer_size(c));
-                child_sizes[i] = Some(s);
+                child_sizes[i] = s;
                 child_positions[i] = Some(p);
                 continue;
             }
@@ -194,8 +259,9 @@ mod tests {
     }
     struct AlignCenter;
     impl Align for AlignCenter {
-        fn size(&self, _size: f32) -> f32 {
-            0.0
+        // 居中不管尺寸：等价于 TS `alignSelf('center').size` 的那次 throw。
+        fn size(&self, _size: f32) -> Option<f32> {
+            None
         }
         fn position(&self, size: f32, self_width: f32) -> f32 {
             (size - self_width) / 2.0
@@ -276,6 +342,60 @@ mod tests {
         assert!(!l.allow_size_from_children());
     }
 
+    // ===== 逐子节点对齐（TS `alignSelf`） =====
+
+    /// 四种 `AlignItem` 折成 `Align` 后，`size` / `position` 与 TS `alignSelf` 逐句一致。
+    #[test]
+    fn fixed_align_item_matches_ts_align_self() {
+        // size：只有 stretch 交出父给尺寸，其余都"无自身尺寸"
+        assert_eq!(AlignItem::Stretch.as_align().size(80.0), Some(80.0));
+        assert_eq!(AlignItem::Center.as_align().size(80.0), None);
+        assert_eq!(AlignItem::Start.as_align().size(80.0), None);
+        assert_eq!(AlignItem::End.as_align().size(80.0), None);
+
+        // position：center 居中、end 贴尾、start 与 stretch 贴头
+        assert_eq!(AlignItem::Center.as_align().position(80.0, 20.0), 30.0);
+        assert_eq!(AlignItem::End.as_align().position(80.0, 20.0), 60.0);
+        assert_eq!(AlignItem::Start.as_align().position(80.0, 20.0), 0.0);
+        assert_eq!(AlignItem::Stretch.as_align().position(80.0, 20.0), 0.0);
+    }
+
+    /// 逐子节点 `Align` 会让该子节点退出"取最大尺寸"的计算，并按自己的策略落位。
+    ///
+    /// 容器 `alignItem: Center`，子 1（宽 30）被声明成 `End`：容器交叉轴尺寸只由
+    /// 子 0、子 2 决定（10、20 → 20），子 1 落位 `20 - 30 = -10`（可以溢出）。
+    #[test]
+    fn per_child_align_overrides_item_and_leaves_size_calc() {
+        struct EndSecond;
+        impl StackChildConvert<Child> for EndSecond {
+            fn align(&self, c: &Child) -> Option<&dyn Align> {
+                (c.idx == 1).then(|| AlignItem::End.as_align())
+            }
+            fn outer_size(&self, c: &Child) -> f32 {
+                c.size
+            }
+            fn ignore(&self, _c: &Child) -> bool {
+                false
+            }
+        }
+        impl StackObject<Child> for EndSecond {
+            fn align_item(&self) -> AlignItem {
+                AlignItem::Center
+            }
+        }
+        let children = children();
+        let inside = LayoutInsideObject::new(&children, 100.0);
+        let l = EndSecond.to_layout(&inside);
+
+        assert_eq!(l.size(), 20.0, "被逐子节点对齐的子节点不计入交叉轴尺寸");
+        assert_eq!(l.child_position(1).unwrap(), -10.0, "End: 20 - 30");
+        // 其它子节点仍按容器 alignItem 居中
+        assert_eq!(l.child_position(0).unwrap(), 5.0, "Center: (20 - 10) / 2");
+        assert_eq!(l.child_position(2).unwrap(), 0.0, "Center: (20 - 20) / 2");
+        // 逐子节点对齐不给尺寸 → 查询尺寸报"无自身尺寸"
+        assert!(l.child_size(1).is_err());
+    }
+
     #[test]
     fn center_item_centers_children_and_has_no_own_size() {
         let arg = Stack {
@@ -317,8 +437,8 @@ mod tests {
     fn custom_align_wins_over_align_item() {
         struct AlignRight;
         impl Align for AlignRight {
-            fn size(&self, _s: f32) -> f32 {
-                5.0
+            fn size(&self, _s: f32) -> Option<f32> {
+                Some(5.0)
             }
             fn position(&self, size: f32, _self_width: f32) -> f32 {
                 size - 5.0

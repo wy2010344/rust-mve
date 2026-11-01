@@ -18,7 +18,10 @@ use crate::text_style::{LineMetric, RectStyle, TextRect};
 /// 对应 Kotlin 侧的 UTF-16 偏移（对 BMP 字符二者数值一致）。
 pub struct TextParagraph {
     /// 排版内部表示（换行 + 对齐后）。
-    layout: parley::Layout<[u8; 4]>,
+    ///
+    /// 用 `Rc` 持有：整段绘制时（`Scene::draw_paragraph` / CanvasKit
+    /// `drawParagraph`）把同一份 layout 直接交给后端，不重新排版、不切段。
+    layout: std::rc::Rc<parley::Layout<[u8; 4]>>,
     /// 原始文本（`Layout` 不保存文本内容，需随段落携带）。
     text: String,
 }
@@ -26,7 +29,16 @@ pub struct TextParagraph {
 impl TextParagraph {
     /// 构造排版结果。
     pub(crate) fn new(layout: parley::Layout<[u8; 4]>, text: String) -> Self {
-        Self { layout, text }
+        Self {
+            layout: std::rc::Rc::new(layout),
+            text,
+        }
+    }
+
+    /// 共享排版结果（供渲染后端整段栅格化，见 `Scene::draw_paragraph`）。
+    #[must_use]
+    pub fn shared_layout(&self) -> std::rc::Rc<parley::Layout<[u8; 4]>> {
+        std::rc::Rc::clone(&self.layout)
     }
 
     /// 段落排版后的宽度。
@@ -47,9 +59,12 @@ impl TextParagraph {
             .lines()
             .map(|line| {
                 let r = line.text_range();
+                let m = line.metrics();
                 LineMetric {
                     start_index: r.start,
                     end_index: r.end,
+                    top: m.block_min_coord,
+                    bottom: m.block_max_coord,
                 }
             })
             .collect()
@@ -58,6 +73,74 @@ impl TextParagraph {
     /// 原始文本。
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// 字节偏移落在第几条软行。
+    ///
+    /// 与"用光标矩形去碰行盒"不同，这里**只看偏移**：空行（没有字形簇、量不出
+    /// 矩形）同样能定位。规则与 Parley 的行区间一致：`start <= byte < end`；
+    /// `byte` 到达文末（或落在任何行的右边界上）归最后一个匹配行。
+    ///
+    /// 上下键换行的行号必须走这里——用几何反推会在空行上退回上一行，
+    /// 表现为"按上键跳不过空行"。
+    pub fn line_index_of_byte(&self, byte: usize) -> Option<usize> {
+        let mut last = None;
+        for (i, line) in self.layout.lines().enumerate() {
+            let r = line.text_range();
+            if byte >= r.start && byte < r.end {
+                return Some(i);
+            }
+            last = Some(i);
+        }
+        // 文末 / 越界：归最后一行（Parley 的行区间是左闭右开，末尾没有归属）
+        last
+    }
+
+    /// 第 `line_index` 行内，横向 `dx` 对应的字节偏移。
+    ///
+    /// 与 [`Self::glyph_position_at_coordinate`] 的差别：坐标查找是"全段落找最近
+    /// 簇"，空行没有簇可命中，会落到"文末"兜底——上下键于是**跳过空行**。
+    /// 这里把**行范围当硬边界**：命中簇也钳到本行，空行 / 行内无字形则返回行首。
+    pub fn position_in_line(&self, line_index: usize, dx: f32) -> usize {
+        let Some(line) = self.layout.lines().nth(line_index) else {
+            return self.text.len();
+        };
+        let range = line.text_range();
+        // 空行没有任何簇：`Cluster::from_point` 会去别的行找最近的，命中的
+        // 是**相邻行**的字形（clamp 之后仍会跨过去）。所以先短路。
+        if self.is_blank_line(line_index) {
+            return range.start;
+        }
+        let m = line.metrics();
+        let y = (m.block_min_coord + m.block_max_coord) / 2.0;
+        match Cluster::from_point(&self.layout, dx, y) {
+            Some((cluster, side)) => {
+                let r = cluster.text_range();
+                let pos = match side {
+                    ClusterSide::Left => r.start,
+                    ClusterSide::Right => r.end,
+                };
+                pos.clamp(range.start, range.end)
+            }
+            // 点在行外：落在行首（空行已在上面短路，这里是非空行的左侧空白）。
+            None => range.start,
+        }
+    }
+
+    /// 第 `line_index` 行是否**没有字形**（空行，或只由 `\r`/`\n` 组成）。
+    ///
+    /// 光标落在这种行上时没有任何簇可量，绘制与几何都得改走行盒。
+    pub fn is_blank_line(&self, line_index: usize) -> bool {
+        let Some(line) = self.layout.lines().nth(line_index) else {
+            return false;
+        };
+        let r = line.text_range();
+        r.start >= r.end
+            || self
+                .text
+                .as_bytes()
+                .get(r.start..r.end)
+                .is_none_or(|b| b.iter().all(|c| *c == b'\r' || *c == b'\n'))
     }
 
     /// 原始文本的字符数（Unicode 标量数）。
@@ -211,7 +294,15 @@ mod tests {
             text,
             TextStyle::normal().with_font_size(16.0),
         )];
-        build_paragraph(&mut fc, &spans, Some(200.0), 100, TextAlign::Start).unwrap()
+        build_paragraph(
+            &mut fc,
+            &spans,
+            Some(200.0),
+            100,
+            "\u{2026}",
+            TextAlign::Start,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -302,5 +393,52 @@ mod tests {
     fn word_boundary_out_of_range() {
         let p = paragraph("hello");
         assert!(p.word_boundary(100).is_none());
+    }
+
+    /// 空行是**真行**：有独立行盒、有自己的字节区间。
+    ///
+    /// 这是"上下键能停在空行上"的前提；若排版层把空行合并掉，
+    /// 上层无论怎么算都跳不过去。
+    #[test]
+    fn blank_lines_are_real_lines() {
+        let p = paragraph("a\n\nb");
+        let m = p.line_metrics();
+        assert_eq!(m.len(), 3, "a\\n\\nb 必须排成 3 行");
+        assert!(m[1].bottom > m[1].top, "空行也要有行高，光标才画得出来");
+        assert_eq!(
+            (m[1].start_index, m[1].end_index),
+            (2, 3),
+            "空行区间就是那一格换行符"
+        );
+    }
+
+    /// 按偏移查行：空行有归属，文末归最后一行。
+    #[test]
+    fn line_index_of_byte_lands_on_blank_lines() {
+        let p = paragraph("a\n\nb");
+        assert_eq!(p.line_index_of_byte(0), Some(0));
+        assert_eq!(p.line_index_of_byte(1), Some(0), "换行符归上一行");
+        assert_eq!(p.line_index_of_byte(2), Some(1), "空行不能被跳过");
+        assert_eq!(p.line_index_of_byte(3), Some(2));
+        assert_eq!(p.line_index_of_byte(4), Some(2), "文末归最后一行");
+    }
+
+    /// 行内取点：空行只返回行首，绝不越到别的行（尤其不能兜底到文末）。
+    #[test]
+    fn position_in_line_never_leaves_the_line() {
+        let p = paragraph("a\n\nb");
+        assert_eq!(p.position_in_line(1, 0.0), 2, "空行走行首");
+        assert_eq!(p.position_in_line(1, 500.0), 2, "空行不能兜底到文末");
+        assert_eq!(p.position_in_line(2, 0.0), 3, "非空行仍按横向位置取");
+        assert_eq!(p.position_in_line(99, 0.0), 4, "越界行归文末");
+    }
+
+    /// 末尾空行（`"a\n"` 排成两行）同样要能被识别，否则文末光标会画在上一行。
+    #[test]
+    fn blank_line_detection_covers_trailing_newline() {
+        let p = paragraph("a\n");
+        assert_eq!(p.line_metrics().len(), 2);
+        assert!(p.is_blank_line(1), "末尾空行");
+        assert!(!p.is_blank_line(0));
     }
 }

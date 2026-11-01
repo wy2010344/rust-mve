@@ -158,6 +158,28 @@ pub fn execute_scene(
                     color: *color,
                 });
             }
+            Primitive::Paragraph { point, layout } => {
+                let transform = Affine::translate((
+                    ((point.x + cumulative.0) * scale) as f64,
+                    ((point.y + cumulative.1) * scale) as f64,
+                ));
+                draw_parley_layout(dst, layout.layout(), transform, scale);
+            }
+            Primitive::Image { image, rect } => {
+                if rect.width <= 0.0
+                    || rect.height <= 0.0
+                    || image.source.width == 0
+                    || image.source.height == 0
+                {
+                    continue;
+                }
+                let x = (rect.x + cumulative.0) * scale;
+                let y = (rect.y + cumulative.1) * scale;
+                let sx = rect.width * scale / image.source.width as f32;
+                let sy = rect.height * scale / image.source.height as f32;
+                let transform = Affine::new([sx as f64, 0.0, 0.0, sy as f64, x as f64, y as f64]);
+                dst.draw_image(&image.source, transform);
+            }
             Primitive::Path {
                 points,
                 closed,
@@ -181,6 +203,13 @@ pub fn execute_scene(
                 let y = (rect.y + cumulative.1) * scale;
                 let k_rect = kurbo_rect(x, y, rect.width * scale, rect.height * scale);
                 dst.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &k_rect);
+            }
+            Primitive::RoundClipPush { rect, radius } => {
+                let x = (rect.x + cumulative.0) * scale;
+                let y = (rect.y + cumulative.1) * scale;
+                let k_rect = kurbo_rect(x, y, rect.width * scale, rect.height * scale);
+                let rounded = RoundedRect::from_rect(k_rect, *radius as f64 * f64::from(scale));
+                dst.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &rounded);
             }
             Primitive::ClipPop => {
                 dst.pop_layer();
@@ -225,8 +254,24 @@ fn render_text(params: &mut TextRenderParams<'_>) {
     );
 
     let transform = Affine::translate((params.point.x as f64, params.point.y as f64));
+    // 缓存里的 layout 已按 `font_size * scale` 建好，无需再放大。
+    draw_parley_layout(params.dst, layout, transform, 1.0);
+}
 
-    // 遍历排版结果，渲染每个 glyph run
+/// 把一份 Parley 排版结果栅格化进 Vello 场景。
+///
+/// `transform` 是段落原点（设备像素）。`glyph_scale` 用于"排版结果建在逻辑单位
+/// 上、需要放大到设备像素"的场景（[`crate::Primitive::Paragraph`]）；已按设备
+/// 像素建好的 layout（[`render_text`] 的缓存）传 `1.0`。
+///
+/// 这里**不**做任何按行/按段的坐标推算：行内偏移、行基线全部来自 Parley 自己，
+/// 这正是 CanvasKit `drawParagraph` 的语义。
+fn draw_parley_layout(
+    dst: &mut vello::Scene,
+    layout: &parley::Layout<[u8; 4]>,
+    transform: Affine,
+    glyph_scale: f32,
+) {
     for line in layout.lines() {
         for item in line.items() {
             let parley::PositionedLayoutItem::GlyphRun(glyph_run) = item else {
@@ -245,24 +290,22 @@ fn render_text(params: &mut TextRenderParams<'_>) {
             let style = glyph_run.style();
             let text_color = to_peniko_color(Color::from_u32(u32::from_be_bytes(style.brush)));
 
-            let x = glyph_run.offset();
-            let y = glyph_run.baseline();
+            let x = glyph_run.offset() * glyph_scale;
+            let y = glyph_run.baseline() * glyph_scale;
 
-            params
-                .dst
-                .draw_glyphs(&font_data)
+            dst.draw_glyphs(&font_data)
                 .brush(text_color)
                 .hint(true)
                 .transform(transform)
                 .glyph_transform(glyph_xform)
-                .font_size(font_size)
+                .font_size(font_size * glyph_scale)
                 .normalized_coords(run.normalized_coords())
                 .draw(Fill::NonZero, {
                     let mut cx = x;
                     glyph_run.glyphs().map(move |glyph| {
-                        let gx = cx + glyph.x;
-                        let gy = y + glyph.y;
-                        cx += glyph.advance;
+                        let gx = cx + glyph.x * glyph_scale;
+                        let gy = y + glyph.y * glyph_scale;
+                        cx += glyph.advance * glyph_scale;
                         vello::Glyph {
                             id: glyph.id,
                             x: gx,
@@ -519,6 +562,28 @@ mod tests {
             &mut layout_cx,
             &mut text_cache,
             1.0,
+        );
+    }
+
+    #[test]
+    fn execute_image_with_round_clip_produces_vello_scene() {
+        let (mut font_cx, mut layout_cx, mut text_cache) = make_contexts();
+        let mut src = Scene::new();
+        let image =
+            crate::PlatformImage::from_rgba8(2, 1, vec![255, 0, 0, 255, 0, 255, 0, 255]).unwrap();
+        let rect = Rect::new(5.0, 6.0, 40.0, 20.0);
+        src.push_round_clip(rect, 5.0);
+        src.draw_image(image, rect);
+        src.pop_clip();
+
+        let mut dst = vello::Scene::new();
+        execute_scene(
+            &src,
+            &mut dst,
+            &mut font_cx,
+            &mut layout_cx,
+            &mut text_cache,
+            2.0,
         );
     }
 

@@ -151,6 +151,10 @@ pub trait WyApp {
     /// 处理键盘事件（可选）。
     ///
     /// Tab/Shift+Tab 用于焦点遍历，其他按键可自定义处理。
+    ///
+    /// **契约：一次物理按键只调一次**（仅在按下时）。winit 会为同一枚键
+    /// 先发 `Pressed` 再发 `Released`，runner 已把松开那一半挡在外面；
+    /// 实现方**不需要**再检查按下状态，重复检查反而暗示这里会收到两次。
     fn handle_key_event(&mut self, _event: &crate::event::KeyEvent) {}
 
     /// 处理 IME 输入法事件（可选）。
@@ -226,11 +230,6 @@ pub trait WyApp {
 /// 创建窗口、初始化 wgpu/Vello，然后运行渲染循环。
 /// 此函数阻塞直到窗口关闭。
 pub fn run(app: impl WyApp + 'static) -> Result<(), Box<dyn std::error::Error>> {
-    // 注册系统剪贴板（arboard；失败保持未注册 = 组件层 no-op）
-    if let Ok(cb) = arboard::Clipboard::new() {
-        wy_mve::clipboard::set_clipboard(ArboardClipboard(std::cell::RefCell::new(cb)));
-    }
-
     let event_loop = EventLoop::<AppEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
@@ -267,18 +266,6 @@ pub fn run(app: impl WyApp + 'static) -> Result<(), Box<dyn std::error::Error>> 
 
     event_loop.run_app(&mut state)?;
     Ok(())
-}
-
-/// arboard → wy-mve 剪贴板桥（trait 是 `&self`，arboard API 是 `&mut self`，RefCell 桥接）。
-struct ArboardClipboard(std::cell::RefCell<arboard::Clipboard>);
-
-impl wy_mve::clipboard::Clipboard for ArboardClipboard {
-    fn get_text(&self) -> Option<String> {
-        self.0.borrow_mut().get_text().ok()
-    }
-    fn set_text(&self, text: &str) {
-        let _ = self.0.borrow_mut().set_text(text.to_string());
-    }
 }
 
 /// 应用内部状态。
@@ -488,10 +475,30 @@ impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
                     self.app.on_resize(lw, lh);
                     // 视口变了 flex 要重排：必须请求重绘，否则窗口放大后
                     // 布局停留在旧帧（"窗口一放大布局不跟随"的直接原因）。
+                    //
+                    // 光 request_redraw 还不够：绘制缓存（`RecordMemo<Scene>`）
+                    // 的失效条件只有**信号**，而 w/h 不是信号——不显式置脏就会
+                    // 复用旧尺寸录的 Scene，redraw 出来还是老布局，直到别的事件
+                    // 碰了某个信号（"点一下才改变"）。
+                    if let Some(tracker) = &self.redraw_tracker {
+                        tracker.invalidate();
+                    }
                     if let Some(window) = &self.window {
                         self.needs_redraw.set(true);
                         window.request_redraw();
                     }
+                }
+            }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                // DPI 变了：Scene 录的是逻辑坐标，翻译时再乘 scale，缓存同样
+                // 是按旧缩放录的。尺寸变化通常紧跟一条 `Resized`（那里也会置脏），
+                // 但单独换显示器只发这一条，所以必须在这里也失效。
+                if let Some(tracker) = &self.redraw_tracker {
+                    tracker.invalidate();
+                }
+                if let Some(window) = &self.window {
+                    self.needs_redraw.set(true);
+                    window.request_redraw();
                 }
             }
             WindowEvent::ModifiersChanged(mods) => {
@@ -532,6 +539,16 @@ impl<A: WyApp> ApplicationHandler<AppEvent> for AppState<A> {
                 self.render();
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                // **一次物理按键 = 一次语义按键**。
+                //
+                // winit 对同一枚键会发两条 `KeyboardInput`（`Pressed` 与
+                // `Released`）。两条都转发 → 应用把一次按压当成两次：编辑器里
+                // 方向键"按一下走两格"、退格删两个字符、回车提交两次，全由此
+                // 而来（`Char` 不明显，是因为正文字符走 IME `Commit`，不在这一路）。
+                // 所以只在 `Pressed` 派发；松开不产生按键语义。
+                if event.state != winit::event::ElementState::Pressed {
+                    return;
+                }
                 // 将 winit 键盘事件翻译为统一 KeyEvent 并转发给应用
                 if let Some(key_event) =
                     crate::winit_translate::translate_key_event(event, self.modifiers)

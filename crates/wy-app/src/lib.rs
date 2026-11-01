@@ -63,7 +63,15 @@ mod tests {
             &text,
             TextStyle::normal().with_font_size(24.0),
         )];
-        let paragraph = build_paragraph(&mut fc, &spans, Some(500.0), 1, TextAlign::Start).unwrap();
+        let paragraph = build_paragraph(
+            &mut fc,
+            &spans,
+            Some(500.0),
+            1,
+            "\u{2026}",
+            TextAlign::Start,
+        )
+        .unwrap();
         assert!(paragraph.width() > 0.0);
         assert_eq!(paragraph.text(), "Count: 5");
 
@@ -163,7 +171,15 @@ mod tests {
             "OK",
             TextStyle::normal().with_font_size(16.0),
         )];
-        let paragraph = build_paragraph(&mut fc, &spans, Some(60.0), 1, TextAlign::Center).unwrap();
+        let paragraph = build_paragraph(
+            &mut fc,
+            &spans,
+            Some(60.0),
+            1,
+            "\u{2026}",
+            TextAlign::Center,
+        )
+        .unwrap();
 
         // 渲染
         let mut scene = Scene::new();

@@ -81,11 +81,17 @@ pub fn translate_modifiers(state: &winit::keyboard::ModifiersState) -> u32 {
 }
 
 /// 从 winit `KeyEvent` + `ModifiersState` 翻译为统一 [`KeyEvent`]。
+///
+/// 与 [`translate_window_event`] 的差别是本函数能看到 `KeyEvent::text`——那才是
+/// 「这枚按键**实际产生了什么文本**」。中文输入法组合期间，字母键与"空格确认"
+/// 都被输入法拿走（Windows 上 IME 吃掉 `WM_CHAR`），此时 `text` 是 `None`；
+/// 只看 `logical_key` 就会把它们当普通字符插进正文——"拼音字母跑进输入框"
+/// "空格确认也插了一个空格"正是这条路径。见 [`translate_key_with_ime`]。
 pub fn translate_key_event(
     key_event: &winit::event::KeyEvent,
     modifiers: winit::keyboard::ModifiersState,
 ) -> Option<crate::event::KeyEvent> {
-    let key = translate_key(&key_event.logical_key)?;
+    let key = translate_key_with_ime(key_event, modifiers)?;
     let pressed = matches!(key_event.state, winit::event::ElementState::Pressed);
     let m = translate_modifiers(&modifiers);
     Some(crate::event::KeyEvent::new(key, pressed).with_modifiers(
@@ -96,7 +102,72 @@ pub fn translate_key_event(
     ))
 }
 
-/// 将 winit `Key` 翻译为统一 `Key` 枚举。
+/// 带输入法门禁的键翻译：字符类按键必须以 `KeyEvent::text` 为准。
+///
+/// # 为什么不能只看 `logical_key`
+///
+/// `logical_key` 回答的是「这枚键代表什么字符」，与实际输入无关；`text` 回答的是
+/// 「这枚键实际产生了什么文本」。输入法组合期间（拼音、日文、韩文…），按键归
+/// 输入法独占，平台不会给它产生文本，`text` 为 `None`，winit 甚至会把
+/// `logical_key` 退化成 `Unidentified`/`Process`。此时若按 `logical_key` 生成
+/// `Key::Char`，就会出现：
+///
+/// - 打 `zhong` 时 `z`/`h`/`o`/`n`/`g` 逐个被插入正文；
+/// - 按空格选词时，`Named(Space)` 被插成 `' '`。
+///
+/// 组合串本身经 `Ime::Preedit` / `Ime::Commit` 进来，所以这里把字符键整条丢弃
+/// 不会丢字。
+///
+/// 带 Ctrl/Cmd/Alt 的组合键保留 `logical_key`：快捷键（Ctrl+A/C/X/V/Z）靠它
+/// 识别，而这些键本来就不该被输入法翻译成文本。
+fn translate_key_with_ime(
+    key_event: &winit::event::KeyEvent,
+    modifiers: winit::keyboard::ModifiersState,
+) -> Option<Key> {
+    let accel = modifiers.control_key() || modifiers.super_key() || modifiers.alt_key();
+    translate_key_of(
+        key_event.logical_key.clone(),
+        key_event.text.as_deref(),
+        accel,
+    )
+}
+
+/// [`translate_key_with_ime`] 的无 winit 结构版本（便于单测）：
+/// `text` 是这枚按键产生的文本（`None` = 被输入法吃掉），`accel` 表示带着
+/// Ctrl/Cmd/Alt。
+fn translate_key_of(
+    logical_key: winit::keyboard::Key,
+    text: Option<&str>,
+    accel: bool,
+) -> Option<Key> {
+    use winit::keyboard::{Key as WKey, NamedKey};
+    match &logical_key {
+        // 字符键与空格：只在"确实产生了文本"时才成立。
+        WKey::Character(_) | WKey::Named(NamedKey::Space) => {
+            if let Some(c) = text_char_of(text) {
+                return Some(Key::Char(c));
+            }
+            // 文本被输入法吃了；但如果带着 Ctrl/Cmd/Alt，它可能是快捷键
+            // （部分平台不把带修饰键的按键算进 `text`），按逻辑键放行。
+            if accel {
+                return translate_key(&logical_key);
+            }
+            None
+        }
+        other => translate_key(other),
+    }
+}
+
+/// `text` 里的单个字符；空串 / 多字符（死键组合串）都视为"没有文本字符"。
+fn text_char_of(text: Option<&str>) -> Option<char> {
+    let mut chars = text?.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => Some(c),
+        _ => None,
+    }
+}
+
+/// 将 winit `Key` 翻译为统一 `Key` 枚举（不看 `text`，故不做输入法门禁）。
 ///
 /// 返回 `None` 表示该键不产生可插入字符，应整条忽略：
 /// - `NamedKey::Process`（Windows `VK_PROCESSKEY`）：按键已被输入法消费，
@@ -152,6 +223,41 @@ mod tests {
     fn translate_key_unmapped_is_none() {
         let key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::F1);
         assert_eq!(translate_key(&key), None);
+    }
+
+    /// 输入法组合中的字母键：`text` 为空 = 这枚键被输入法拿走了，
+    /// 不能按 `logical_key` 当字符插进正文（"拼音字母跑进输入框"）。
+    #[test]
+    fn ime_composing_letter_produces_no_key() {
+        let k = winit::keyboard::Key::Character("z".into());
+        assert_eq!(translate_key_of(k.clone(), None, false), None);
+        // 正常的字母输入有 text，照常翻译
+        assert_eq!(translate_key_of(k, Some("z"), false), Some(Key::Char('z')));
+    }
+
+    /// 空格选词：同样的 `Named(Space)`，被输入法消费时 `text` 为空。
+    #[test]
+    fn ime_space_confirm_is_not_text() {
+        let space = winit::keyboard::Key::Named(winit::keyboard::NamedKey::Space);
+        assert_eq!(translate_key_of(space.clone(), None, false), None);
+        assert_eq!(
+            translate_key_of(space, Some(" "), false),
+            Some(Key::Char(' '))
+        );
+    }
+
+    /// 带 Ctrl 的快捷键即便拿不到 `text` 也要放行（Ctrl+A / Ctrl+Z …）。
+    #[test]
+    fn accel_key_survives_missing_text() {
+        let k = winit::keyboard::Key::Character("a".into());
+        assert_eq!(translate_key_of(k, None, true), Some(Key::Char('a')));
+    }
+
+    /// 死键产出的多字符文本不当作单字符插入（避免只插半个组合）。
+    #[test]
+    fn dead_key_multichar_text_is_ignored() {
+        let k = winit::keyboard::Key::Character("´a".into());
+        assert_eq!(translate_key_of(k, Some("´a"), false), None);
     }
 
     /// 多字符 `Character`（死键/组合串）不产生单个字符。

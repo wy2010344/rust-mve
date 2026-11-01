@@ -35,6 +35,11 @@ struct RecordMemoInner<R> {
     version: Cell<u64>,
     /// 是否已录制过。
     inited: Cell<bool>,
+    /// 强制重录标志：帧环境（视口尺寸、缩放比）变化时由宿主置位。
+    ///
+    /// 这类输入**不是信号**——追踪器看不见它们，若不显式置脏，`record()`
+    /// 会判定"依赖没变"并复用按旧环境录制的值。
+    dirty: Cell<bool>,
     /// 缓存的记录值（由 `record()` 的 compute 写入）。
     value: RefCell<R>,
     /// 变化钩子：依赖变化（add_fun 或 record 内部确认）时执行。
@@ -65,6 +70,7 @@ impl<R: Default + 'static> RecordMemo<R> {
             last_snap: RefCell::new(HashMap::new()),
             version: Cell::new(0),
             inited: Cell::new(false),
+            dirty: Cell::new(false),
             value: RefCell::new(R::default()),
             on_change: RefCell::new(Vec::new()),
         });
@@ -91,7 +97,11 @@ impl<R: Default + 'static> RecordMemo<R> {
     /// 无论是否重录，返回前都会把本 memo 重新挂到叶子依赖上（保持批次链路）。
     pub fn record(&self, compute: impl FnOnce(&mut R)) {
         let version = global_version();
-        let should_run = if !self.inner.inited.get() {
+        let should_run = if self.inner.dirty.get() {
+            // 宿主声明的环境变化优先于信号比对。
+            self.inner.dirty.set(false);
+            true
+        } else if !self.inner.inited.get() {
             true
         } else if self.inner.version.get() != version {
             self.relay_changed()
@@ -111,6 +121,18 @@ impl<R: Default + 'static> RecordMemo<R> {
     /// 访问缓存的记录值（不触发校验）。
     pub fn borrow(&self) -> Ref<'_, R> {
         self.inner.value.borrow()
+    }
+
+    /// 声明"外部环境已变，下次 `record()` 必须重录"。
+    ///
+    /// 用于那些**不经过信号**的输入：视口尺寸、缩放比、字体度量……
+    /// 追踪器只能看见信号，这类变化必须由宿主显式告知，否则缓存会一直
+    /// 复用按旧环境录制的结果（表现为"窗口变大后布局不跟随，随便点一下才对"）。
+    ///
+    /// 只置标志、不立刻重录：真正的重录仍发生在下一帧 `record()`（那时宿主
+    /// 才有完整的绘制上下文）。调用方负责同时安排一次重绘。
+    pub fn invalidate(&self) {
+        self.inner.dirty.set(true);
     }
 
     /// 清空并重录（供创建 memo 后首次收集依赖）。
@@ -203,5 +225,77 @@ impl<R: Default + 'static> TrackDyn for RecordMemoInner<R> {
         for hook in hooks {
             hook();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    /// 数一数绘制闭包跑了几次（记录值里追加第几次）。
+    fn counter() -> (Cell<u32>, RecordMemo<Vec<u32>>) {
+        (Cell::new(0), RecordMemo::new())
+    }
+
+    #[test]
+    fn reuses_the_cache_when_nothing_changed() {
+        let (runs, memo) = counter();
+        for v in [1, 2] {
+            memo.record(|out: &mut Vec<u32>| {
+                runs.set(runs.get() + 1);
+                out.push(v);
+            });
+        }
+        assert_eq!(runs.get(), 1, "没有依赖变化时不该重录");
+        assert_eq!(*memo.borrow(), vec![1], "缓存值保持首次录制的结果");
+    }
+
+    #[test]
+    fn invalidate_forces_exactly_one_rerun() {
+        let (runs, memo) = counter();
+        memo.record(|out: &mut Vec<u32>| {
+            runs.set(runs.get() + 1);
+            out.push(1);
+        });
+
+        // 模拟视口变化：环境不是信号，宿主显式置脏。
+        memo.invalidate();
+        memo.record(|out: &mut Vec<u32>| {
+            runs.set(runs.get() + 1);
+            out.push(2);
+        });
+        assert_eq!(runs.get(), 2, "置脏后必须重录");
+        assert_eq!(*memo.borrow(), vec![2], "缓存换成按新环境录制的结果");
+
+        // 脏标志是一次性的：不重复置脏就回到复用路径。
+        memo.record(|out: &mut Vec<u32>| {
+            runs.set(runs.get() + 1);
+            out.push(3);
+        });
+        assert_eq!(runs.get(), 2, "脏标志应被消费掉");
+        assert_eq!(*memo.borrow(), vec![2]);
+    }
+
+    #[test]
+    fn invalidate_still_reports_change_for_following_signal_updates() {
+        let (runs, memo) = counter();
+        memo.record(|out: &mut Vec<u32>| {
+            runs.set(runs.get() + 1);
+            out.push(0);
+        });
+        memo.invalidate();
+        memo.record(|out: &mut Vec<u32>| {
+            runs.set(runs.get() + 1);
+            out.push(1);
+        });
+        // 置脏把缓存抹掉后，依赖边要重新挂上：再置脏一次仍然有效。
+        memo.invalidate();
+        memo.record(|out: &mut Vec<u32>| {
+            runs.set(runs.get() + 1);
+            out.push(2);
+        });
+        assert_eq!(runs.get(), 3, "重复置脏每次都生效");
+        assert_eq!(*memo.borrow(), vec![2]);
     }
 }

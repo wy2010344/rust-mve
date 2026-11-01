@@ -81,21 +81,27 @@ Taffy 是通用 2D 布局引擎（Yoga 的 Rust 实现），能算 grid、换行
 
 ---
 
-## 3. 为什么 `rsx!` 用 proc-macro，而不是运行时 DSL
+## 3. 为什么组件声明用 proc-macro，而不是运行时 DSL
 
 ### 取舍
 
-运行时 DSL 长这样：
+运行时 DSL 可以做成解析字符串，也可以做成一串 builder 调用，两种都比 proc-macro 简单。
+现在的写法是 `#[rec]` 注解普通函数 + 同名 `!` 宏：
 
 ```rust
-rsx! {
-    vbox {
-        hbox { label("Count"), btn("−") }
+#[rec]
+fn panel(grow: f32, children: Vec<Fc>) -> Fc {
+    node2! {
+        exts: vec![wy_mve::grow(grow)],
+        layout: flex! { direction: Layout::Column },
+        children,
     }
 }
 ```
 
-可以做成解析字符串、也可以做成一串 builder 调用。两种都比 proc-macro 简单。
+`panel! { grow: 1.0, children: vec![..] }` 展开成 `PanelArg::builder()...build()`，
+**返回类型就是函数签名上写的那个**（`-> Fc` 就产出 `Fc`），没有 `.of()` 之类的收尾。
+
 选了 proc-macro，代价是：
 
 - 写 proc-macro 比写 DSL 复杂一个数量级
@@ -107,8 +113,14 @@ rsx! {
 - **类型检查在编译期完成**。`on_click` 传错类型、prop 名写错、闭包捕获了不该捕获的
   东西，全部是编译错误而不是运行时 panic
 - 没有运行时解析开销，也没有运行时 DSL 的"动态特性"带来的复杂度
-- 宏可以生成 `#[component]` 包装：`rsx! { dashboard { model: m } }` 会自动展开成
-  调用 `dashboard(model: m)` 并 provide 上下文——**这是运行时 DSL 很难做对的**
+- 字段默认值写在参数上（`#[props(default = ..)]`），调用点省略即可——
+  这是运行时 DSL 很难做对的：builder 的"未设置"状态要靠类型系统表达
+
+> **历史备注**：更早的 v1 用的是 `rsx!` 标签语法（`vbox { label("x") }`）。
+> 它随旧 `Node` IR 一起删除了——那套语法天生绑定"返回节点"的语义，
+> 而 canvasRender2 的节点是 `Fc`（闭包）、`children` 是 `Vec<Fc>`，
+> 标签树反而绕远路。下面第 4 节记的 `syn` 坑来自 `rsx!`，
+> 但解析器仍是同一个 crate，教训与修法都留下了。
 
 ### 代价
 

@@ -4021,7 +4021,6 @@ version = "0.1.0"
 dependencies = [
  "accesskit",
  "accesskit_winit",
- "arboard",
  "log",
  "parley",
  "pollster",
@@ -4043,6 +4042,7 @@ version = "0.1.0"
 name = "wy-mve"
 version = "0.1.0"
 dependencies = [
+ "arboard",
  "unicode-segmentation",
  "wy-layout",
  "wy-mve-macros",

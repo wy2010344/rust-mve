@@ -24,5 +24,5 @@ pub mod widgets;
 pub use color::Color;
 pub use draw_context::DrawContext;
 pub use math::{Point, Rect, Size};
-pub use scene::{Primitive, Scene};
+pub use scene::{PlatformImage, Primitive, Scene};
 pub use widget::{ChildBuilder, Widget};

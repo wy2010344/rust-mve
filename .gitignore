@@ -1,3 +1,6 @@
-/target
+# Cargo 产物：不带前导 / 才能同时命中根 target 与各 crate 下的
+# crates/*/target（子 crate 单独编译时会出现，曾把宏调试 dump 带进库）
+target/
+
 # WorkBuddy 本地工作数据（记忆、日志），不入库
 /.workbuddy

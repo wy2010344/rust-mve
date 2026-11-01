@@ -21,9 +21,6 @@
 //! 图标默认按 `size` 居中于自身盒子（盒子是 `size × size`），
 //! 调用处可用 `grow` / `align_self` 调整在父容器中的位置。
 
-use std::rc::Rc;
-
-use crate::{component, current_box, rsx};
 use wy_render::{Color, Point, Scene};
 
 /// 矢量图标集合。
@@ -261,51 +258,23 @@ impl Icon {
     }
 }
 
-/// 矢量图标节点。
+/// 把图标画进 [`Scene`]（v2 里图标是 `draw` 回调中的图形，不是节点）。
 ///
-/// `name` 为图标种类，`size` 为图标边长（像素），`color` 为描边色
-/// （getter，可随主题变化）。
-#[component]
-pub fn icon(
-    /// 图标种类。
-    name: Icon,
-    /// 图标边长（像素）。
-    #[props(default = 14.0f32)]
-    size: f32,
-    /// 描边色（getter：裸 `Color` 或闭包）。
-    #[getter]
-    color: Color,
-) -> Node {
-    // getter 是 `Rc<dyn Fn()>`，draw 与 measure 各捕获一份
-    let draw_color = Rc::clone(&color);
-    rsx! {
-        node {
-            width: size,
-            height: size,
-            draw: move |s: &mut Scene| {
-                let b = current_box();
-                // 图标在自身盒子里居中（父容器给的盒子可能大于图标）
-                let side = b.width.min(b.height).min(size);
-                let ox = (b.width - side) / 2.0;
-                let oy = (b.height - side) / 2.0;
-                let c = draw_color();
-                let (paths, filled) = name.icon_paths();
-                for seg in paths {
-                    let pts: Vec<Point> = seg
-                        .chunks(2)
-                        .map(|c| Point::new(ox + c[0] * side, oy + c[1] * side))
-                        .collect();
-                    if filled {
-                        s.fill_path(pts, c);
-                    } else {
-                        s.stroke_path(pts, (side * 0.09).max(1.0), c);
-                    }
-                }
-            },
-            measure: (size, size),
+/// 归一化路径按 `side` 缩放后平移到 `(ox, oy)`：调用方在自己的绘制盒里
+/// 用 `(0, 0, side)` 就得到「填满自身盒子」的效果。
+pub fn draw_icon(s: &mut Scene, icon: Icon, ox: f32, oy: f32, side: f32, color: Color) {
+    let (paths, filled) = icon.icon_paths();
+    for seg in paths {
+        let pts: Vec<Point> = seg
+            .chunks(2)
+            .map(|c| Point::new(ox + c[0] * side, oy + c[1] * side))
+            .collect();
+        if filled {
+            s.fill_path(pts, color);
+        } else {
+            s.stroke_path(pts, (side * 0.09).max(1.0), color);
         }
     }
-    .into_node()
 }
 
 #[cfg(test)]
@@ -343,7 +312,6 @@ mod tests {
             assert!(!paths.is_empty(), "{icon:?} 缺少路径");
             for seg in paths {
                 assert!(seg.len() >= 4, "{icon:?} 的路径点数不足");
-                // 归一化坐标必须落在 0..1
                 for c in seg.chunks(2) {
                     assert!((0.0..=1.0).contains(&c[0]), "{icon:?} x 越界: {}", c[0]);
                     assert!((0.0..=1.0).contains(&c[1]), "{icon:?} y 越界: {}", c[1]);
@@ -352,20 +320,12 @@ mod tests {
         }
     }
 
+    /// 图标画出来是**路径图元**，不是文本图元——否则会依赖字体字形。
     #[test]
-    fn icon_draws_path_primitives() {
-        let props = IconPropsBuilder::default()
-            .name(Icon::Check)
-            .size(16.0)
-            .color(Color::BLACK)
-            .build();
-        let node = icon(props).into_node();
+    fn icon_draws_path_primitives_only() {
         let mut scene = Scene::new();
-        crate::with_box(crate::LayoutBox::new(0.0, 0.0, 16.0, 16.0), || {
-            node.run_draw(&mut scene);
-        });
+        draw_icon(&mut scene, Icon::Check, 0.0, 0.0, 16.0, Color::BLACK);
         assert!(!scene.is_empty(), "图标应产生绘制图元");
-        // 路径图元而非文本图元——不依赖字体
         assert!(
             scene
                 .iter()

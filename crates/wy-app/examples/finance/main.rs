@@ -29,16 +29,25 @@ mod market;
 mod panels;
 mod synth;
 mod theme;
-mod ui;
+mod ui2;
+
+// `#[rec]` 生成的宏（panel! / text_label! / col_header! / kv_row!）是 `#[macro_export]`
+// 在 crate 根，其展开体引用 `$crate::XxxArg`，故必须把 `XxxArg` 再导出到 crate 根，
+// 宏才能解析。每新增一个 `#[rec]` 组件都需在此补一行。
+pub use ui2::widgets::{ColHeaderArg, KvRowArg, PanelArg, TextLabelArg};
+// `#[rec(extends = node2)]` 的 `panel!` 宏展开体引用 `$crate::Node2Props`，
+// 必须把 `Node2Props` 也再导出到 crate 根，否则该绝对路径解析失败。
+pub use wy_mve::Node2Props;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use wy_engine::mve_integration::MveApp;
+use wy_engine::node2_app::Node2App;
 use wy_engine::runner::WyApp;
-use wy_mve::{rsx, NodeContext};
+use wy_mve::canvas_render2::build_root_node2;
+use wy_mve::canvas_render2::node2::{always, get};
 use wy_render::Scene;
 use wy_signal::{batch, GetValue, SetValue, Signal};
 
@@ -47,11 +56,44 @@ use market::{
     merge_trades, replace_klines, upsert_ticker, Candle, Depth, Status, Ticker, Trade,
     WATCH_SYMBOLS,
 };
-// `dashboard` 是 ctx 组件，走 `rsx!` 标签调用（`dashboard { model: .., ctl: .. }`）
-use ui::dashboard;
+use ui2::dashboard;
 
 /// 数据泵节拍：40ms ≈ 25Hz，足以覆盖 1.2s 一次的数据到达。
 const WAKE_EVERY: Duration = Duration::from_millis(40);
+/// 初始窗口尺寸（与截图同一套）。
+const WINDOW: (f32, f32) = (1440.0, 900.0);
+
+/// 画布根 + 页面 + 浮层，包成 [`Node2App`]。
+///
+/// 浮层（盘口设置菜单）由 `ui2::dashboard` 自己挂——它的可视区取父节点 inner，
+/// 只有挂在画布根下那一层整窗盒子里才等于整窗。文档序最后 → 绘在最上层。
+fn make_app(model: Rc<Model>, ctl: Rc<Ctl>, w: f32, h: f32) -> Node2App {
+    Node2App::new(move |viewport| {
+        let m = Rc::clone(&model);
+        let c = Rc::clone(&ctl);
+        // `root_arg` 吃掉 viewport（根要用它算尺寸），页面自己也要一份。
+        let vp = Rc::clone(&viewport);
+        build_root_node2(root_arg(viewport), move |cx| {
+            cx.child(dashboard(m, c, vp));
+        })
+    })
+    .with_size(w, h)
+    .with_title("wy-ui · finance · canvasRender2")
+}
+
+/// 画布根：原点 `(0,0)`、尺寸等于视口（TS 画布根同款）。
+///
+/// 根没有父节点，`defaultPosition` 无从推导，所以 `x`/`y` 必须显式给 0。
+fn root_arg(viewport: Rc<Cell<(f32, f32)>>) -> Node2Props {
+    let (vw, vh) = (viewport.clone(), viewport);
+    Node2Props {
+        x: Some(always(0.0)),
+        y: Some(always(0.0)),
+        width: Some(get(move || vw.get().0)),
+        height: Some(get(move || vh.get().1)),
+        ..Node2Props::default()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // 模型：全部状态都是信号（对应 ooc 页面里的 `bindSignal`）
@@ -73,9 +115,9 @@ pub struct Model {
     /// 当前数据源（顶栏胶囊一点即切）。
     pub source: Signal<Source>,
     // ---- 以下是"真跨面板"的部分；视图自己的状态一律留在面板内部 ----
-    // K 线视口（visible / offset）是 chart 面板私有的，见 `ui::chart::ChartState`；
-    // 深度图是否独占视口由 `ui::mod::dashboard` 持有；
-    // 盘口点价只在盘口面板内用，见 `ui::book::BookState::picked`。
+    // K 线视口（visible / offset）是 chart 面板私有的，见 `ui2::chart::ChartState`；
+    // 深度图是否独占视口由 `ui2::dashboard` 持有；
+    // 盘口点价只在盘口面板内用，见 `ui2::book::BookState::picked`。
 }
 
 impl Model {
@@ -178,7 +220,7 @@ impl Ctl {
         self.model.symbol.set(symbol.to_string());
         self.model.error.set(String::new());
         // 换标的：K 线视口不用在这里重置——它在 chart 面板里带"标的/周期"的 key，
-        // key 一变自动回到默认视口（见 `ui::chart::ChartState::view`）。
+        // key 一变自动回到默认视口（见 `ui2::chart::ChartState::view`）。
         self.open_market(symbol, &self.model.interval.get());
     }
 
@@ -212,11 +254,11 @@ impl Ctl {
 }
 
 // ---------------------------------------------------------------------------
-// 应用：MveApp + 数据泵
+// 应用：Node2App + 数据泵
 // ---------------------------------------------------------------------------
 
 struct Dashboard {
-    inner: MveApp,
+    inner: Node2App,
     model: Rc<Model>,
     ctl: Rc<Ctl>,
     rx: Receiver<Msg>,
@@ -378,14 +420,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let model = Rc::new(Model::new());
         let (feed, _rx) = Feed::new();
         let ctl = Rc::new(Ctl::new(feed, model.clone()));
-        let ui_model = model.clone();
-        let ui_ctl = ctl.clone();
-        let app = MveApp::new(move |cx: &mut NodeContext| {
-            let (m, c) = (Rc::clone(&ui_model), Rc::clone(&ui_ctl));
-            cx.child(rsx! { dashboard { model: m, ctl: c } });
-        });
         // 灌一份合成行情，保证出图内容稳定可复现
         fill_synthetic(&model);
+        let app = make_app(model, ctl, w as f32, h as f32);
         wy_app::snapshot::save_snapshot(&app, &path, w, h).map_err(std::io::Error::other)?;
         return Ok(());
     }
@@ -398,14 +435,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ctl.start_watch();
     ctl.open_market("BTCUSDT", "15m");
 
-    let ui_model = model.clone();
-    let ui_ctl = ctl.clone();
+    let inner = make_app(model.clone(), ctl.clone(), WINDOW.0, WINDOW.1);
     let app = Dashboard {
-        inner: MveApp::new(move |cx: &mut NodeContext| {
-            let (m, c) = (Rc::clone(&ui_model), Rc::clone(&ui_ctl));
-            // `dashboard` 是 ctx 组件：给它 model / ctl，它自己 provide 给整棵子树
-            cx.child(rsx! { dashboard { model: m, ctl: c } });
-        }),
+        inner,
         model,
         ctl,
         rx,
@@ -420,8 +452,103 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use market::Level;
+    use wy_mve::canvas_render2::protocol::{create_mouse_event2, MouseEventInit2, MouseType2};
+    // 拖拽的 move/up 走全局广播（与真实宿主 `Node2Deps::dispatch` 同一路径）。
+    use wy_mve::canvas_render2::renderer::{dispatch_global_mouse_move, dispatch_global_mouse_up};
+    use wy_mve::canvas_render2::tree::engine_global::probe_regions;
+    use wy_mve::canvas_render2::tree::geometry::clear_layout_memo;
+    use wy_mve::Node2;
 
-    /// 造一份合成行情，跑完整绘制路径（布局 + 组件 + 深度几何 + 文本测量）。
+    const VW: f32 = 1440.0;
+    const VH: f32 = 900.0;
+
+    // ========================================================================
+    // 建树 / 遍历 / 派发
+    // ========================================================================
+    //
+    // v1 那套 `layout_boxes` + `children_nodes` + `last_box` + `on_click_fn`
+    // 随 `ui/` 一起退役。这里换成 v2 的等价手段：
+    // `Node2::width()/height()/abs_x()/abs_y()`（pull 式实时几何）、
+    // `raw_children()`（不过滤 hide 的遍历）、`Node2::mouse_click()` 等
+    // （节点消息，不经命中链）。
+
+    /// 建整棵树并跑一帧（填布局 memo 与容器尺寸探针）。
+    fn build_at(w: f32, h: f32) -> (Rc<Model>, Node2) {
+        let model = synth_model();
+        let (feed, _rx) = Feed::new();
+        let ctl = Rc::new(Ctl::new(feed, Rc::clone(&model)));
+        let viewport = Rc::new(Cell::new((w, h)));
+        let vp = Rc::clone(&viewport);
+        let m = Rc::clone(&model);
+        let root = build_root_node2(root_arg(viewport), move |cx| {
+            cx.child(dashboard(m, ctl, vp));
+        });
+        frame(&root);
+        (model, root)
+    }
+
+    fn build() -> (Rc<Model>, Node2) {
+        build_at(VW, VH)
+    }
+
+    /// 跑一帧：失效布局 memo、重算动态区域、画一遍（同时填探针）。
+    fn frame(root: &Node2) {
+        clear_layout_memo();
+        probe_regions();
+        let mut scene = Scene::new();
+        root.render_node2(&mut scene);
+    }
+
+    /// 按 `debug_name` 找节点（用 `raw_children`，隐藏的浮层也能找到）。
+    fn by_name(node: &Node2, name: &str) -> Option<Node2> {
+        if node.debug_name().as_deref() == Some(name) {
+            return Some(node.clone());
+        }
+        node.raw_children()
+            .into_iter()
+            .find_map(|c| by_name(&c, name))
+    }
+
+    fn named(root: &Node2, name: &str) -> Node2 {
+        by_name(root, name).unwrap_or_else(|| panic!("未找到节点 {name}"))
+    }
+
+    /// 收集所有同名节点（文档序）。
+    fn all(root: &Node2, name: &str, out: &mut Vec<Node2>) {
+        if root.debug_name().as_deref() == Some(name) {
+            out.push(root.clone());
+        }
+        for c in root.raw_children() {
+            all(&c, name, out);
+        }
+    }
+
+    fn event(type_: MouseType2, gx: f32, gy: f32) -> wy_mve::canvas_render2::protocol::MouseEvent2 {
+        create_mouse_event2(MouseEventInit2 {
+            type_,
+            x: 0.0,
+            y: 0.0,
+            global_x: gx,
+            global_y: gy,
+            device: None,
+            pointer_id: None,
+            button: None,
+            buttons: None,
+            wheel_delta_x: None,
+            wheel_delta_y: None,
+            pressure: None,
+        })
+    }
+
+    fn click(node: &Node2) {
+        let (cx, cy) = (
+            node.abs_x() + node.width() / 2.0,
+            node.abs_y() + node.height() / 2.0,
+        );
+        node.mouse_click(&mut event(MouseType2::Click, cx, cy));
+    }
+
+    /// 造一份合成行情：ticker / K 线 / 20 档盘口 / 1000 档深盘口 / 自选。
     fn synth_model() -> Rc<Model> {
         let model = Rc::new(Model::new());
         model.ticker.set(Some(Ticker {
@@ -482,18 +609,16 @@ mod tests {
             time: 0,
         }));
         model.trades.set(
-            (0..20)
+            (0..40)
                 .map(|i| Trade {
-                    id: 100 + i,
-                    price: 67_000.0 + i as f64 * 0.5,
-                    qty: 0.01 * i as f64,
-                    time: 1_700_000_000_000,
-                    buyer_maker: i % 3 == 0,
+                    id: i,
+                    price: 67_000.0 + (i as f64).sin() * 12.0,
+                    qty: 0.05 + i as f64 * 0.01,
+                    time: 1_700_000_000_000 + i as i64 * 1_000,
+                    buyer_maker: i % 2 == 0,
                 })
                 .collect(),
         );
-        // 自选列：WATCH_SYMBOLS 全列各造一份（同一个 ticker 塞两遍既重复
-        // 又只有一行，定高行 + 滚动列表下会被放大成"列表只剩一行"）
         model.watch.set(
             WATCH_SYMBOLS
                 .iter()
@@ -516,28 +641,23 @@ mod tests {
         model
     }
 
-    fn build_app(model: Rc<Model>) -> MveApp {
-        let (feed, _rx) = Feed::new();
-        let ctl = Rc::new(Ctl::new(feed, model.clone()));
-        MveApp::new(move |cx: &mut NodeContext| {
-            let (m, c) = (model.clone(), ctl.clone());
-            cx.child(rsx! { dashboard { model: m, ctl: c } });
-        })
-    }
+    // ========================================================================
+    // 绘制链路
+    // ========================================================================
 
+    /// 整块看板能画完，不 panic、图元数够多。
     #[test]
     fn draws_full_dashboard_without_panicking() {
         let model = synth_model();
-        let app = build_app(model.clone());
+        let (feed, _rx) = Feed::new();
+        let ctl = Rc::new(Ctl::new(feed, Rc::clone(&model)));
+        let app = make_app(model, ctl, VW, VH);
         let mut scene = Scene::new();
-        app.draw(&mut scene, 1440.0, 900.0);
+        app.draw(&mut scene, VW, VH);
         assert!(scene.len() > 300, "场景图元太少：{}", scene.len());
     }
 
     /// **离线可跑**保证：默认数据源是内置合成源，不依赖任何网络/外部服务。
-    ///
-    /// 这条测试守的是「clone 下来就能跑」这条底线——之前默认源是
-    /// `localhost:8787` 的本机伪接口，别人 clone 下来打开是一片空白。
     #[test]
     fn default_source_is_offline_synthetic() {
         assert_eq!(Source::initial(), Source::Sim, "默认必须是离线合成源");
@@ -546,14 +666,10 @@ mod tests {
     }
 
     /// 合成源能产出**完整的一帧看板**（ticker / K 线 / 盘口 / 深盘口 / 成交齐全）。
-    ///
-    /// 这条链路等价于「打开 demo 的第一秒看到什么」：
-    /// 数据齐 → 写进信号 → 布局 → 绘制 → 图元数够多。
     #[test]
     fn synthetic_source_produces_a_complete_frame() {
         let now = 1_760_000_000_000i64;
 
-        // 数据侧：合成源造出四类数据
         let ticker = synth::ticker("BTCUSDT", now);
         assert!(ticker.last > 0.0, "合成 ticker 应有价格");
         let klines = synth::klines("BTCUSDT", synth::interval_ms("15m"), now, 120);
@@ -565,7 +681,6 @@ mod tests {
         let trades = synth::trades("BTCUSDT", now, 30);
         assert_eq!(trades.len(), 30);
 
-        // UI 侧：把它们写进模型，跑完整绘制路径
         let model = Rc::new(Model::new());
         model.ticker.set(Some(ticker));
         model.klines.set(klines);
@@ -575,9 +690,11 @@ mod tests {
         model.watch.set(vec![model.ticker.get().unwrap()]);
         model.status.set(Status::Live);
 
-        let app = build_app(model);
+        let (feed, _rx) = Feed::new();
+        let ctl = Rc::new(Ctl::new(feed, Rc::clone(&model)));
+        let app = make_app(model, ctl, VW, VH);
         let mut scene = Scene::new();
-        app.draw(&mut scene, 1440.0, 900.0);
+        app.draw(&mut scene, VW, VH);
         assert!(
             scene.len() > 300,
             "合成数据下的场景图元太少：{}",
@@ -594,519 +711,466 @@ mod tests {
         assert!(g.has_data, "合成深盘口应产生累计曲线");
         assert!(g.bid.max > 0.0, "买盘侧应有累计量");
         assert!(g.ask.max > 0.0, "卖盘侧应有累计量");
-        // 曲线必须单调不减（否则画出来的面积会自相矛盾）
         for pair in g.bid.totals.windows(2) {
-            assert!(pair[1] >= pair[0]);
+            assert!(pair[1] >= pair[0], "累计曲线必须单调不减");
         }
     }
 
-    /// 沿 `body → 中列 → 深度面板 → 标题栏` 取到动作区的一排按钮。
-    ///
-    /// 标题栏 = [标题, 徽标, −, 1x, +, FULL]，所以 `kids[3]` 是 `+`、
-    /// `kids[5]` 是 `FULL`。返回的同时带上中列的盒，派发点击要用绝对坐标。
-    fn depth_header(app: &MveApp) -> (Vec<wy_mve::Node>, wy_mve::LayoutBox) {
-        let (_, rows, avail) = body_row(app, 1440.0, 900.0);
-        let boxes = wy_mve::layout_boxes(&rows[0].clone(), avail, &rows);
-        // 中列 = [K 线面板, 横条, 深度面板]
-        let center = &rows[2];
-        let center_box = boxes[2];
-        let center_kids = wy_mve::children_nodes(center);
-        let depth = &center_kids[2];
-        // 深度面板 = [标题栏, 内容区]
-        let panel_kids = wy_mve::children_nodes(depth);
-        (wy_mve::children_nodes(&panel_kids[0]), center_box)
+    // ========================================================================
+    // 结构与几何
+    // ========================================================================
+
+    /// 画布根铺满视口（浮层的可视区靠它）。
+    #[test]
+    fn root_fills_the_viewport() {
+        let (_, root) = build();
+        let page = named(&root, "finance-root");
+        assert_eq!((page.width(), page.height()), (VW, VH), "根应铺满视口");
     }
 
-    /// 点「FULL」→ 整页切到"深度图独占"子树。
-    ///
-    /// `full` 是**装配层**持有的信号（`ui::mod` 用 `when` 切两棵子树），
-    /// 深度面板只读写它。这条测试盯的是那条链路：切完之后页面根下只剩
-    /// 深度面板，顶栏与三列都不在树里了。
-    ///
-    /// 顺带也是一个回归：FULL 子树是 ctx 组件的惰性 slot，一旦有人图省事
-    /// 写成 `.into_node()`，它会在**空白上下文**里执行、`consume` 取不到
-    /// model——这里会以 panic 的形式暴露出来。
+    /// 顶栏在上、三列在下：顶栏底边不越过任何一列的顶边。
     #[test]
-    fn full_toggle_swaps_the_whole_page() {
-        let model = synth_model();
-        let app = build_app(model.clone());
-        let mut scene = Scene::new();
-        app.draw(&mut scene, 1440.0, 900.0);
+    fn topbar_sits_above_the_three_columns() {
+        let (_, root) = build();
+        let bar = named(&root, "topbar");
+        assert!(bar.height() > 0.0, "顶栏应有高度");
+        let bar_bottom = bar.abs_y() + bar.height();
+        for tag in ["col-left", "col-center", "col-right"] {
+            let col = named(&root, tag);
+            assert!(col.height() > 0.0, "{tag} 高度应大于 0");
+            assert!(
+                col.abs_y() >= bar_bottom - 0.5,
+                "{tag} 应排在顶栏下方：{} < {bar_bottom}",
+                col.abs_y()
+            );
+        }
+    }
 
-        // 切换前：页面根下是「顶栏 + 三列」
-        let page = app.root().nodes()[0].clone();
-        let normal = wy_mve::children_nodes(&page);
-        assert_eq!(normal.len(), 1, "when 是透明节点：页面根下只有当前子树");
-        let normal_kids = wy_mve::children_nodes(&normal[0]);
-        assert_eq!(normal_kids.len(), 2, "正常看板 = [顶栏, body]");
-        assert_eq!(
-            wy_mve::children_nodes(&normal_kids[1]).len(),
-            5,
-            "body 是三列 + 两根分割条"
+    /// 三列横向依次排开、互不重叠，且横向铺满视口。
+    #[test]
+    fn three_columns_are_ordered_and_disjoint() {
+        let (_, root) = build();
+        let l = named(&root, "col-left");
+        let c = named(&root, "col-center");
+        let r = named(&root, "col-right");
+        assert!(l.abs_x() + l.width() <= c.abs_x() + 0.5, "左列与中列重叠");
+        assert!(c.abs_x() + c.width() <= r.abs_x() + 0.5, "中列与右列重叠");
+        assert!(
+            r.abs_x() + r.width() <= VW + 0.5,
+            "右列越出视口右边：{}",
+            r.abs_x() + r.width()
         );
+        assert!(c.width() > l.width(), "中列应比左列宽（grow 1）");
+    }
 
-        let (header_kids, center_box) = depth_header(&app);
-        let full_btn = &header_kids[5];
-        assert!(full_btn.on_click_fn.is_some(), "动作区第 6 个应是 FULL");
-        full_btn.run_on_click(&mut wy_mve::PointerEvent::new(
-            center_box.x + 4.0,
-            center_box.y + 4.0,
-        ));
+    /// 窗口变宽时三列**按同一比例**等比放大。
+    ///
+    /// 列宽不是像素常量，而是 `grow` 权重（占比）：flex 给 grow 子项分配的是
+    /// `remaining * 权重 / 权重和`，所以换窗口大小只缩放、不改比例。
+    #[test]
+    fn columns_scale_proportionally_with_window() {
+        let (_, narrow) = build_at(1200.0, 800.0);
+        let (_, wide) = build_at(1800.0, 900.0);
 
-        // 切换后：页面根下只有深度面板（[标题栏, 内容区]），内容区是叶子
-        let after = wy_mve::children_nodes(&page);
-        assert_eq!(after.len(), 1, "切到 FULL 后仍只有一棵子树");
-        let kids = wy_mve::children_nodes(&after[0]);
-        assert_eq!(kids.len(), 2, "深度面板 = [标题栏, 内容区]");
-        assert_eq!(
-            wy_mve::children_nodes(&kids[1]).len(),
-            1,
-            "内容区只剩绘图叶子，不再是三列"
+        // 三列拿到的可用宽度（行宽减去两根 6px 分割条）。
+        let cols = |root: &Node2| {
+            named(root, "col-left").width()
+                + named(root, "col-center").width()
+                + named(root, "col-right").width()
+        };
+        let frac = |root: &Node2, name: &str| named(root, name).width() / cols(root);
+
+        for name in ["col-left", "col-center", "col-right"] {
+            let (a, b) = (frac(&narrow, name), frac(&wide, name));
+            assert!((a - b).abs() < 0.01, "{name} 的宽度占比应恒定：{a} → {b}");
+        }
+
+        // 三列 + 两根分割条正好铺满行宽（无绝对宽度、也无留白）。
+        let body = 1200.0 - 16.0;
+        assert!(
+            (cols(&narrow) + 12.0 - body).abs() < 0.5,
+            "三列应铺满行宽：{} + 12 ≠ {body}",
+            cols(&narrow)
         );
     }
 
-    /// 缩放只改深度图几何，不动树结构。
-    ///
-    /// 驱动方式是**真点按钮**：沿 `body → 中列 → 深度面板 → 标题栏` 找到动作区
-    /// 第三个按钮（`+`）并派发点击。缩放倍率现在是深度面板的私有信号
-    /// （见 `ui::depth_view::DepthState`），不再有全局入口——这正是
-    /// 「非必要不提升」之后测试该有的样子：通过 UI 驱动，而不是去改一个
-    /// 集中的模型字段。
-    #[test]
-    fn zoom_changes_only_geometry() {
-        let model = synth_model();
-        let app = build_app(model.clone());
-        let mut scene = Scene::new();
-        app.draw(&mut scene, 1440.0, 900.0);
-        let before = scene.len();
-
-        let (header_kids, center_box) = depth_header(&app);
-        // 标题栏 = [标题, 徽标, −, 1x, +, FULL]
-        let plus = &header_kids[4];
-        assert!(plus.on_click_fn.is_some(), "动作区第 3 个应是缩放按钮");
-        plus.run_on_click(&mut wy_mve::PointerEvent::new(
-            center_box.x + 4.0,
-            center_box.y + 4.0,
-        ));
-
-        let mut scene2 = Scene::new();
-        app.draw(&mut scene2, 1440.0, 900.0);
-        // 树结构不变，只有深度图的桶宽/刻度位置变化，图元总数应基本一致
-        let delta = (before as i32 - scene2.len() as i32).abs();
-        assert!(delta <= 8, "缩放只应改变深度图形状，图元数差 {delta}");
+    /// 深度优先遍历（含隐藏节点与浮层）。
+    fn walk(n: &Node2, f: &mut impl FnMut(&Node2)) {
+        f(n);
+        for c in n.raw_children() {
+            walk(&c, f);
+        }
     }
 
-    /// 三列布局随窗口宽度重排：换尺寸仍应产出完整图元。
-    #[test]
-    fn columns_follow_window_width() {
-        let model = synth_model();
-        let app = build_app(model.clone());
-        let mut a = Scene::new();
-        app.draw(&mut a, 1200.0, 800.0);
-        let mut b = Scene::new();
-        app.draw(&mut b, 1800.0, 900.0);
-        assert!(!a.is_empty() && !b.is_empty(), "两种尺寸都应产出图元");
-    }
-
-    /// 一个可见组件在屏幕上的绝对盒（`getBoundingClientRect` 的等价物）。
-    #[derive(Clone, Copy, Debug)]
-    struct AbsBox {
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-        /// 有子节点的容器（面板 / 列 / 行），这类盒子绝不能塌。
-        container: bool,
-        /// 装配层打的语义锚点（`col-*` 等），测试按它认对象。
-        tag: Option<&'static str>,
-    }
-
-    /// 走一遍引擎的布局路径，把每个可见节点的绝对盒摊平。
-    ///
-    /// 与 `draw_node` 保持一致：容器子节点用 `layout_boxes` 定位，无布局的
-    /// group 子节点用自然尺寸；隐藏节点整枝跳过。
-    ///
-    /// **裁剪感知**：`clip` 容器（滚动容器视口）外的子树本来就被 Scene 的
-    /// 裁剪栈挡着，这里同样把盒与裁剪区求交——完全在外的丢弃、骑在边上
-    /// 的裁齐。否则"滚动内容比视口高"这种设计意图会被误报成溢出
-    /// （引擎的命中测试也走同一语义，见 `hit_test_node` 的 clip 拦截）。
-    fn collect_boxes(
-        node: &wy_mve::Node,
-        parent: (f32, f32),
-        avail: (f32, f32),
-        clip: Option<(f32, f32, f32, f32)>,
-        out: &mut Vec<AbsBox>,
-    ) {
-        if node.is_hidden() {
+    /// 只遍历**可见**子树：隐藏节点上不能再问几何（`width()` 会 panic）。
+    fn walk_visible(n: &Node2, f: &mut impl FnMut(&Node2)) {
+        if n.hide() {
             return;
         }
-        let abs = (parent.0 + node.pos_x(), parent.1 + node.pos_y());
-        let children = wy_mve::children_nodes(node);
-        let mut b = AbsBox {
-            x: abs.0,
-            y: abs.1,
-            width: avail.0,
-            height: avail.1,
-            container: !children.is_empty(),
-            tag: node.tag,
-        };
-        if let Some((cx, cy, cw, ch)) = clip {
-            // 与裁剪区求交：完全在外 → 这一枝不可见，整枝跳过
-            let x0 = b.x.max(cx);
-            let y0 = b.y.max(cy);
-            let x1 = (b.x + b.width).min(cx + cw);
-            let y1 = (b.y + b.height).min(cy + ch);
-            if x1 - x0 <= 0.0 || y1 - y0 <= 0.0 {
-                return;
-            }
-            b.x = x0;
-            b.y = y0;
-            b.width = x1 - x0;
-            b.height = y1 - y0;
-        }
-        out.push(b);
-        // 本节点是裁剪容器：子树限制在自身盒内
-        let clip = if node.clip {
-            Some((b.x, b.y, b.width, b.height))
-        } else {
-            clip
-        };
-        if node.layout.is_some() {
-            let boxes = wy_mve::layout_boxes(node, avail, &children);
-            for (child, b) in children.iter().zip(boxes.iter()) {
-                collect_boxes(
-                    child,
-                    (abs.0 + b.x, abs.1 + b.y),
-                    (b.width, b.height),
-                    clip,
-                    out,
-                );
-            }
-        } else {
-            for child in children.iter() {
-                let own = wy_mve::node_size(child);
-                collect_boxes(child, abs, own, clip, out);
-            }
+        f(n);
+        for c in n.raw_children() {
+            walk_visible(&c, f);
         }
     }
 
-    fn boxes_at(app: &MveApp, w: f32, h: f32) -> Vec<AbsBox> {
-        let mut scene = Scene::new();
-        app.draw(&mut scene, w, h);
-        let mut out = Vec::new();
-        for node in app.root().nodes() {
-            collect_boxes(&node, (0.0, 0.0), (w, h), None, &mut out);
-        }
-        out
+    /// 收集可见子树里的同名节点。
+    fn all_visible(root: &Node2, name: &str, out: &mut Vec<Node2>) {
+        walk_visible(root, &mut |n| {
+            if n.debug_name().as_deref() == Some(name) {
+                out.push(n.clone());
+            }
+        });
     }
 
-    /// 布局自检：所有容器都有正尺寸、都在视口内、兄弟盒不重叠。
+    /// `skip_draw` 在引擎里是「整棵子树一起跳过」（`render_node2` 里 `continue`
+    /// 在递归之前），所以**带子节点的节点绝不能声明它**——那批子节点会凭空消失。
     ///
-    /// 这条测试代替"肉眼看截图"——组件化之后位置全由 flex 决定，
-    /// 一旦某个面板忘了 `grow`/`Stretch`，它会以 0 宽（画不出也点不中）
-    /// 或者溢出的形式出现，这里直接兜住。
+    /// 踩过的坑：`panel` 的标题栏为了"自己不画"写了 `skip_draw: true`，结果面板
+    /// 标题、徽标、标题栏按钮全部不显示，而检查树的几何一切正常（节点在、尺寸在、
+    /// 也没 `hide`），只有出图时才看得出来。
     #[test]
-    fn layout_audit_keeps_panels_on_screen() {
+    fn no_node_with_children_skips_drawing() {
+        let (_, root) = build();
+        let mut bad: Vec<String> = Vec::new();
+        walk(&root, &mut |n| {
+            if n.skip_draw() && !n.raw_children().is_empty() {
+                bad.push(n.debug_name().unwrap_or_else(|| String::from("(无名)")));
+            }
+        });
+        assert!(
+            bad.is_empty(),
+            "这些节点有子节点却 skip_draw，子内容会被整棵跳过：{bad:?}"
+        );
+    }
+
+    /// 每个面板的标题都占到一个真盒子（宽高非 0、落在标题栏高度内）。
+    ///
+    /// 标题是文本子节点，靠外层 wrapper 的 `Row` 布局量尺寸；wrapper 一旦漏了
+    /// `layout`（默认绝对定位），高就是 0，标题会贴在标题栏最上沿而不是居中。
+    #[test]
+    fn panel_titles_have_a_box() {
+        let (_, root) = build();
+        let mut titles = Vec::new();
+        all(&root, "panel-title", &mut titles);
+        assert!(titles.len() >= 4, "至少四个面板应有标题：{}", titles.len());
+        for t in &titles {
+            assert!(t.width() > 0.0, "面板标题宽度应为正：{}", t.width());
+            assert!(t.height() > 0.0, "面板标题高度应为正：{}", t.height());
+        }
+    }
+
+    /// 列标题行（`col_header`）自身有尺寸：没有 `layout` 的外层会塌成 0×0，
+    /// 里面的列会全部叠到同一点。
+    #[test]
+    fn col_header_rows_have_size() {
+        let (_, root) = build();
+        let mut headers = Vec::new();
+        all(&root, "col-header", &mut headers);
+        assert!(
+            headers.len() >= 3,
+            "至少三个面板有列表头：{}",
+            headers.len()
+        );
+        for h in &headers {
+            assert!(h.width() > 50.0, "表头行宽度应撑满面板：{}", h.width());
+            assert!(h.height() > 0.0, "表头行高度应为正：{}", h.height());
+        }
+    }
+
+    /// 自选行是**双层**排版：两行文字各自有高、纵向不重叠。
+    ///
+    /// 两行都只写 `align_item: Center` 而不给 `height` 时，行高会走
+    /// `sizeFromParent` → 环闭合取 0，两行落在同一个 y 上、文字直接叠成重影。
+    #[test]
+    fn watch_row_lines_are_stacked() {
+        let (_, root) = build();
+        let mut rows = Vec::new();
+        all(&root, "watch-row", &mut rows);
+        assert!(!rows.is_empty());
+        for r in &rows {
+            let inner = r.raw_children().into_iter().next().expect("行有内层容器");
+            let lines = inner.raw_children();
+            assert_eq!(lines.len(), 2, "自选行上下两排");
+            for l in &lines {
+                assert!(l.height() > 0.0, "每一排都应有高度：{}", l.height());
+            }
+            assert!(
+                lines[1].abs_y() >= lines[0].abs_y() + lines[0].height() - 0.5,
+                "两排不能重叠：{} + {} > {}",
+                lines[0].abs_y(),
+                lines[0].height(),
+                lines[1].abs_y()
+            );
+        }
+    }
+
+    /// 顶栏里的 tab 横向依次排开、互不重叠（都要有真实宽度）。
+    ///
+    /// 漏了 `layout` 的包装容器会让组内 tab 全钉在 (0,0)，看起来像"按钮叠在
+    /// 价格文字上"。
+    #[test]
+    fn topbar_tabs_are_laid_out_in_a_row() {
+        let (_, root) = build();
+        let mut visible = Vec::new();
+        all_visible(&root, "tab", &mut visible);
+        assert!(
+            visible.len() >= 8,
+            "标的与周期 tab 共至少 8 个：{}",
+            visible.len()
+        );
+        for t in &visible {
+            assert!(t.width() > 0.0, "tab 宽度应为正");
+            assert!(t.height() > 0.0, "tab 高度应为正");
+        }
+        for pair in visible.windows(2) {
+            assert!(
+                pair[1].abs_x() >= pair[0].abs_x() + pair[0].width() - 0.5,
+                "相邻 tab 重叠：{} + {} > {}",
+                pair[0].abs_x(),
+                pair[0].width(),
+                pair[1].abs_x()
+            );
+        }
+    }
+
+    /// 布局自检：所有面板／列都在视口内，尺寸有限且为正。
+    ///
+    /// 组件化之后位置全由 flex 决定，一旦某块面板忘了 `grow` / `Stretch`，
+    /// 它会以 0 宽（画不出也点不中）或越界的形式出现，这里直接兜住。
+    #[test]
+    fn panels_stay_inside_the_viewport() {
         for (w, h) in [(1440.0, 900.0), (1100.0, 720.0), (1920.0, 1080.0)] {
-            let model = synth_model();
-            let app = build_app(model.clone());
-            let boxes = boxes_at(&app, w, h);
-            assert!(
-                boxes.len() > 30,
-                "{w}x{h} 只找到 {} 个可见节点",
-                boxes.len()
-            );
-
-            for b in &boxes {
+            let (_, root) = build_at(w, h);
+            let mut names = vec!["finance-root", "topbar"];
+            names.extend([
+                "col-left",
+                "col-center",
+                "col-right",
+                "panel-watchlist",
+                "panel-stats",
+                "panel-chart",
+                "panel-depth",
+                "panel-book",
+                "panel-trades",
+            ]);
+            for name in names {
+                let n = named(&root, name);
+                let (x, y, bw, bh) = (n.abs_x(), n.abs_y(), n.width(), n.height());
                 assert!(
-                    b.width.is_finite()
-                        && b.height.is_finite()
-                        && b.x.is_finite()
-                        && b.y.is_finite(),
-                    "{w}x{h} 出现非有限盒：{b:?}"
+                    x.is_finite() && y.is_finite() && bw.is_finite() && bh.is_finite(),
+                    "{w}x{h} {name} 出现非有限盒：({x}, {y}, {bw}, {bh})"
                 );
-                assert!(b.x >= -0.5 && b.y >= -0.5, "{w}x{h} 盒越出左上边界：{b:?}");
+                assert!(bw > 0.0 && bh > 0.0, "{w}x{h} {name} 尺寸塌了：{bw}x{bh}");
                 assert!(
-                    b.x + b.width <= w + 0.5 && b.y + b.height <= h + 0.5,
-                    "{w}x{h} 盒越出右下边界：{b:?}"
+                    x >= -0.5 && y >= -0.5,
+                    "{w}x{h} {name} 越出左上：({x}, {y})"
                 );
-                if b.container {
-                    assert!(
-                        b.width > 0.5 && b.height > 0.5,
-                        "{w}x{h} 容器塌了（忘了 grow / Stretch？）：{b:?}"
-                    );
-                }
+                assert!(
+                    x + bw <= w + 0.5 && y + bh <= h + 0.5,
+                    "{w}x{h} {name} 越出右下：({}, {})",
+                    x + bw,
+                    y + bh
+                );
             }
         }
     }
 
-    /// 三列顺序不乱：左列完全在中间列左边，中间列完全在右列左边。
+    // ========================================================================
+    // 交互
+    // ========================================================================
+
+    /// 拖过列宽之后，**行情刷新**不能把它打回默认。
     ///
-    /// 按 `tag` 认列（`ui::mod::stacked` 给三列打了 `col-*`）：几何特征
-    /// （"又高又不满屏"）在列表进了滚动容器之后不再唯一——裁剪后的滚动
-    /// 内容盒也符合这一特征，按特征挑会把面板里的内容盒误当成"列"。
-    /// tag 是装配层的语义锚点，列表内部怎么改都不影响这条断言。
+    /// 整块看板挂在 `if_node` → `render_when` 的分支里，分支闭包会重跑
+    /// （行情 tick 就是最常见的触发）。列宽/分格比这些拖拽信号若在闭包**内部**
+    /// 新建，重跑一次就换回初始值——用户看到的就是"怎么拖都没用"。
+    /// 它们必须与 `full` / `book_state` 一样造在 `dashboard`（只执行一次）。
     #[test]
-    fn columns_do_not_overlap() {
-        let model = synth_model();
-        let app = build_app(model.clone());
-        let (w, h) = (1440.0, 900.0);
-        let boxes = boxes_at(&app, w, h);
+    fn dragged_width_survives_a_data_refresh() {
+        let (model, root) = build();
+        let before = named(&root, "col-left").width();
 
-        let mut columns: Vec<AbsBox> = boxes
-            .iter()
-            .filter(|b| matches!(b.tag, Some("col-left" | "col-center" | "col-right")))
-            .copied()
-            .collect();
-        assert_eq!(columns.len(), 3, "应能按 tag 认出三列：{columns:?}");
-        columns.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap());
-        for pair in columns.windows(2) {
-            let (left, right) = (pair[0], pair[1]);
-            assert!(
-                left.x + left.width <= right.x + 0.5,
-                "列重叠：{:?} 与 {:?}",
-                left,
-                right
-            );
-        }
+        let gutter = named(&root, "gutter-x");
+        let (gx, gy) = (
+            gutter.abs_x() + gutter.width() / 2.0,
+            gutter.abs_y() + gutter.height() / 2.0,
+        );
+        gutter.mouse_down(&mut event(MouseType2::Down, gx, gy));
+        dispatch_global_mouse_move(gx + 60.0, gy);
+        dispatch_global_mouse_up();
+        frame(&root);
+
+        let dragged = named(&root, "col-left").width();
+        assert!(
+            (dragged - before - 60.0).abs() < 1.5,
+            "拖动应生效：{before} → {dragged}"
+        );
+
+        // 行情 tick：构建期读到的 `ticker` 变了 → `render_when` 分支重跑
+        let mut t = model.ticker.get().expect("应有 ticker");
+        t.last += 1.0;
+        model.ticker.set(Some(t));
+        frame(&root);
+
+        let after = named(&root, "col-left").width();
+        assert!(
+            (after - dragged).abs() < 0.5,
+            "数据刷新不该复位列宽：{dragged} → {after}"
+        );
     }
 
-    /// 取页面根下的 body 行（顶栏下面那一行）及其布局结果。
-    ///
-    /// 树是 `app 根(1 个孩子) → dashboard → [顶栏, body] → [左列, 竖条, 中列, 竖条, 右列]`。
-    /// 注意 `when` 是**透明节点**：它挂上去的孩子会直接出现在父容器的子节点里，
-    /// 所以 dashboard 的孩子看起来就是 `[顶栏, body]`，中间没有额外一层。
-    /// 测试要直接拿到 `body` 的子节点，才能对分割条派发拖拽。
-    fn body_row(app: &MveApp, w: f32, h: f32) -> (wy_mve::Node, Vec<wy_mve::Node>, (f32, f32)) {
-        let nodes = app.root().nodes();
-        let page = wy_mve::children_nodes(&nodes[0]);
-        let page = page[0].clone();
-        let page_children = wy_mve::children_nodes(&page);
-        let page_boxes = wy_mve::layout_boxes(&page, (w, h), &page_children);
-        let body = page_children.last().unwrap().clone();
-        let b = *page_boxes.last().unwrap();
-        let rows = wy_mve::children_nodes(&body);
-        (body, rows, (b.width, b.height))
-    }
-
-    /// 拖左边的竖向分割条 → 左列真的变宽（信号 → `grow_fn` → 重排 全链路）。
-    ///
-    /// 这条测试盯的是"拖动看起来没反应"：分割条只有 6px，如果它的盒是 0、
-    /// 或者 `SizeProbe` 没被绘制期写入，拖动就会被夹到最小值而看不出变化。
+    /// 拖列间分割条：左列宽跟着指针位移变，且不改树结构。
     #[test]
     fn dragging_column_gutter_resizes_columns() {
-        const W: f32 = 1440.0;
-        const H: f32 = 900.0;
-        let model = synth_model();
-        let app = build_app(model.clone());
-        // 先绘制一遍：容器探针（SizeProbe）是在 draw 期写入的
-        let _ = boxes_at(&app, W, H);
+        let (_, root) = build();
+        let before = named(&root, "col-left").width();
 
-        let (body, kids, avail) = body_row(&app, W, H);
-        let boxes = wy_mve::layout_boxes(&body, avail, &kids);
+        // 文档序第一根竖条 = 左列与中列之间那根
+        let gutter = named(&root, "gutter-x");
+        let gx = gutter.abs_x() + gutter.width() / 2.0;
+        let gy = gutter.abs_y() + gutter.height() / 2.0;
 
-        // 左列右边那根 6px 的分割条
-        let (gi, gbox) = kids
-            .iter()
-            .zip(boxes.iter())
-            .enumerate()
-            .find(|(_, (n, b))| b.width <= 8.0 && b.height > 200.0 && n.on_down_fn.is_some())
-            .map(|(i, (_, b))| (i, *b))
-            .expect("应能找到竖向分割条");
-        let left_w = boxes[gi - 1].width;
-        assert!(left_w > 100.0, "左列初始宽度异常：{left_w}");
+        // 起手在节点上（命中链派发 down），随后的 move/up 走**全局**广播——
+        // 与真实宿主一致（`Node2Deps::dispatch` 里广播，对标 TS `Renderer.ts`）。
+        gutter.mouse_down(&mut event(MouseType2::Down, gx, gy));
+        dispatch_global_mouse_move(gx + 60.0, gy);
+        dispatch_global_mouse_up();
+        frame(&root);
 
-        let gutter = &kids[gi];
-        let x = gbox.x + gbox.width / 2.0;
-        let y = gbox.y + gbox.height / 2.0;
-        gutter.run_on_down(&mut wy_mve::PointerEvent::new(x, y));
-        gutter.run_on_move(&mut wy_mve::PointerEvent::new(x + 60.0, y));
-        gutter.run_on_up(&mut wy_mve::PointerEvent::new(x + 60.0, y));
-
-        let after = wy_mve::layout_boxes(&body, avail, &kids);
-        let new_left = after[gi - 1].width;
+        let after = named(&root, "col-left").width();
         assert!(
-            (new_left - (left_w + 60.0)).abs() < 1.0,
-            "拖 60px 后左列应为 {}，实际 {new_left}",
-            left_w + 60.0
+            (after - before - 60.0).abs() < 1.5,
+            "左列应宽出 60px：{before} → {after}"
         );
-        assert!(
-            after[gi + 1].width < boxes[gi + 1].width - 59.0,
-            "中间列应让出 60px"
-        );
+        // 结构不变：三列仍在
+        assert!(by_name(&root, "col-center").is_some(), "拖动不该改树结构");
     }
 
-    /// 列表行高固定、且整体在滚动容器里（对齐参考实现；行高不再随
-    /// 面板 `grow` 均分——均分会把矮面板的行压扁、高面板的行拉伸出
-    /// 夸张行距）。
-    ///
-    /// 行按 `tag` 认（`list_row` 的语义标签），不按几何特征或索引——
-    /// ctx 组件挂的孩子数不定（book 挂 2 个：面板 + 设置菜单，索引法会错位）。
-    /// 行高直接求 `height_fn`（`rsx!` 的 `height:` 生成的就是它）。
-    /// 顺带钉死：自选列出 `WATCH_SYMBOLS` 全部标的（合成数据曾把同一个
-    /// ticker 塞两遍，定高行下这个瑕疵会被放大成"列表只剩一行"）。
-    #[test]
-    fn list_rows_are_fixed_height_inside_scroll() {
-        let model = synth_model();
-        let app = build_app(model.clone());
-        let _ = boxes_at(&app, 1440.0, 900.0);
-
-        let page = app.root().nodes()[0].clone();
-
-        // 三个列表都在滚动容器里：watchlist / stats 各 1 个，book 两侧 2 个，
-        // trades 1 个——clip 视口共 5 个
-        let clips = count_clip(&page);
-        assert_eq!(clips, 5, "应有 5 个滚动视口（watch/stats/book×2/trades）");
-
-        let watch_rows = find_all_by_tag(&page, "watch-row");
-        assert_eq!(
-            watch_rows.len(),
-            WATCH_SYMBOLS.len(),
-            "自选应列出全部标的（合成数据按 WATCH_SYMBOLS 生成）"
-        );
-        for r in &watch_rows {
-            assert_row_height(r, ui::watchlist::ROW_H, "自选");
-        }
-
-        let book_rows = find_all_by_tag(&page, "book-row");
-        assert_eq!(book_rows.len(), ui::book::ROWS * 2, "盘口两侧各 ROWS 档");
-        for r in &book_rows {
-            assert_row_height(r, ui::book::ROW_H, "盘口");
-        }
-
-        let trade_rows = find_all_by_tag(&page, "trade-row");
-        assert!(!trade_rows.is_empty(), "成交应有行");
-        for r in &trade_rows {
-            assert_row_height(r, ui::trades::ROW_H, "成交");
-        }
-    }
-
-    /// 行高直接求 `height_fn`（`rsx!` 的 `height:` 生成的是布局期闭包，
-    /// 字段 `node.height` 仍是 0，读它什么都断言不到）。
-    fn assert_row_height(row: &wy_mve::Node, want: f32, what: &str) {
-        let h = row
-            .height_fn
-            .as_ref()
-            .unwrap_or_else(|| panic!("{what}行应有 height_fn（定高行）"))();
-        assert_eq!(h, want, "{what}行应定高 {want}");
-    }
-
-    /// 数子树里的 clip 视口数（滚动容器）。
-    fn count_clip(node: &wy_mve::Node) -> usize {
-        let kids = wy_mve::children_nodes(node);
-        node.clip as usize + kids.iter().map(count_clip).sum::<usize>()
-    }
-
-    /// 收集子树里所有带某 tag 的节点。
-    fn find_all_by_tag(node: &wy_mve::Node, tag: &'static str) -> Vec<wy_mve::Node> {
-        let mut out = Vec::new();
-        if node.tag == Some(tag) {
-            out.push(node.clone());
-        }
-        for c in wy_mve::children_nodes(node) {
-            out.extend(find_all_by_tag(&c, tag));
-        }
-        out
-    }
-
-    /// 按 tag 在树里找节点（测试的语义锚点，见 `ui::mod::stacked`）。
-    fn find_by_tag(node: &wy_mve::Node, tag: &'static str) -> Option<wy_mve::Node> {
-        if node.tag == Some(tag) {
-            return Some(node.clone());
-        }
-        wy_mve::children_nodes(node)
-            .iter()
-            .find_map(|c| find_by_tag(c, tag))
-    }
-
-    /// 拖行分割条 → 上下比例真的变（比例模式走 `probe` 的高度）。
+    /// 拖行间分割条：上下两块按比例分高，比例是**信号**而不是像素。
     #[test]
     fn dragging_row_gutter_changes_split() {
-        const W: f32 = 1440.0;
-        const H: f32 = 900.0;
-        let model = synth_model();
-        let app = build_app(model.clone());
-        let _ = boxes_at(&app, W, H);
+        let (_, root) = build();
+        let col = named(&root, "col-center");
+        let top_before = named(&root, "panel-chart").height();
 
-        let (body, rows, avail) = body_row(&app, W, H);
-        let boxes = wy_mve::layout_boxes(&body, avail, &rows);
-        let col = &rows[0];
-        let col_box = boxes[0];
-        let col_kids = wy_mve::children_nodes(col);
-        let col_boxes = wy_mve::layout_boxes(col, (col_box.width, col_box.height), &col_kids);
+        // 中列里的竖条：文档序里第一根
+        let gutter = by_name(&col, "gutter-y").expect("中列应有行间分割条");
+        let gx = gutter.abs_x() + gutter.width() / 2.0;
+        let gy = gutter.abs_y() + gutter.height() / 2.0;
+        let dim = col.height().max(1.0);
 
-        let (gi, gbox) = col_kids
-            .iter()
-            .zip(col_boxes.iter())
-            .enumerate()
-            .find(|(_, (n, b))| b.height <= 8.0 && b.width > 100.0 && n.on_down_fn.is_some())
-            .map(|(i, (_, b))| (i, *b))
-            .expect("应能找到横向分割条");
-        let top_h = col_boxes[gi - 1].height;
+        gutter.mouse_down(&mut event(MouseType2::Down, gx, gy));
+        dispatch_global_mouse_move(gx, gy + dim * 0.1);
+        dispatch_global_mouse_up();
+        frame(&root);
 
-        let gutter = &col_kids[gi];
-        let x = gbox.x + gbox.width / 2.0;
-        let y = gbox.y + gbox.height / 2.0;
-        eprintln!("DBG col_box={:?} gbox={:?} top_h={}", col_box, gbox, top_h);
-        gutter.run_on_down(&mut wy_mve::PointerEvent::new(x, y));
-        gutter.run_on_move(&mut wy_mve::PointerEvent::new(x, y - 40.0));
-        eprintln!("DBG after move, kids={}", col_kids.len());
-        gutter.run_on_up(&mut wy_mve::PointerEvent::new(x, y - 40.0));
-
-        let after = wy_mve::layout_boxes(col, (col_box.width, col_box.height), &col_kids);
-        let new_top = after[gi - 1].height;
+        let top_after = named(&root, "panel-chart").height();
         assert!(
-            (new_top - (top_h - 40.0)).abs() < 2.0,
-            "上移 40px 后上方面板应为 {}，实际 {new_top}",
-            top_h - 40.0
+            top_after > top_before + dim * 0.05,
+            "上格应吃掉约 10% 高度：{top_before} → {top_after}（列高 {dim}）"
         );
     }
 
-    /// 临时：把可见节点的盒按树打出来
-    /// （`cargo test --example finance -- --ignored dump_boxes --nocapture`）。
+    /// 点「FULL」→ 整页切到"深度图独占"子树：盘口 / 自选等面板都不在树里了。
     #[test]
-    #[ignore]
-    fn dump_boxes() {
-        fn go(n: &wy_mve::Node, parent: (f32, f32), avail: (f32, f32), depth: usize) {
-            if n.is_hidden() {
-                return;
-            }
-            let abs = (parent.0 + n.pos_x(), parent.1 + n.pos_y());
-            println!(
-                "{:indent$}x={:7.1} y={:7.1} w={:7.1} h={:6.1} grow={:4.1} layout={}",
-                "",
-                abs.0,
-                abs.1,
-                avail.0,
-                avail.1,
-                n.effective_grow(),
-                if n.layout.is_some() { "Y" } else { "-" },
-                indent = depth * 2
+    fn full_toggle_swaps_the_whole_page() {
+        let (_, root) = build();
+        assert!(by_name(&root, "panel-book").is_some(), "初始应有盘口面板");
+
+        click(&named(&root, "depth-full"));
+        frame(&root);
+
+        assert!(
+            by_name(&root, "panel-book").is_none(),
+            "切到 FULL 后盘口面板应整枝消失"
+        );
+        assert!(
+            by_name(&root, "panel-watchlist").is_none(),
+            "切到 FULL 后自选面板应整枝消失"
+        );
+        let depth = named(&root, "panel-depth");
+        assert!(
+            depth.height() > VH * 0.8,
+            "FULL 下深度面板应占满视口：{}",
+            depth.height()
+        );
+    }
+
+    /// 盘口设置菜单：点三点按钮 → 浮层在按钮下方展开（挂画布根下）。
+    #[test]
+    fn book_menu_opens_below_its_button() {
+        let (_, root) = build();
+        let btn = named(&root, "book-menu");
+        let (bx, by) = (btn.abs_x(), btn.abs_y());
+
+        // 事件里的 `global - local` 就是按钮原点（真实运行时同理）
+        btn.mouse_click(&mut event(MouseType2::Click, bx, by));
+        frame(&root);
+
+        let panel = named(&root, "dropdown-panel");
+        assert!(!panel.hide(), "点完三点按钮，菜单应展开");
+        assert_eq!(panel.width(), 120.0, "面板宽度由参数给定");
+        assert!(
+            panel.abs_y() >= by + 20.0,
+            "菜单应在按钮下方：按钮 y={by}，菜单 y={}",
+            panel.abs_y()
+        );
+        assert!(
+            panel.abs_y() + panel.height() <= VH + 0.5,
+            "菜单不该越出窗口底部"
+        );
+        assert!(
+            (panel.abs_x() + panel.width() - (bx + 20.0)).abs() < 1.0,
+            "右对齐：菜单右缘应贴住按钮右缘"
+        );
+    }
+
+    /// 盘口每档都是定高行，两侧各 `ROWS` 档。
+    #[test]
+    fn book_rows_are_fixed_height() {
+        let (_, root) = build();
+        let mut rows = Vec::new();
+        all(&root, "book-row", &mut rows);
+        assert_eq!(
+            rows.len(),
+            ui2::book::ROWS * 2,
+            "盘口两侧各 {} 档",
+            ui2::book::ROWS
+        );
+        for r in &rows {
+            assert!(
+                (r.height() - ui2::book::ROW_H).abs() < 0.5,
+                "盘口行必须定高 {}：实际 {}",
+                ui2::book::ROW_H,
+                r.height()
             );
-            let children = wy_mve::children_nodes(n);
-            if n.layout.is_some() {
-                let boxes = wy_mve::layout_boxes(n, avail, &children);
-                for (c, b) in children.iter().zip(boxes.iter()) {
-                    go(
-                        c,
-                        (abs.0 + b.x, abs.1 + b.y),
-                        (b.width, b.height),
-                        depth + 1,
-                    );
-                }
-            } else {
-                for c in children.iter() {
-                    let own = wy_mve::node_size(c);
-                    go(c, abs, own, depth + 1);
-                }
-            }
         }
-        let model = synth_model();
-        let app = build_app(model.clone());
-        let mut scene = Scene::new();
-        app.draw(&mut scene, 1440.0, 900.0);
-        for node in app.root().nodes() {
-            go(&node, (0.0, 0.0), (1440.0, 900.0), 0);
-        }
+    }
+
+    /// 点某一档 → 中间价行出现 LIMIT 标记（点价只在面板内，不写回 Model）。
+    #[test]
+    fn clicking_a_book_row_sets_the_limit_marker() {
+        let (_, root) = build();
+        let mut rows = Vec::new();
+        all(&root, "book-row", &mut rows);
+        assert!(!rows.is_empty());
+
+        click(&rows[0]);
+        frame(&root);
+
+        // 点价标记是中间价行里唯一带 ACCENT 的文本节点，用几何认它：
+        // 中间价行三段等宽，标记落在正中那一格里。
+        let mid = named(&root, "book-mid");
+        let marker = mid
+            .raw_children()
+            .into_iter()
+            .nth(1)
+            .expect("中间价行有三段");
+        let texts = marker.raw_children();
+        assert!(!texts.is_empty(), "中段应挂着标记文本");
+        assert!(
+            texts.iter().any(|t| !t.hide()),
+            "点过一档之后，中段应至少有一行可见文字"
+        );
     }
 }

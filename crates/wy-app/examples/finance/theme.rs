@@ -3,39 +3,44 @@
 //! 配色与面板外框是本示例的视觉基座：8px 圆角面板、35px 标题栏、
 //! 1px 边框、斑马纹行。所有面板共用，改这里即全局换肤。
 //!
-//! 本文件只提供**绘制原语**：颜色常量、文本对齐、面板外框。
-//! 位置与尺寸一律由调用方从 `current_box()` 拿到，不在这里读窗口。
+//! 本文件只提供**绘制原语**：颜色常量、文本对齐、面板外框与图形条。
+//! 位置与尺寸一律由调用方的节点传入（v2 里就是 `Node2::width()` / `height()`），
+//! 不在这里读窗口。
+//!
+//! 关于 `text` / `text_right` / `text_center`：它们只留给**图表内部**那些
+//! 跟着数据每帧重算的标签（K 线坐标轴、十字光标读数、深度图刻度）；
+//! 列表与面板里的文字一律是文本子节点（`text_label!` / `wrapped_text_node!`）。
 
 use wy_render::text_measure::measure_text;
 use wy_render::{Color, Point, Rect, Scene};
 
-/// 应用底色。
-pub const BG: Color = Color::from_u32(0x0A0E14FF);
-/// 顶栏底色。
-pub const HEADER: Color = Color::from_u32(0x0D121BFF);
-/// 面板底色。
-pub const PANEL: Color = Color::from_u32(0x11161FFF);
+/// 应用底色（对齐 ooc `#070a0e`）。
+pub const BG: Color = Color::from_u32(0x070A0EFF);
+/// 顶栏底色（对齐 ooc `#0b0f14`）。
+pub const HEADER: Color = Color::from_u32(0x0B0F14FF);
+/// 面板底色（对齐 ooc `#0d1218`）。
+pub const PANEL: Color = Color::from_u32(0x0D1218FF);
 /// 隔行 / 斑马纹底色。
-pub const ROW_ALT: Color = Color::from_u32(0x151B26FF);
+pub const ROW_ALT: Color = Color::from_u32(0x121823FF);
 /// 选中 / 悬停行底色。
-pub const ROW_ACTIVE: Color = Color::from_u32(0x1B2531FF);
-/// 边框。
-pub const BORDER: Color = Color::from_u32(0x232B3AFF);
-/// 主文本。
+pub const ROW_ACTIVE: Color = Color::from_u32(0x18212FFF);
+/// 边框（对齐 ooc `border-white/8`，克制的细线）。
+pub const BORDER: Color = Color::from_u32(0x1B2029FF);
+/// 主文本（对齐 ooc `text-zinc-100`）。
 pub const TEXT: Color = Color::from_u32(0xE6EDF3FF);
-/// 次要文本。
+/// 次要文本（对齐 ooc `text-zinc-400`）。
 pub const MUTED: Color = Color::from_u32(0x9AA4B2FF);
-/// 更弱的刻度/说明。
+/// 更弱的刻度/说明（对齐 ooc `text-zinc-600`）。
 pub const FAINT: Color = Color::from_u32(0x5A6472FF);
-/// 网格线。
-pub const GRID: Color = Color::from_u32(0x1A2130FF);
+/// 网格线（对齐 ooc `border-white/[0.03]`）。
+pub const GRID: Color = Color::from_u32(0x141922FF);
 /// 分割条抓手（常驻可见，比 BORDER 亮一档才看得见"这里能拖"）。
 pub const HANDLE: Color = Color::from_u32(0x4A5568FF);
 
-/// 上涨。加密行情终端惯例（绿涨红跌），与 ooc 版一致。
-pub const UP: Color = Color::from_u32(0x3FB950FF);
-/// 下跌。
-pub const DOWN: Color = Color::from_u32(0xF85149FF);
+/// 上涨（对齐 ooc `emerald-400` `#34D399`）。加密行情终端惯例（绿涨红跌）。
+pub const UP: Color = Color::from_u32(0x34D399FF);
+/// 下跌（对齐 ooc `rose-400` `#FB7185`）。
+pub const DOWN: Color = Color::from_u32(0xFB7185FF);
 
 // 面积/柱子的填充色：底色很暗（#0B0E14 一类），所以这里用**低透明度**的
 // 涨跌色叠加即可；透明度取得小，避免半透明在 Vello 线性空间混合后整体偏亮。
@@ -44,33 +49,34 @@ pub const DOWN: Color = Color::from_u32(0xF85149FF);
 // 写反的话颜色会整个变成另一个色相——买盘蓝、卖盘绿这类错误最难自查，
 // 因为"有颜色"这件事本身是对的，只有色相不对。
 /// 上涨面积填充（深度图买盘侧）——绿，低透明度。
-pub const UP_AREA: Color = Color::from_u32(0x10B9812A);
+pub const UP_AREA: Color = Color::from_u32(0x34D3992A);
 /// 下跌面积填充（深度图卖盘侧）——红，低透明度。
-pub const DOWN_AREA: Color = Color::from_u32(0xF43F5E26);
+pub const DOWN_AREA: Color = Color::from_u32(0xFB718526);
 /// 上涨面积的上边缘（1px 描边）。
-pub const UP_EDGE: Color = Color::from_u32(0x3FB950FF);
+pub const UP_EDGE: Color = Color::from_u32(0x34D399FF);
 /// 下跌面积的上边缘。
-pub const DOWN_EDGE: Color = Color::from_u32(0xF85149FF);
+pub const DOWN_EDGE: Color = Color::from_u32(0xFB7185FF);
 /// 上涨半透明（成交量柱 / 盘口挂单量条）。
-pub const UP_SOFT: Color = Color::from_u32(0x1D3B2AFF);
+pub const UP_SOFT: Color = Color::from_u32(0x163B2EFF);
 /// 下跌半透明。
-pub const DOWN_SOFT: Color = Color::from_u32(0x3B2228FF);
+pub const DOWN_SOFT: Color = Color::from_u32(0x3A2630FF);
 
-/// 强调色（最新价线、中间价线、选中态）。
-pub const ACCENT: Color = Color::from_u32(0x58A6FFFF);
+/// 强调色（对齐 ooc 单色系 emerald-400 `#34D399`）：品牌方块、最新价线、点价、
+/// 十字光标、选中态。
+pub const ACCENT: Color = Color::from_u32(0x34D399FF);
 /// 强调色（半透明，虚线/拖动高亮）。
-pub const ACCENT_DIM: Color = Color::from_u32(0x58A6FF66);
-/// 强调色（更淡，选中底）。
-pub const ACCENT_SOFT: Color = Color::from_u32(0x58A6FF33);
+pub const ACCENT_DIM: Color = Color::from_u32(0x34D39966);
+/// 强调色（更淡，选中底 / 激活 tab，对齐 ooc `bg-emerald-400/10`）。
+pub const ACCENT_SOFT: Color = Color::from_u32(0x34D3991A);
 /// 强调色的上半部高光（品牌色块用，制造一点纵向层次）。
-pub const ACCENT_HI: Color = Color::from_u32(0x7CBBFFFF);
+pub const ACCENT_HI: Color = Color::from_u32(0x6EE7B7FF);
 /// 强调色块的内描边。
 pub const ACCENT_EDGE: Color = Color::from_u32(0x0A0E14AA);
 
-/// 面板圆角。
-pub const RADIUS: f32 = 8.0;
-/// 面板标题栏高度（与 panes 一致）。
-pub const HEADER_H: f32 = 35.0;
+/// 面板圆角（对齐 ooc `rounded-md` = 6px）。
+pub const RADIUS: f32 = 6.0;
+/// 面板标题栏高度（对齐 ooc `h-9` = 36px）。
+pub const HEADER_H: f32 = 36.0;
 /// 面板内边距。
 pub const PAD: f32 = 12.0;
 
@@ -144,28 +150,6 @@ pub fn panel_bg(scene: &mut Scene, w: f32, h: f32) {
     );
 }
 
-/// 表头行：列标题（FAINT、9.5 号），底部一条分隔线。
-///
-/// 列位置由调用方给「右边界比例」：`0.0` 表示左对齐在 `PAD` 处。
-pub fn header_row(scene: &mut Scene, w: f32, h: f32, cells: &[(&str, f32)]) {
-    for (label, right) in cells {
-        if *right <= 0.0 {
-            text(scene, PAD, (h - 10.0) / 2.0, label, 9.5, FAINT);
-        } else {
-            let edge = PAD + (w - 2.0 * PAD) * right;
-            text_right(
-                scene,
-                edge.min(w - PAD),
-                (h - 10.0) / 2.0,
-                label,
-                9.5,
-                FAINT,
-            );
-        }
-    }
-    scene.fill_rect(Rect::new(1.0, h - 1.0, (w - 2.0).max(0.0), 1.0), BORDER);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,8 +194,8 @@ mod tests {
     /// 涨绿跌红（加密行情终端惯例），且边缘线是**不透明**的。
     #[test]
     fn up_is_green_and_down_is_red() {
-        assert_eq!(UP, Color::from_u32(0x3FB950FF));
-        assert_eq!(DOWN, Color::from_u32(0xF85149FF));
+        assert_eq!(UP, Color::from_u32(0x34D399FF));
+        assert_eq!(DOWN, Color::from_u32(0xFB7185FF));
         assert_eq!(UP_EDGE.alpha(), 255, "边缘线应不透明");
         assert_eq!(DOWN_EDGE.alpha(), 255, "边缘线应不透明");
     }

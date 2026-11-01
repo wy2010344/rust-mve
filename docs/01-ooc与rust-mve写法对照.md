@@ -3,7 +3,7 @@
 对照对象：
 
 - ooc 版：`C:\github\ooc\packages\example\src\ooc\pages\finance-dashboard.ooc`（402 行，拆成 `dashboard/*.ooc`）
-- Rust 版：`crates/wy-app/examples/finance/`（`main.rs` + `ui/*.rs`，约 6500 行，含行情接入、图表/盘口几何算法与 38 条测试）
+- Rust 版：`crates/wy-app/examples/finance/`（`main.rs` + `ui2/*.rs`，约 6000 行，含行情接入、图表/盘口几何算法与 20+ 条测试）
 
 两边都是「树只建一次、信号驱动重绘」的 MVE。本文记录**写法层面**能不能对上、差在哪、差距是框架的还是语言的。
 

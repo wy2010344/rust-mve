@@ -141,12 +141,16 @@ impl TextSpan {
 }
 
 /// 软行度量。
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct LineMetric {
-    /// 该行在原始文本中的起始字符索引（含）。
+    /// 该行在原始文本中的起始字符索引（含），**字节偏移**。
     pub start_index: usize,
-    /// 该行在原始文本中的结束字符索引（不含）。
+    /// 该行在原始文本中的结束字符索引（不含），**字节偏移**。
     pub end_index: usize,
+    /// 行盒上边界（相对段落顶部，内容坐标）。
+    pub top: f32,
+    /// 行盒下边界（相对段落顶部，内容坐标）。
+    pub bottom: f32,
 }
 
 /// 文本矩形区域边界样式（对应 Kotlin `RectStyle`）。
@@ -255,6 +259,8 @@ mod tests {
         let m = LineMetric {
             start_index: 0,
             end_index: 5,
+            top: 0.0,
+            bottom: 20.0,
         };
         assert_eq!(m.start_index, 0);
         assert_eq!(m.end_index, 5);

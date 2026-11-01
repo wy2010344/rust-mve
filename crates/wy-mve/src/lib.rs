@@ -1,84 +1,93 @@
-//! MVE（Model-View-Engine）框架：信号驱动的 UI 树构建。
+//! MVE（Model-View-Engine）框架：信号驱动的声明式 UI 树。
 //!
-//! 复刻 Kotlin wy-helper 的 MVE 模式（构建一次 + memo 动态区域 + per-item 信号驱动重绘）。
+//! **只有一套写法**：`canvasRender2`（对标 TS `canvasRender2`）。入口是
+//! [`Node2App`](../../wy_engine/node2_app/struct.Node2App.html) +
+//! [`build_root_node2`] + [`node2!`] + [`macro@rec`] + [`Fc`]。
 //!
-//! 核心类型：
-//! - [`Node`] — UI 元素的具象类型（声明式构造，用闭包代替继承）
-//! - [`ChildSlot`] — 静态节点或动态区域
-//! - [`Layout`] — 一维容器排布（Row / Column）
-//! - [`NodeContext`] — `arg_children()` 的执行上下文
-//! - [`Root`] — 由 [`render_root`] 返回的根 memo 产物
+//! ```ignore
+//! use wy_mve::canvas_render2::build_root_node2;
+//! use wy_mve::canvas_render2::node2::grow;
+//! use wy_mve::{node2, rec, text_label, Fc, AlignItem};
 //!
-//! 组件函数（声明式 UI 组合）：
-//! - [`components::text`] / [`components::text_signal`] — 文本
-//! - [`components::button`] — 按钮
-//! - [`components::row`] / [`components::column`] — 布局容器
-//! - [`text_field`] / [`text_field_opts`] — 单行文本输入
+//! fn page() -> Fc {
+//!     node2! {
+//!         layout: flex! { direction: Layout::Column, align_item: AlignItem::Stretch, align_fix: true },
+//!         exts: vec![grow(1.0)],
+//!         children: vec![ text_label! { content: "Hello".to_string() } ],
+//!     }
+//! }
+//! ```
 //!
-//! FC 风格 DSL（子节点作剩余参数，取代嵌套闭包与 `cx` 样板）：
-//! - [`vbox`] / [`hbox`] — 竖排 / 横排容器
-//! - [`group`] / [`focusable`] / [`focus_trap`] — 分组与焦点容器
-//! - [`for_each`] — keyed 列表
-//! - [`when`] — 按条件信号切换分支的动态区域
-//! - [`ChildArg`] — 需要 `cx` 的子节点写法
-//! - [`collect`] — 摊平子节点参数
-//! - [`text`] / [`button`] — 同名于 `components`，此处语义等价
+//! # 模块划分
+//!
+//! - [`canvas_render2`] — 全部节点模型、基础组件、布局策略、事件协议、选择/焦点。
+//! - [`primitives`] — 宿主与框架共用的纯数据类型（光标、布局轴、键位、IME）。
+//! - [`icons`] — 矢量图标（自绘路径，不依赖字体字形）。
+//! - `context` — 构建上下文 [`NodeContext`]（父指针 + `provide` / `consume`）。
+//! - `foreach` — 动态区域（`render_for_each` / `render_when`）。
+//! - `node_ref` — 提前释放的几何句柄 [`NodeRef`] / [`NodeGeom`]。
+//!
+//! # 已删除的旧声明层
+//!
+//! `#[component]`、`rsx!`、`Node`（渲染 IR）、`Slot` / `ChildArg`、`components`
+//! 组件库、`scroll` / `rich_text` / `text_field` / `overlay` 的 v1 版本、
+//! `MveApp` 运行时——全部随迁移完成删除。仓库里没有任何 v1 消费者。
 
-// 让 `#[component]` / `rsx!` 生成的 `::wy_mve::...` 路径在本 crate 内部也能解析
-// （框架自带组件 scroll/dialog/dropdown 就是用同一套宏写的）。
+// 让 `#[rec]` 生成的 `::wy_mve::...` 路径在本 crate 内部也能解析
+// （框架自带组件 `node2` / `scroll_content` / `editable_text_node` 就用同一套宏写）。
 extern crate self as wy_mve;
 
-pub mod clipboard;
-pub mod components;
-mod cond;
+pub mod canvas_render2;
 mod context;
-pub mod fc;
 mod foreach;
-pub mod getter;
 pub mod icons;
-mod node;
-pub mod overlay;
-mod rich_text;
-pub mod scroll;
-mod text_field;
-pub mod text_util;
+mod node_ref;
+pub mod primitives;
 
-pub use components::{
-    button, column, column_at, row, row_at, spacer, text, text_signal, text_styled,
+pub use context::NodeContext;
+pub use icons::{draw_icon, Icon};
+pub use node_ref::{nodeOf, node_of, NodeGeom, NodeRef};
+pub use primitives::{CursorType, ImeEvent, Key, KeyEvent, Layout, LayoutBox, PointerButton};
+
+/// 新体系入口：基础元素 `node2`、`Fc`、`Node2` 声明模型、`scroll` 等，
+/// 全部经 [`canvas_render2`] 一个模块导出（这里只是便利重导出）。
+pub use canvas_render2::element::node2;
+/// `#[rec(extends = base)]` 的宏展开中间件：展开产物要按**绝对路径**引用它们
+/// （不能引用 `#[macro_export]` 宏），因此必须 `pub`；但不属于对外契约，
+/// 用 `#[doc(hidden)]` 隐去。
+#[doc(hidden)]
+pub use canvas_render2::element::{Node2Props, Node2PropsBuilder};
+/// canvasRender2 的节点模型（对标 TS `Node2` / `Node2Arg` / `exts` / `flex`）。
+///
+/// 节点参数是 [`Node2Props`]（来自 `node2` 组件的签名），没有额外的 IR 层。
+pub use canvas_render2::node2::{
+    absolute, align, align_xy, always, axis_of, find_ext, get, grow, grow_dyn, grow_xy,
+    ignore_flex, ignore_flex_dyn, AbsoluteLayoutDir, AlignChild, Axis, Ext, Flex, FlexArg,
+    GrowChild, IgnoreFlexChild, ImeExt, LayoutDir, LayoutDir2, LayoutSize, Node2, StartEnd,
 };
-pub use cond::render_when;
-pub use context::{render_root, NodeContext, Root};
-pub use fc::{
-    btn, collect, focus_trap, focusable, for_each, group, hbox, hbox_at, hbox_gap, hidden, label,
-    vbox, vbox_at, vbox_gap, when, ChildArg, Children, Slot,
+/// canvasRender2 的滚动原语（TS `Scroll.ts` / `ScrollBar.ts`）：`extends = node2`
+/// 的声明式组件，`scroll_content!` / `scroll_bar!` 与 `node2!` 同构（宏与函数同名，
+/// 一并导出：本行同时带出函数与 `#[macro_export]` 宏）。
+pub use canvas_render2::{
+    editable_text_node, image_node, overlay_scroll_bar, rect_node, rich_text_node, scroll_bar,
+    scroll_content, EditableTextNodeArg, ImageNodeArg, OverlayScrollBarArg, RectNodeArg,
+    RichTextNodeArg, ScrollBarArg, ScrollBarStyle2, ScrollContentArg,
 };
-pub use foreach::render_for_each;
-/// 「裸值 / 闭包 → 取值函数」分发 trait，由 `#[getter]` 标注的 prop 使用。
-pub use getter::IntoGetter;
-/// 矢量图标组件（自绘路径，不依赖字体字形——字符图标在缺字形的机器上会变方块）。
-pub use icons::{icon, Icon};
-pub use node::{
-    children_nodes, current_box, flatten, has_handler, layout_boxes, layout_offsets, materialize,
-    node_size, with_box, ChildSlot, ImeEvent, Key, KeyEvent, Layout, LayoutBox, Node,
-    PointerButton, PointerEvent,
-};
-/// 滚动容器 / 浮层组件（复刻 Kotlin SimpleScrollNode + Overlay/Dialog/Dropdown）。
-pub use overlay::{dialog, dropdown};
-pub use rich_text::{rich_editable_opts, rich_text, rich_text_opts, RichTextOpts};
-pub use scroll::scroll;
-pub use text_field::{text_field, text_field_opts, TextFieldColors, TextFieldOpts};
-pub use wy_layout::{AlignItem, DirectionJustify};
-/// 颜色类型重新导出：getter prop（如 `text_label` 的 `color`）按值传入时
-/// 需要它能作为 `IntoGetter<Color>` 的值分支。
+/// canvasRender2 自带的文本节点（TS `WrappedTextNode.ts` / `RichTextNode.ts`）。
+pub use canvas_render2::{wrapped_text_node, WrappedTextNodeArg};
+/// canvasRender2 的组件产物类型：`Fc = (ctx) => void`，以及节点句柄的槽
+/// `Ref2<M>`（TS `StoreRef<M>`）。组件是普通函数、直接返回 `Fc`，没有柯里化。
+pub use canvas_render2::{Fc, NodeApply, Ref2};
+pub use wy_layout::{AlignItem, DirectionFixBetweenWhenOne, DirectionJustify};
+/// 唯一的声明式组件宏：**只做「命名参数 + 默认值」**，外加一个同名 `!` 宏。
+///
+/// - 给函数生成 `XxxArg` + builder；`XxxArg::build()` 的返回类型就是
+///   **函数签名上写的那个类型**（`-> Flex` 就产出 `Flex`，`-> Fc` 就产出 `Fc`）。
+/// - 生成同名 `!` 宏，调用点写 `flex!{..}` / `todo_app!{..}`，支持字段简写。
+/// - **不做任何隐式注入**：没有 ctx 注入、没有返回类型改写、没有自动 mount。
+///   要句柄就声明一个 `Ref2<Node2>` 参数并给默认值，要挂载就自己 `Fc::new(..)`。
+pub use wy_mve_macros::rec;
+/// 颜色类型重新导出：`text_label` 等组件的 `color` 字段按值传入时要用到它。
 pub use wy_render::Color;
-/// 绘制目标重新导出：让 `rsx! { draw: |s| .. }` 生成的 downcast 不必让调用方
-/// 额外声明 `wy-render` 依赖（宏只认 `wy_mve` 一条路径）。
+/// 绘制目标重新导出：`draw: |s: &mut Scene, n: &Node2| { .. }` 的签名要用到它。
 pub use wy_render::Scene;
-
-/// `#[component]` 属性宏：把函数包装为 `rsx!` 可用的组件（见 `wy-mve-macros`）。
-pub use wy_mve_macros::component;
-/// `rsx!` 声明式 UI 宏（见 `wy-mve-macros`）。
-pub use wy_mve_macros::rsx;
-
-#[cfg(test)]
-mod tests;
