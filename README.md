@@ -3,7 +3,7 @@
 **纯 Rust 的信号驱动 UI 框架：树只建一次，改数据只重画该重画的那部分。**
 
 [![CI](https://github.com/wy2010344/rust-mve/actions/workflows/ci.yml/badge.svg)](https://github.com/wy2010344/rust-mve/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-543%20passing-brightgreen)](https://github.com/wy2010344/rust-mve/actions/workflows/ci.yml)
+[![tests](https://img.shields.io/badge/tests-673%20passing-brightgreen)](https://github.com/wy2010344/rust-mve/actions/workflows/ci.yml)
 [![clippy](https://img.shields.io/badge/clippy-0%20warnings-brightgreen)](https://github.com/wy2010344/rust-mve/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 

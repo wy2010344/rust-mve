@@ -1036,4 +1036,70 @@ mod tests {
         }
         assert!(fills >= 2, "两个组件都要有高亮，实际 {fills} 块");
     }
+
+    /// 点进输入框：真机上这一步就是"光标闪退"的现场。
+    ///
+    /// 走的是完整链路——指针路由 → 命中链 → `page.mouse_down` → 落点定位。
+    /// 测试里也要装上线程局部的选区管理器：真机由 `Node2App::new` 装，
+    /// 组件点击时经 `manager()` 用它，缺了它这条路径就没被真正覆盖。
+    #[test]
+    fn clicking_into_editor_positions_caret_without_panicking() {
+        use wy_mve::canvas_render2::build_root_fc;
+        use wy_mve::{editable_text_node, rect_node};
+
+        let value = create_signal("abcd".to_string());
+        let root = build_root_fc(rect_node! {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 200.0,
+            children: vec![editable_text_node! {
+                text: value.get(),
+                on_text_change: move |t: &str| value.set(t.to_string()),
+                width: 200.0,
+                height: 24.0,
+            }],
+        });
+
+        let pointer_select: Signal<Option<PointerSelect2>> = create_signal(None);
+        let move_hit_test: Signal<Option<HitestResult2>> = create_signal(None);
+        let selection = Rc::new(SelectionManager2::new(Rc::new(Node2SelectionSource {
+            pointer_select,
+            move_hit_test,
+            root: root.clone(),
+        })
+            as Rc<dyn SelectionSource2>));
+        let deps = Node2Deps {
+            root: root.clone(),
+            redraw: Rc::new(RefCell::new(None)),
+            pointer_select,
+            move_hit_test,
+            cursor: Cell::new(CursorType::Default),
+            selection: Rc::clone(&selection),
+        };
+        wy_mve::canvas_render2::selection::set_current_selection_manager(Some(Rc::clone(
+            &selection,
+        )));
+        let router = create_pointer_router(deps);
+
+        let input = |x: f64, y: f64| PointerInput2 {
+            x,
+            y,
+            button: POINTER_BUTTON_LEFT,
+            shift: false,
+            time: 0.0,
+            device: PointerDevice::Mouse,
+            pointer_id: 0,
+        };
+
+        // 落在第二个字符附近（x=30），点一下就该把光标挪到中间，不应 panic。
+        router.down(&input(30.0, 12.0));
+        router.up(&input(30.0, 12.0));
+
+        let caret = wy_mve::canvas_render2::focus::active_editor()
+            .and_then(|h| h.cursor_sel_pair())
+            .map(|p| p.focus.offset)
+            .expect("点进输入框后应有活跃编辑器光标");
+        assert!(caret > 0, "落点定位应把光标推进到文本中，实际 {caret}");
+    }
 }

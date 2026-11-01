@@ -332,6 +332,63 @@ mod tests {
 
     use super::*;
 
+    /// 找第一个带 `ImeExt` 的节点（就是编辑器本体）。
+    fn find_editor(node: &Node2) -> Option<Node2> {
+        if node
+            .find_ext_rc::<wy_mve::canvas_render2::node2::ImeExt>()
+            .is_some()
+        {
+            return Some(node.clone());
+        }
+        node.children().into_iter().find_map(|c| find_editor(&c))
+    }
+
+    /// 全画布网格点一遍：任何一点点击都不许崩，点到编辑器要能定位光标。
+    ///
+    /// 走**真机同一条路**（`WyApp::handle_event` 收 winit 的 `CursorMoved` +
+    /// `MouseInput`），与应用里 runner 喂事件完全一致：指针路由、焦点、
+    /// 选区协调、重绘请求全在里面。坐标不猜——扫一遍画布，用命中的位置说话。
+    #[test]
+    fn clicking_anywhere_does_not_crash() {
+        use winit::dpi::PhysicalPosition;
+        use winit::event::{ElementState, MouseButton, WindowEvent};
+        use wy_engine::runner::WyApp;
+
+        let mut app = crate::make_app();
+        let (w, h) = (480.0f32, 1240.0f32);
+        let mut scene = wy_render::Scene::new();
+        app.draw(&mut scene, w, h);
+
+        let mut focused_at: Option<(i32, i32)> = None;
+        'sweep: for y in (4..h as i32).step_by(12) {
+            for x in (4..w as i32).step_by(12) {
+                let pos = PhysicalPosition::new(f64::from(x), f64::from(y));
+                app.handle_event(&WindowEvent::CursorMoved {
+                    device_id: winit::event::DeviceId::dummy(),
+                    position: pos,
+                });
+                app.handle_event(&WindowEvent::MouseInput {
+                    device_id: winit::event::DeviceId::dummy(),
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                });
+                app.handle_event(&WindowEvent::MouseInput {
+                    device_id: winit::event::DeviceId::dummy(),
+                    state: ElementState::Released,
+                    button: MouseButton::Left,
+                });
+                if wy_mve::canvas_render2::focus::active_editor().is_some() {
+                    focused_at = Some((x, y));
+                    break 'sweep;
+                }
+            }
+        }
+        assert!(
+            focused_at.is_some(),
+            "扫遍画布都没能点进任何输入框：焦点链路断了"
+        );
+    }
+
     /// 建一棵"视口 → 面板"的树，返回面板节点（布局在首次读几何时惰性求值）。
     fn mount_panel() -> Node2 {
         let root = build_root_fc(node2! {

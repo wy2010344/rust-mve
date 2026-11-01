@@ -513,9 +513,7 @@ impl EditableTextController {
     }
 
     fn set_preferred_x(&self, v: Option<f32>) {
-        self.core
-            .borrow_mut()
-            .set_preferred_x(v.unwrap_or(f32::NAN));
+        self.with_core_mut(|c| c.set_preferred_x(v.unwrap_or(f32::NAN)));
     }
 
     fn local_sel_start(&self) -> usize {
@@ -532,18 +530,35 @@ impl EditableTextController {
         self.core.borrow().has_selection()
     }
 
+    /// **就地改内核的唯一入口**。任何 `borrow_mut()` 都必须走这里。
+    ///
+    /// 原因是 `Signal::set` 会**同步** flush：内核的光标 / 选区是信号，写它们
+    /// 会立刻唤醒选区的派生 memo，而那条链会回头调本节点的
+    /// `position_for_point` → `paragraph()` → `sync_params()` → 又是 `borrow_mut()`。
+    /// 借用还握着时就是 `RefCell already borrowed`——在 winit 事件循环里 panic
+    /// 等于进程直接退出，现象就是"点一下输入框就闪退"。
+    ///
+    /// 守卫**必须声明在借用之前**（析构顺序相反）：借用先释放、批次后 flush。
+    fn with_core_mut(&self, f: impl FnOnce(&mut EditCore)) {
+        let _batch = begin_batch();
+        f(&mut self.core.borrow_mut());
+    }
+
     fn set_cursor(&self, idx: usize) {
-        self.core.borrow_mut().set_cursor(idx);
+        self.sync_params();
+        self.with_core_mut(|c| c.set_cursor(idx));
         // 光标位置变了：重新从"亮"开始闪，点击 / 方向键之后都不会有空窗。
         self.restart_blink();
     }
 
     fn extend_to(&self, new_pos: usize) {
-        self.core.borrow_mut().extend_to(new_pos);
+        self.sync_params();
+        self.with_core_mut(|c| c.extend_to(new_pos));
     }
 
     fn move_to(&self, new_pos: usize, extend: bool) {
-        self.core.borrow_mut().move_to(new_pos, extend);
+        self.sync_params();
+        self.with_core_mut(|c| c.move_to(new_pos, extend));
     }
 
     // ---- 显示层（占位 / 掩码 / tab 展开）----
@@ -557,23 +572,30 @@ impl EditableTextController {
     /// **只在值真的变了时才写**：`set_placeholder` / `set_obscure_text` 会递增
     /// 修订号（信号写），无条件写会在绘制期自我触发重绘。
     fn sync_params(&self) {
-        // 守卫先声明、借用后声明：析构顺序相反 → 借用先释放、批次后 flush，
-        // 观察者不会在借用期间回头读内核（见 `wy_signal::BatchGuard`）。
-        let _batch = begin_batch();
-        let mut c = self.core.borrow_mut();
-        let t = (self.text)();
-        if c.text() != t {
-            c.replace_text(t);
+        // memo 计算途中禁止写信号（`wy_signal::signal` 的 `!g.computing` 硬断言）。
+        // 此时内核已被触发本次重算的那个入口（`set_cursor` / `edit` / …）同步过，
+        // 跳过不会读到过期数据；计算结束后首次正常读会补上同步。
+        // 若不加这道闸，点输入框时选区 memo 重算会经
+        // `position_for_point → paragraph → display_text → sync_params` 回头写信号，
+        // 直接触发断言（表现同 RefCell 双借：进程退出 / 测试 panic）。
+        if wy_signal::is_computing() {
+            return;
         }
-        let p = (self.placeholder)();
-        if c.placeholder() != p {
-            c.set_placeholder(p);
-        }
-        let o = (self.obscure)();
-        if c.obscure_text() != o {
-            c.set_obscure_text(o);
-        }
-        c.single_line = (self.single_line)();
+        self.with_core_mut(|c| {
+            let t = (self.text)();
+            if c.text() != t {
+                c.replace_text(t);
+            }
+            let p = (self.placeholder)();
+            if c.placeholder() != p {
+                c.set_placeholder(p);
+            }
+            let o = (self.obscure)();
+            if c.obscure_text() != o {
+                c.set_obscure_text(o);
+            }
+            c.single_line = (self.single_line)();
+        });
     }
 
     fn showing_placeholder(&self) -> bool {
@@ -953,12 +975,16 @@ impl EditableTextController {
     /// 那一刻还握着 `RefCell` 借用，重入就会 panic。返回 `true` = 文本变了。
     fn edit(&self, f: impl FnOnce(&mut EditCore)) -> bool {
         self.sync_params();
+        // 借用只活在这一次 `with_core_mut` 里：`write_text` 调到宿主回调时
+        // 借用已经释放，重入也不会撞 `RefCell already borrowed`。
         let changed = {
-            let _batch = begin_batch();
-            let mut c = self.core.borrow_mut();
-            let before = c.text().to_string();
-            f(&mut c);
-            (c.text() != before).then(|| c.text().to_string())
+            let mut changed = None;
+            self.with_core_mut(|c| {
+                let before = c.text().to_string();
+                f(c);
+                changed = (c.text() != before).then(|| c.text().to_string());
+            });
+            changed
         };
         match changed {
             Some(t) => {
@@ -972,10 +998,7 @@ impl EditableTextController {
     /// 只动光标 / 选区的动作：不回写文本，但要让光标重新从"亮"开始闪。
     fn with_core(&self, f: impl FnOnce(&mut EditCore)) {
         self.sync_params();
-        {
-            let _batch = begin_batch();
-            f(&mut self.core.borrow_mut());
-        }
+        self.with_core_mut(f);
         self.restart_blink();
     }
 
@@ -1059,7 +1082,7 @@ impl EditableTextController {
         }
         if let Some(m) = self.manager() {
             if let Some((a, b)) = m.range_of(&self.self_sel()) {
-                self.core.borrow_mut().select_range(a, b);
+                self.with_core_mut(|c| c.select_range(a, b));
             }
         }
     }
@@ -2081,6 +2104,103 @@ mod tests {
         assert_eq!(caret(), 2, "上键应回到空行，不能原地不动");
         assert!(node.handle_key(&key(KeyCode2::UP)));
         assert_eq!(caret(), 0, "再按上应回到第一行");
+    }
+
+    // ---- 普通按键路径（输入 / 退格 / 撤销 / 重做 / 选区替换）----
+    //
+    // 这些是"用户每天都在按的键"，却一条测试都没有：IME、空行、闪烁都有覆盖，
+    // 反而最基础的那条路没人看着。编辑器从自带实现切到 `EditCore` 之后，
+    // 这里正是"看起来能打字、其实某一步歪了"最容易漏掉的地方。
+
+    fn ch(c: char) -> KeyEvent2 {
+        KeyEvent2 {
+            key: c.to_string(),
+            code: String::new(),
+            ctrl: false,
+            shift: false,
+            alt: false,
+            meta: false,
+        }
+    }
+
+    fn ctrl(c: char) -> KeyEvent2 {
+        KeyEvent2 {
+            key: c.to_string(),
+            code: String::new(),
+            ctrl: true,
+            shift: false,
+            alt: false,
+            meta: false,
+        }
+    }
+
+    fn code(code: &str) -> KeyEvent2 {
+        KeyEvent2 {
+            key: String::new(),
+            code: code.to_string(),
+            ctrl: false,
+            shift: false,
+            alt: false,
+            meta: false,
+        }
+    }
+
+    /// 打字 → 退格 → 撤销 → 重做，文本与光标都要对得上。
+    #[test]
+    fn typing_backspace_undo_redo_round_trip() {
+        let env = Env::new("");
+        env.select(0, 0);
+
+        assert!(env.node.handle_key(&ch('a')));
+        assert!(env.node.handle_key(&ch('b')));
+        assert_eq!(env.text(), "ab");
+        assert_eq!(env.caret(), 2, "打完字光标应在末尾");
+
+        assert!(env.node.handle_key(&code(KeyCode2::BACKSPACE)));
+        assert_eq!(env.text(), "a");
+        assert_eq!(env.caret(), 1);
+
+        // 撤销：一次按键一条历史（与旧实现同粒度），所以逐字回退
+        assert!(env.node.handle_key(&ctrl('z')));
+        assert_eq!(env.text(), "ab", "撤销退回上一步文本");
+        assert!(env.node.handle_key(&ctrl('z')));
+        assert_eq!(env.text(), "a");
+
+        // 重做：Ctrl+Y 与 Ctrl+Shift+Z 都要能走
+        assert!(env.node.handle_key(&ctrl('y')));
+        assert_eq!(env.text(), "ab", "重做恢复被撤销的那次插入");
+    }
+
+    /// 中文退格：删一整个字符，不是删一个字节。
+    #[test]
+    fn backspace_deletes_whole_cjk_char() {
+        let env = Env::new("你好");
+        env.select(2, 2);
+        assert!(env.node.handle_key(&code(KeyCode2::BACKSPACE)));
+        assert_eq!(env.text(), "你");
+        assert_eq!(env.caret(), 1);
+    }
+
+    /// 选区替换：有选区时打字即替换，撤销后原文回来（含中文）。
+    #[test]
+    fn typing_over_selection_replaces_and_undo_restores() {
+        let env = Env::new("abc");
+        env.select(0, 2);
+        assert!(env.node.handle_key(&ch('x')));
+        assert_eq!(env.text(), "xc");
+        assert!(env.node.handle_key(&ctrl('z')));
+        assert_eq!(env.text(), "abc", "撤销应还原被替换的两个字符");
+    }
+
+    /// 中间插入中文后撤销：两边字符不能被吃掉（字节索引 / 字符索引之分）。
+    #[test]
+    fn undo_after_mid_text_cjk_insert_keeps_surroundings() {
+        let env = Env::new("abcd");
+        env.select(1, 1);
+        assert!(env.node.handle_key(&ch('你')));
+        assert_eq!(env.text(), "a你bcd");
+        assert!(env.node.handle_key(&ctrl('z')));
+        assert_eq!(env.text(), "abcd");
     }
 
     /// 末尾空行（文本以 `\n` 结尾）同样可停、可离开。

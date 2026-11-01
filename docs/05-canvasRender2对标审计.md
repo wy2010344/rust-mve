@@ -1018,3 +1018,87 @@ let mut core = cell.borrow_mut();  // ② 后声明
 3 passed（427 图元）；快照 480×1240 与统一前 **像素级 `bbox = None`**；
 `cargo clippy --workspace --all-targets` 与 `RUSTDOCFLAGS=-D warnings cargo doc`
 均无代码告警。
+
+### 15.7 收尾又踩一次：点击输入框就闪退（RefCell 双借）
+
+统一之后第一轮跑全绿，但用户报告“编辑器又不正常了”，真机表现是**点一下输入框就崩**（进程直接退出，无 panic 文本）。根因还是 §15.4 同一根：
+
+- 上一轮只给 `edit` / `with_core` / `sync_params` 三个**显式**调用点加了 `BatchGuard`，
+  但 `set_cursor` / `extend_to` / `move_to` / `select_range` 是直接 `core.borrow_mut()`，
+  漏了守卫。
+- 点击走 `mouse_down` → `set_cursor` → 写光标信号。**信号是同步 flush**，观察者
+  （`SelectionManager2::current_pair` 派生的选区 memo）立刻回头
+  `cursor_sel_pair` → `position_for_point` → `paragraph()` → `sync_params()` →
+  又 `borrow_mut()`。此时 `set_cursor` 的借用还没释放 → `RefCell already borrowed`
+  → 在 winit 事件循环里 panic = 进程退出 = 闪退。
+
+**修复**：把所有 `borrow_mut()` 收口到唯一入口 `with_core_mut`（守卫先于借用声明），
+`set_cursor` / `extend_to` / `move_to` / `sync_params` / `edit` / `with_core` 全部经它。
+读借用（`core.borrow()`）不得跨写调用，已逐处核查。
+
+**复现测试**：`canvas2-todo` 的 `clicking_anywhere_does_not_crash` 走
+`WyApp::handle_event`（CursorMoved + MouseInput，与 runner 喂事件完全一致），
+网格扫描整张 480×1240 画布，任意点点击都不许崩、且至少能点进一个输入框。
+（早先那版用 `create_memo` 包一层观察者没复现——memo 惰性求值，不会在
+`select_range` 期间同步 flush，已删。）
+
+### 15.8 顺手修的真缺陷：撤销用字节数当字符数
+
+`EditCore` 的几个动作把 `inserted.len()` / `deleted.len()`（**字节数**）当**字符数**用：
+纯 ASCII 下碰巧对，中文一上场就错——`"abcd"` 在中间插入 `"你"`，撤销会误删 `bc`
+得到 `ad`。内核其它地方一律字符索引，这是唯一的越界口子。已改为 `char_count` 工具
+（`slice_to_char` / `char_to_byte`）换算。补两条测试锁住：
+`undo_after_typing_chinese_restores_empty`、
+
+`undo_mid_text_insert_keeps_surrounding_chars`（在 `abcd` 中间插 `你`，撤销后两侧
+`a`/`bcd` 都在）。
+
+### 15.9 收尾验证
+
+| 层 | 命令 | 结果 |
+|---|---|---|
+| lib | `cargo test --workspace --lib` | 全绿（wy-mve 148 + 其余） |
+| 示例 | `cargo test -p wy-app --example canvas2-todo` | 4 passed（含 `clicking_anywhere_does_not_crash`） |
+| 引擎 | `cargo test -p wy-engine --lib` | 63 passed（含 `clicking_into_editor_positions_caret_without_panicking`） |
+| 风格 | `cargo fmt --all --check` | 干净 |
+| clippy | `cargo clippy --workspace --all-targets` | 0 代码告警（仅 Windows 增量锁文件 os error 5，非代码） |
+| 文档 | `RUSTDOCFLAGS=-D warnings cargo doc --workspace --no-deps` | 干净 |
+
+### 15.10 第二层：双借修好后，shadcn 端到端测试又卡在写信号断言
+
+`with_core_mut` 收口修掉了 RefCell 双借，但 `canvas2-todo::clicking_anywhere`
+只验证了"不崩"；`shadcn::clicking_the_input_then_typing_writes_the_signal`（点进去→
+打字→回写信号，端到端）在基线上其实是**同一处双借 panic**，只是被双借先挡了，
+双借消失后暴露了同一重入的下一层：
+
+```
+memo 评估 compute_ranges
+  → current_pair → pointer_pair → point_from → position_for_point
+  → paragraph → display_text → sync_params   ← 在读路径里写！
+  → replace_text → bump_revision → Signal::set(revision: u64)
+  → assert(!g.computing)  // 信号系统：不允许在 memo 计算期间写入信号
+```
+
+根子还是"读路径里挂了写"：`display_text` / `showing_placeholder` / 两个索引换算
+都在开头 `sync_params()`，而 `sync_params` 在文本有差时会 `replace_text` →
+`bump_revision` 写信号。选区 memo 重算时正经过这条读链，于是写到一半撞上
+`g.computing` 的硬断言。
+
+**修复（两处配合）**：
+
+1. `wy_signal` 新增 `pub fn is_computing()`（读 `g.computing`，此前只在 `set` 内部用
+   `pub(crate) with_global` 访问，外部够不到）。
+2. `sync_params` 开头加闸：`if wy_signal::is_computing() { return; }`——memo 计算途中
+   直接跳过同步写，平时"每次读先同步外部改动"的语义保留，只在计算期不写。
+3. `set_cursor` / `extend_to` / `move_to` 在 `with_core_mut` 之前先 `sync_params()`，
+   保证光标 / 选区信号变化前内核已与外部同步，memo 重算读到的就是新鲜数据（否则跳过
+   同步的空窗里可能读到过期文本）。
+
+**复现测试**：`shadcn::clicking_the_input_then_typing_writes_the_signal` 现在要全过
+（点进去、键入 `a` 写回 `app.todo_input`、退格清空），与 `clicking_the_input_padding_still_focuses_the_editor`
+一起 2 条；整个 `shadcn` 示例 17 条全绿。
+
+**教训**：`Signal::set` 是同步 flush，所以"任何会写信号的操作"都不能出现在
+(a) 借用内核期间（双借）或 (b) memo 计算期间（写断言）。`sync_params` 这种"读前顺手
+同步"是个陷阱：它看起来是读辅助，实则带写。凡是会经 memo 重算链走到的读路径，都不能
+直接调用它——要么只在显式写入入口调，要么在计算期自避。

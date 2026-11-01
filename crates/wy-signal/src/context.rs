@@ -72,6 +72,16 @@ impl Global {
     }
 }
 
+/// 是否正在计算某个 memo。
+///
+/// 此时写入信号会触发 `signal.rs` 的 `!g.computing` 硬断言（写操作会破坏
+/// 依赖一致性）。需要"读路径里顺手同步外部状态"的场合（如编辑器把外部
+/// 文本/占位/掩码信号同步进内核），应在计算期直接跳过写，等计算结束后的
+/// 首次正常读再补。
+pub fn is_computing() -> bool {
+    with_global(|g| g.computing)
+}
+
 /// 在闭包中访问全局状态。
 pub(crate) fn with_global<R>(f: impl FnOnce(&mut Global) -> R) -> R {
     G.with(|g| {

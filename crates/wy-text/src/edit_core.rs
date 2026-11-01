@@ -188,6 +188,15 @@ trait TextEditAction: std::fmt::Debug {
     fn redo(&self, state: &TextState) -> TextState;
 }
 
+/// 字符数（不是字节数）。
+///
+/// 撤销/重做里的每个偏移都是**字符索引**，而这些偏移要跟"插入了多长"一起算。
+/// 直接用 `str::len()` 会在非 ASCII 上算成字节数——`"你".len() == 3`，
+/// 于是"撤销一次中间插入"会多删两个字符。名字写长一点，防止再手滑。
+fn char_len(s: &str) -> usize {
+    s.chars().count()
+}
+
 #[derive(Debug)]
 struct InsertTextAction {
     position: usize,
@@ -199,7 +208,7 @@ impl TextEditAction for InsertTextAction {
         let new_text = remove_range(
             &state.text,
             self.position,
-            self.position + self.inserted.len(),
+            self.position + char_len(&self.inserted),
         );
         TextState {
             text: new_text,
@@ -210,7 +219,7 @@ impl TextEditAction for InsertTextAction {
         let new_text = insert_at(&state.text, self.position, &self.inserted);
         TextState {
             text: new_text,
-            cursor: self.position + self.inserted.len(),
+            cursor: self.position + char_len(&self.inserted),
         }
     }
 }
@@ -228,7 +237,7 @@ impl TextEditAction for DeleteTextAction {
         let cursor = if self.is_backspace {
             self.position
         } else {
-            self.position + self.deleted.len()
+            self.position + char_len(&self.deleted)
         };
         TextState {
             text: new_text,
@@ -239,7 +248,7 @@ impl TextEditAction for DeleteTextAction {
         let new_text = remove_range(
             &state.text,
             self.position,
-            self.position + self.deleted.len(),
+            self.position + char_len(&self.deleted),
         );
         TextState {
             text: new_text,
@@ -258,7 +267,7 @@ struct ReplaceSelectionAction {
 impl TextEditAction for ReplaceSelectionAction {
     fn undo(&self, state: &TextState) -> TextState {
         let head = &state.text[..slice_to_byte(&state.text, self.position)];
-        let tail_start = slice_to_byte(&state.text, self.position + self.replacement.len());
+        let tail_start = slice_to_byte(&state.text, self.position + char_len(&self.replacement));
         let tail = &state.text[tail_start.min(state.text.len())..];
         let mut new_text =
             String::with_capacity(head.len() + self.original_selected.len() + tail.len());
@@ -272,7 +281,10 @@ impl TextEditAction for ReplaceSelectionAction {
     }
     fn redo(&self, state: &TextState) -> TextState {
         let head = &state.text[..slice_to_byte(&state.text, self.position)];
-        let tail_start = slice_to_byte(&state.text, self.position + self.original_selected.len());
+        let tail_start = slice_to_byte(
+            &state.text,
+            self.position + char_len(&self.original_selected),
+        );
         let tail = &state.text[tail_start.min(state.text.len())..];
         let mut new_text = String::with_capacity(head.len() + self.replacement.len() + tail.len());
         new_text.push_str(head);
@@ -280,7 +292,7 @@ impl TextEditAction for ReplaceSelectionAction {
         new_text.push_str(tail);
         TextState {
             text: new_text,
-            cursor: self.position + self.replacement.len(),
+            cursor: self.position + char_len(&self.replacement),
         }
     }
 }
@@ -1431,6 +1443,27 @@ mod tests {
         assert_eq!(c.display_text(), "Type here");
         let spans = c.display_spans(crate::TextStyle::default());
         assert_eq!(spans[0].text, "Type here");
+    }
+
+    #[test]
+    fn undo_after_typing_chinese_restores_empty() {
+        let mut c = new_core("");
+        c.set_cursor(0);
+        c.insert_text("你好");
+        assert_eq!(c.text(), "你好");
+        c.undo();
+        assert_eq!(c.text(), "");
+    }
+
+    #[test]
+    fn undo_mid_text_insert_keeps_surrounding_chars() {
+        // 字符索引 vs 字节索引：`"你".len() == 3`，若拿字节数当字符数就会多删两个
+        let mut c = new_core("abcd");
+        c.set_cursor(1);
+        c.insert_text("你");
+        assert_eq!(c.text(), "a你bcd");
+        c.undo();
+        assert_eq!(c.text(), "abcd");
     }
 
     #[test]

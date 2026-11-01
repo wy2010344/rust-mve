@@ -39,7 +39,7 @@ pub use animate_signal::{
     SpringBaseArg, SpringOutValue, TweenConfig,
 };
 pub use batch::{batch, begin_batch, flush, BatchGuard};
-pub use context::reset_signal_global_state;
+pub use context::{is_computing, reset_signal_global_state};
 pub use get_::{GetValue, NodeId, SetValue};
 pub use memo::{create_memo, Memo};
 pub use record_memo::RecordMemo;
