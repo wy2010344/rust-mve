@@ -26,7 +26,8 @@ pub mod fc;
 /// 焦点真相源 / 键盘事件 / 编辑器句柄（对标 TS `Focus.ts`）。
 pub mod focus;
 pub mod geometry;
-/// 字素簇 / 词边界（对标 TS `Graphemes.ts`）。
+/// 词边界（对标 TS `Graphemes.ts` 的 `Words`；字素簇边界由编辑内核
+/// `wy_text::EditCore` 提供，组件层不再留第二份）。
 pub mod graphemes;
 /// 图片节点（对标 TS `ImageNode.ts`）。
 pub mod image_node;
@@ -59,7 +60,6 @@ pub mod text_defaults;
 pub mod text_metric;
 /// 树引擎（逐文件对标 TS `canvasRender2/tree/`）。
 pub mod tree;
-pub mod undo_redo;
 pub mod url_opener;
 pub mod util;
 /// 单片段文本节点（对标 TS `WrappedTextNode.ts`）。
@@ -83,7 +83,7 @@ pub use geometry::{
     append_rounded_rect, fill_inner_rect, fill_outer_rect, union_rect, Path2, PathCommand2, PointF,
     RectF,
 };
-pub use graphemes::{Graphemes, Words};
+pub use graphemes::Words;
 pub use image_node::{image_node, ImageNodeArg};
 pub use node2::{
     absolute_in_inner, align, align_xy, always, axis_of, build_root_fc, build_root_node2,
@@ -115,12 +115,9 @@ pub use selection::{
     expand_word_selection, HitestItem2, HitestResult2, PointerSelect2, Rect2, SelPair2, SelPoint2,
     Selectable2, SelectionManager2, SelectionSource2,
 };
-pub use tab::{display_to_logic, expand_tabs, logic_to_display, SPACES_PER_TAB};
+pub use tab::{expand_tabs, SPACES_PER_TAB};
 pub use text_defaults::{placeholder_color, set_placeholder_color, set_text_color, text_color};
 pub use text_metric::ink_shift_y_of;
-pub use undo_redo::{
-    DeleteTextAction, InsertTextAction, ReplaceSelectionAction, TextState, UndoRedo,
-};
 pub use url_opener::{open_url, set_url_opener};
 pub use util::MAX_LAYOUT_WIDTH;
 pub use wrapped_text::{wrapped_text_node, WrappedTextNodeArg};

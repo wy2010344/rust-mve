@@ -959,6 +959,23 @@ impl EditCore {
         self.composing_text.get().chars().count()
     }
 
+    /// 提交组合串：清掉组合态，但**保留已上屏的窗口文本**（TS `commitComposition`）。
+    ///
+    /// 与 [`Self::end_composition`]`(false)` 的区别是「窗口文本留不留」：
+    /// 后者把窗口文本从正文里移除——winit 在 Windows 上是「先 `Preedit("")`
+    /// 清窗、再 `Commit`」，那条路要的就是移除；这里是「平台直接给最终串」，
+    /// 文本已经在正文里，只把组合态收尾。两者不可混用。
+    pub fn commit_composition(&mut self) {
+        let start = self.composition_base.take().map(|(s, _)| s);
+        let win_len = self.composing_text.get().chars().count();
+        self.composing_text.set(String::new());
+        self.composing_cursor_pos.set(0);
+        self.preferred_x = f32::NAN;
+        if let Some(start) = start {
+            self.set_cursor((start + win_len).min(self.text_len()));
+        }
+    }
+
     /// 平台上报组合文本（复刻 `onComposing`）。
     pub fn on_composing(&mut self, text: &str, cursor_pos: usize) {
         if text.is_empty() {
@@ -1428,6 +1445,33 @@ mod tests {
         assert!(!c.in_composing());
         c.insert_text("你");
         assert_eq!(c.text(), "你");
+        assert_eq!(c.cursor(), 1);
+    }
+
+    #[test]
+    fn commit_composition_keeps_window_text() {
+        // 与 end_composition(false) 的分水岭：窗口文本已经在正文里，收尾时只清组合态
+        let mut c = new_core("");
+        c.set_cursor(0);
+        c.on_composing("ni", 1);
+        c.on_composing("你", 1);
+        assert!(c.in_composing());
+        assert_eq!(c.text(), "你");
+        c.commit_composition();
+        assert!(!c.in_composing());
+        assert_eq!(c.text(), "你");
+        // 光标落在窗口文本之后，接着输入不再被组合态吃掉
+        assert_eq!(c.cursor(), 1);
+        c.insert_text("好");
+        assert_eq!(c.text(), "你好");
+    }
+
+    #[test]
+    fn commit_composition_without_window_is_harmless() {
+        let mut c = new_core("ab");
+        c.set_cursor(1);
+        c.commit_composition();
+        assert_eq!(c.text(), "ab");
         assert_eq!(c.cursor(), 1);
     }
 

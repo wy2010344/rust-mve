@@ -38,7 +38,7 @@ pub use animate_signal::{
     AnimateSignalConfig, EaseFn, FrameSource, FrameSubscription, SilentDiff, SpringAnimationArg,
     SpringBaseArg, SpringOutValue, TweenConfig,
 };
-pub use batch::{batch, flush};
+pub use batch::{batch, begin_batch, flush, BatchGuard};
 pub use context::reset_signal_global_state;
 pub use get_::{GetValue, NodeId, SetValue};
 pub use memo::{create_memo, Memo};

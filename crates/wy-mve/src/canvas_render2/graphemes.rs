@@ -1,4 +1,8 @@
-//! 字素簇 / 词边界（对标 TS `canvasRender2/Graphemes.ts`，实现抽自 `canvasCore/Graphemes`）。
+//! 词边界（对标 TS `canvasRender2/Graphemes.ts` 的 `Words`，实现抽自
+//! `canvasCore/Graphemes`）。
+//!
+//! 字素簇边界（原 `Graphemes`）已随编辑态一起收进 `wy_text::EditCore`，组件层
+//! 不再保留第二份——两套边界算法在同一个编辑器里只会互相打架。
 //!
 //! 索引空间：本文件所有 `i` 与返回偏移均为**字符（Unicode 标量）索引**，与
 //! Rust `String` 的 `chars().count()` 一致。TS 原版用 UTF-16 索引；对 BMP 文本
@@ -9,48 +13,6 @@ use unicode_segmentation::UnicodeSegmentation;
 /// 字节偏移 → 字符索引。
 fn byte_to_char_idx(text: &str, byte: usize) -> usize {
     text[..byte.min(text.len())].chars().count()
-}
-
-/// 字素簇边界工具（对标 TS `Graphemes`）。
-pub struct Graphemes;
-
-impl Graphemes {
-    /// 下一个字素簇边界（严格大于 `i` 的字符索引）；越界返回文本字符长度。
-    ///
-    /// 对标 TS `Graphemes.nextBoundary(text, i)`。
-    #[must_use]
-    pub fn next_boundary(text: &str, i: usize) -> usize {
-        let total = text.chars().count();
-        if i >= total {
-            return total;
-        }
-        for (byte, _) in UnicodeSegmentation::grapheme_indices(text, true) {
-            let ci = byte_to_char_idx(text, byte);
-            if ci > i {
-                return ci;
-            }
-        }
-        total
-    }
-
-    /// 上一个字素簇边界（严格小于 `i` 的字符索引）；越界返回 0。
-    ///
-    /// 对标 TS `Graphemes.prevBoundary(text, i)`。
-    #[must_use]
-    pub fn prev_boundary(text: &str, i: usize) -> usize {
-        if i == 0 {
-            return 0;
-        }
-        let mut last = 0usize;
-        for (byte, _) in UnicodeSegmentation::grapheme_indices(text, true) {
-            let ci = byte_to_char_idx(text, byte);
-            if ci >= i {
-                break;
-            }
-            last = ci;
-        }
-        last
-    }
 }
 
 /// 词边界工具（对标 TS `Words`）。
@@ -109,23 +71,6 @@ impl Words {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn grapheme_boundaries_basic() {
-        assert_eq!(Graphemes::next_boundary("hello", 0), 1);
-        assert_eq!(Graphemes::next_boundary("hello", 4), 5);
-        assert_eq!(Graphemes::next_boundary("hello", 5), 5);
-        assert_eq!(Graphemes::prev_boundary("hello", 5), 4);
-        assert_eq!(Graphemes::prev_boundary("hello", 1), 0);
-    }
-
-    #[test]
-    fn grapheme_respects_combining_marks() {
-        // 'e' + 组合附加符 是一个字素簇
-        let s = "e\u{0301}";
-        assert_eq!(Graphemes::next_boundary(s, 0), 2);
-        assert_eq!(Graphemes::prev_boundary(s, 2), 0);
-    }
 
     #[test]
     fn word_boundaries_basic() {

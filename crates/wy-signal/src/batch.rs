@@ -24,6 +24,43 @@ pub fn batch<F: FnOnce()>(f: F) {
     }
 }
 
+/// 手动批次守卫：`drop` 时若回到最外层就 flush。
+///
+/// 与 [`batch`] 的区别是**能把"结束时机"推到闭包之外**。需要"借用期间只入队、
+/// 借用释放之后再通知观察者"时必须用它——比如内核状态装在一个 `RefCell` 里，
+/// 观察者会在 flush 时回头读它：
+///
+/// ```ignore
+/// let _batch = begin_batch();      // ① 先声明
+/// let mut core = cell.borrow_mut(); // ② 后声明
+/// core.insert_text("x");            //    信号写只入队，不 flush
+/// // ← ② 先析构：借用释放
+/// // ← ① 后析构：此刻才 flush，观察者读到的已不是借用中的状态
+/// ```
+///
+/// 反过来写（先借用后取守卫）会在 `drop` 顺序上失效：守卫先析构 → 借用还在时
+/// 就 flush → 观察者 `borrow()` 撞上 `already mutably borrowed`。
+#[must_use]
+pub struct BatchGuard(());
+
+impl Drop for BatchGuard {
+    fn drop(&mut self) {
+        with_global(|g| g.batch_depth -= 1);
+        let is_outer = with_global(|g| g.batch_depth == 0);
+        if is_outer {
+            flush();
+        }
+    }
+}
+
+/// 开启一个手动批次，语义见 [`BatchGuard`]。
+///
+/// 返回类型本身已标 `#[must_use]`，这里不再重复标注。
+pub fn begin_batch() -> BatchGuard {
+    with_global(|g| g.batch_depth += 1);
+    BatchGuard(())
+}
+
 /// 双缓冲 flush：处理当前批次，新触发的推入 next_batch，交替处理直到都为空。
 ///
 /// 安全上限防止副作用循环导致死循环。

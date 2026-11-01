@@ -5,11 +5,23 @@
 //! 同时实现 [`Selectable2`]（供 `SelectionManager2` 派生全局选区）与
 //! [`EditableTextHandle`]（供引擎路由键盘 / IME / 剪贴板快捷键）。
 //!
+//! # 编辑态在 `EditCore`（`wy-text`），这里只管几何与呈现
+//!
+//! 文本、光标 / 选区、字素与词边界、撤销重做、IME 组合态、掩码与占位的显示映射
+//! 全部由 [`EditCore`] 持有——它就是 Kotlin `EditableTextNode` 的纯逻辑层。
+//! 本模块只保留组件该做的事：段落缓存与排版、光标矩形、垂直移动（依赖行几何，
+//! 纯逻辑层给不出）、绘制、命中、闪烁、跨组件选区协调。
+//!
+//! **借用纪律**：`core` 装在 `RefCell` 里，任何 `borrow_mut()` 都必须在调用外部
+//! 回调之前释放。`Signal::set` 会**同步** flush 观察者，而观察者（选区派生 memo）
+//! 会回头读内核；那一刻还握着借用就是 `RefCell already mutably borrowed`。
+//! `EditableTextController::edit` / `with_core` / `sync_params` 里的
+//! `begin_batch()` 正是为此存在（见 `wy_signal::BatchGuard`）。
+//!
 //! # 索引空间（必要的管道，不是取巧）
 //!
-//! 内部光标 / 选区真相（`caretPair`）、`Graphemes` / `Words` / `UndoRedo` 全部用
-//! **字符（Unicode 标量）索引**，与 TS 的 UTF-16 索引在 BMP 文本上数值一致
-//! （仅 astral emoji 上有差异）。段落 [`TextParagraph`] 由 `wy_text` 提供，其 API
+//! 内核索引一律是**字符（Unicode 标量）索引**，与 TS 的 UTF-16 索引在 BMP 文本上
+//! 数值一致（仅 astral emoji 上有差异）。段落 [`TextParagraph`] 由 `wy_text` 提供，其 API
 //! （`glyph_position_at_coordinate` / `rects_for_range` / `line_metrics` /
 //! `word_boundary`）全部用**字节偏移**。因此在"段落 API 边界"统一做 字符↔字节
 //! 转换：进入段落前 `char_to_byte(display_text, idx)`，拿回后 `byte_to_char`。
@@ -39,7 +51,6 @@ use std::rc::Rc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use wy_render::{Color, Point, Rect, Scene};
-use wy_signal::{create_signal, GetValue, SetValue, Signal};
 use wy_text::{
     build_paragraph, FontContext, RectStyle, TextAlign, TextDecoration, TextParagraph, TextRect,
     TextSpan, TextStyle,
@@ -51,21 +62,19 @@ use crate::canvas_render2::focus::{
     self, EditableTextHandle, InputOverlayRect, KeyCode2, KeyEvent2,
 };
 use crate::canvas_render2::geometry::RectF;
-use crate::canvas_render2::graphemes::{Graphemes, Words};
+use crate::canvas_render2::graphemes::Words;
 use crate::canvas_render2::node2::{always, Axis, Get, ImeExt, LayoutSize, Node2};
 use crate::canvas_render2::protocol::MouseEvent2;
 use crate::canvas_render2::selection::{
     Rect2, SelPair2, SelPoint2, Selectable2, SelectableExt, SelectionManager2,
 };
-use crate::canvas_render2::tab::{display_to_logic, expand_tabs, logic_to_display};
 use crate::canvas_render2::text_defaults::{placeholder_color, text_color};
 use crate::canvas_render2::text_metric::ink_shift_y_of;
-use crate::canvas_render2::undo_redo::{
-    DeleteTextAction, InsertTextAction, ReplaceSelectionAction, TextState, UndoRedo,
-};
 use crate::canvas_render2::util::MAX_LAYOUT_WIDTH;
 use crate::primitives::ImeEvent;
 use crate::{rec, Node2Props};
+use wy_signal::begin_batch;
+use wy_text::EditCore;
 
 thread_local! {
     /// 跨调用复用的字体上下文（Parley 需要可变引用）。
@@ -280,12 +289,14 @@ pub fn editable_text_node(
         has_explicit_height,
         explicit_height,
         selection_manager,
-        caret_pair: create_signal(None),
-        composing_text: create_signal(String::new()),
-        composing_cursor_pos: create_signal(0),
-        composition_base: RefCell::new(None),
-        undo_redo: RefCell::new(UndoRedo::new(max_history_size)),
-        preferred_x: Cell::new(None),
+        core: RefCell::new({
+            let mut c = EditCore::with_text(text());
+            c.single_line = single_line();
+            c.max_history_size = max_history_size;
+            c.set_placeholder(placeholder());
+            c.set_obscure_text(obscure());
+            c
+        }),
         paragraph_cache: RefCell::new(ParagraphCache::default()),
         blink_anchor: Cell::new(None),
         was_focused: Cell::new(false),
@@ -399,15 +410,13 @@ struct EditableTextController {
     has_explicit_height: bool,
     explicit_height: Get<f32>,
     selection_manager: Option<Rc<SelectionManager2>>,
-    /// 本地光标 / 选区真相（唯一可变事实：`[anchor, focus]` 字符索引）。
-    caret_pair: Signal<Option<[usize; 2]>>,
-    composing_text: Signal<String>,
-    composing_cursor_pos: Signal<usize>,
-    /// 组合态起点与原始窗口文本 `[start, original]`。
-    composition_base: RefCell<Option<(usize, String)>>,
-    undo_redo: RefCell<UndoRedo>,
-    /// 垂直移动时的视觉列（TS `preferredX`，`NaN` = 未定 → `None`）。
-    preferred_x: Cell<Option<f32>>,
+    /// 编辑内核 [`EditCore`]：文本 / 光标 / 选区 / IME 组合 / undo / 掩码显示
+    /// 映射的唯一真相源（对标 Kotlin `EditableTextNode` 的纯逻辑层）。
+    ///
+    /// 控制器自己只保留「几何与呈现」：段落缓存、光标矩形、垂直移动、绘制、
+    /// 命中、闪烁。**借用纪律**：`RefCell` 的借用绝不跨外部回调——`write_text`
+    /// 会调到宿主的 `on_text_change`，那时还握着借用就会重入 panic。
+    core: RefCell<EditCore>,
     paragraph_cache: RefCell<ParagraphCache>,
     /// 光标闪烁相位锚点：聚焦 / 光标移动时重置成"刚亮"，让点击后立刻看得到光标。
     blink_anchor: Cell<Option<Instant>>,
@@ -476,141 +485,117 @@ impl EditableTextController {
 
     /// 逻辑文本字符长度。
     fn text_len(&self) -> usize {
-        (self.text)().chars().count()
+        self.core.borrow().text_len()
     }
 
-    // ---- 光标 / 选区真相（唯一可变事实：caret_pair = [anchor, focus]）----
+    // ---- 光标 / 选区（真相在 `core`：`anchor` / `focus` 字符索引）----
 
     fn anchor_index(&self) -> Option<usize> {
-        self.caret_pair.get().map(|p| p[0])
+        self.core.borrow().anchor()
     }
 
     fn focus_index(&self) -> Option<usize> {
-        self.caret_pair.get().map(|p| p[1])
+        self.core.borrow().focus()
     }
 
     /// 钳制后的光标（塌缩时返回 0 或文本末尾）。
     fn cursor(&self) -> usize {
-        self.anchor_index()
-            .map_or(0, |a| coerce(a, 0, self.text_len()))
+        self.core.borrow().cursor()
     }
 
-    /// 选区锚点：未定位时回落到光标。
-    fn sel_anchor(&self) -> usize {
-        self.anchor_index().unwrap_or_else(|| self.cursor())
+    /// 垂直移动的视觉列（TS `preferredX`）。`None` = 还没定过。
+    ///
+    /// 核里用 `f32::NAN` 表示"未定"（Kotlin 同），这里翻译成 `Option`，
+    /// 让控制器不必到处写 `is_nan()`。
+    fn preferred_x(&self) -> Option<f32> {
+        let x = self.core.borrow().preferred_x();
+        (!x.is_nan()).then_some(x)
+    }
+
+    fn set_preferred_x(&self, v: Option<f32>) {
+        self.core
+            .borrow_mut()
+            .set_preferred_x(v.unwrap_or(f32::NAN));
     }
 
     fn local_sel_start(&self) -> usize {
-        match (self.anchor_index(), self.focus_index()) {
-            (Some(a), Some(b)) => (a.min(b)).clamp(0, self.text_len()),
-            _ => 0,
-        }
+        self.core.borrow().sel_start()
     }
 
     fn local_sel_end(&self) -> usize {
-        match (self.anchor_index(), self.focus_index()) {
-            (Some(a), Some(b)) => (a.max(b)).clamp(0, self.text_len()),
-            _ => 0,
-        }
+        self.core.borrow().sel_end()
     }
 
     /// 用钳制后的边界比较：文本被外部改短时残留的越界端点不应算"有选区"，
-    /// 否则 `replace_sel` 里 `s === e` 会回落到 `insertText` 形成相互递归（栈溢出）。
+    /// 否则替换选区会回落到"按光标插入"形成相互递归（栈溢出）。
     fn local_has_sel(&self) -> bool {
-        self.anchor_index().is_some()
-            && self.focus_index().is_some()
-            && self.local_sel_end() > self.local_sel_start()
+        self.core.borrow().has_selection()
     }
 
     fn set_cursor(&self, idx: usize) {
-        let c = coerce(idx, 0, self.text_len());
-        self.caret_pair.set(Some([c, c]));
+        self.core.borrow_mut().set_cursor(idx);
         // 光标位置变了：重新从"亮"开始闪，点击 / 方向键之后都不会有空窗。
         self.restart_blink();
     }
 
     fn extend_to(&self, new_pos: usize) {
-        self.caret_pair.set(Some([
-            self.sel_anchor(),
-            coerce(new_pos, 0, self.text_len()),
-        ]));
+        self.core.borrow_mut().extend_to(new_pos);
     }
 
     fn move_to(&self, new_pos: usize, extend: bool) {
-        if extend {
-            self.extend_to(new_pos);
-        } else {
-            self.set_cursor(new_pos);
-        }
+        self.core.borrow_mut().move_to(new_pos, extend);
     }
 
     // ---- 显示层（占位 / 掩码 / tab 展开）----
 
-    fn showing_placeholder(&self) -> bool {
+    /// 把节点参数同步进内核。
+    ///
+    /// `text` / `placeholder` / `obscure` / `single_line` 都是**外部真相源**
+    /// （调用方的信号），内核持有的是编辑期副本。任何"读内核"的入口先同步一次，
+    /// 外部改动（程序化 `set` 文本、切主题换占位文案、切掩码）才立刻生效。
+    ///
+    /// **只在值真的变了时才写**：`set_placeholder` / `set_obscure_text` 会递增
+    /// 修订号（信号写），无条件写会在绘制期自我触发重绘。
+    fn sync_params(&self) {
+        // 守卫先声明、借用后声明：析构顺序相反 → 借用先释放、批次后 flush，
+        // 观察者不会在借用期间回头读内核（见 `wy_signal::BatchGuard`）。
+        let _batch = begin_batch();
+        let mut c = self.core.borrow_mut();
         let t = (self.text)();
-        t.chars().count() == 0 && (self.placeholder)().chars().count() > 0
+        if c.text() != t {
+            c.replace_text(t);
+        }
+        let p = (self.placeholder)();
+        if c.placeholder() != p {
+            c.set_placeholder(p);
+        }
+        let o = (self.obscure)();
+        if c.obscure_text() != o {
+            c.set_obscure_text(o);
+        }
+        c.single_line = (self.single_line)();
+    }
+
+    fn showing_placeholder(&self) -> bool {
+        self.sync_params();
+        self.core.borrow().showing_placeholder()
     }
 
     fn display_text(&self) -> String {
-        if self.showing_placeholder() {
-            return (self.placeholder)();
-        }
-        if (self.obscure)() {
-            let t = (self.text)();
-            let total = t.chars().count();
-            let mut s = String::new();
-            let mut i = 0usize;
-            while i < total {
-                s.push('\u{2022}');
-                i = Graphemes::next_boundary(&t, i);
-            }
-            s
-        } else {
-            expand_tabs(&(self.text)())
-        }
+        self.sync_params();
+        self.core.borrow().display_text()
     }
 
     /// 逻辑索引 → 显示（字符）索引。
     fn logic_to_display_index(&self, pos: usize) -> usize {
-        if self.showing_placeholder() {
-            return 0;
-        }
-        let t = (self.text)();
-        let limit = coerce(pos, 0, t.chars().count());
-        if (self.obscure)() {
-            let mut i = 0usize;
-            let mut n = 0usize;
-            while i < limit {
-                let next = Graphemes::next_boundary(&t, i);
-                if next > limit {
-                    break;
-                }
-                i = next;
-                n += 1;
-            }
-            n
-        } else {
-            logic_to_display(&t, limit)
-        }
+        self.sync_params();
+        self.core.borrow().logic_to_display_index(pos)
     }
 
     /// 显示（字符）索引 → 逻辑索引。
     fn display_to_logic_index(&self, dpos: usize) -> usize {
-        if self.showing_placeholder() {
-            return 0;
-        }
-        let t = (self.text)();
-        if (self.obscure)() {
-            let mut i = 0usize;
-            let mut n = 0usize;
-            while i < t.chars().count() && n < dpos {
-                i = Graphemes::next_boundary(&t, i);
-                n += 1;
-            }
-            i
-        } else {
-            display_to_logic(&t, dpos)
-        }
+        self.sync_params();
+        self.core.borrow().display_to_logic_index(dpos)
     }
 
     /// 段落（显示文本排版）；`None` = 无文本。
@@ -828,7 +813,7 @@ impl EditableTextController {
         }
         let i = index.min(lines.len() - 1);
         let dt = self.display_text();
-        let px = self.preferred_x.get().unwrap_or(0.0);
+        let px = self.preferred_x().unwrap_or(0.0);
         let byte = p.position_in_line(i, px);
         let dpos = byte_to_char(&dt, byte);
         let logic = self.display_to_logic_index(dpos);
@@ -844,8 +829,8 @@ impl EditableTextController {
                 return;
             }
         };
-        if self.preferred_x.get().is_none() {
-            self.preferred_x.set(Some(m.1));
+        if self.preferred_x().is_none() {
+            self.set_preferred_x(Some(m.1));
         }
         let lines = match self.paragraph() {
             Some(p) => p.line_metrics(),
@@ -890,8 +875,8 @@ impl EditableTextController {
                 return;
             }
         };
-        if self.preferred_x.get().is_none() {
-            self.preferred_x.set(Some(m.1));
+        if self.preferred_x().is_none() {
+            self.set_preferred_x(Some(m.1));
         }
         let lines = match self.paragraph() {
             Some(p) => p.line_metrics(),
@@ -956,367 +941,148 @@ impl EditableTextController {
 
     // ---- 文本改写（经 undo/redo）----
 
-    /// 用 `[start, end)`（字符索引）替换为 `replacement`，返回新文本。
-    fn replace_range_text(&self, s: usize, e: usize, replacement: &str) -> String {
-        let t = (self.text)();
-        let bs = char_to_byte(&t, s);
-        let be = char_to_byte(&t, e.min(t.chars().count()));
-        format!("{}{}{}", &t[..bs], replacement, &t[be.min(t.len())..])
-    }
-
     fn write_text(&self, new_value: &str) {
         if let Some(f) = &self.on_text_change {
             f(new_value);
         }
     }
 
+    /// 在核上执行一次编辑动作；文本真的变了就回写外部。
+    ///
+    /// **借用只活在闭包内**：`write_text` 会调到宿主的 `on_text_change`，
+    /// 那一刻还握着 `RefCell` 借用，重入就会 panic。返回 `true` = 文本变了。
+    fn edit(&self, f: impl FnOnce(&mut EditCore)) -> bool {
+        self.sync_params();
+        let changed = {
+            let _batch = begin_batch();
+            let mut c = self.core.borrow_mut();
+            let before = c.text().to_string();
+            f(&mut c);
+            (c.text() != before).then(|| c.text().to_string())
+        };
+        match changed {
+            Some(t) => {
+                self.write_text(&t);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 只动光标 / 选区的动作：不回写文本，但要让光标重新从"亮"开始闪。
+    fn with_core(&self, f: impl FnOnce(&mut EditCore)) {
+        self.sync_params();
+        {
+            let _batch = begin_batch();
+            f(&mut self.core.borrow_mut());
+        }
+        self.restart_blink();
+    }
+
+    // ---- 文本改写（全部委托 `EditCore`，控制器不再自己拼字符串）----
+
     fn insert_text(&self, inserted: &str) {
         if (self.read_only)() {
             return;
         }
-        let inserted = if (self.single_line)() {
-            inserted.replace(['\n', '\r'], "")
-        } else {
-            inserted.to_string()
-        };
-        if inserted.is_empty() {
-            return;
-        }
-        if self.local_has_sel() {
-            self.replace_sel(&inserted);
-        } else {
-            self.insert_at_cursor(&inserted);
-        }
-    }
-
-    /// 无选区时按光标插入（与 `replace_sel` 的解耦点，避免相互递归）。
-    fn insert_at_cursor(&self, t: &str) {
-        let pos = self.cursor();
-        self.undo_redo.borrow_mut().push(InsertTextAction {
-            pos,
-            text: t.to_string(),
-        });
-        let new = self.replace_range_text(pos, pos, t);
-        self.write_text(&new);
-        self.set_cursor(pos + t.chars().count());
-    }
-
-    fn replace_sel(&self, replacement: &str) {
-        let s = self.local_sel_start();
-        let e = self.local_sel_end();
-        if s == e {
-            self.insert_at_cursor(replacement);
-            return;
-        }
-        self.undo_redo.borrow_mut().push(ReplaceSelectionAction {
-            start: s,
-            deleted: self.text_in_range(s, e),
-            inserted: replacement.to_string(),
-        });
-        let new = self.replace_range_text(s, e, replacement);
-        self.write_text(&new);
-        self.set_cursor(s + replacement.chars().count());
-    }
-
-    fn del_sel(&self) {
-        if !self.local_has_sel() {
-            return;
-        }
-        let s = self.local_sel_start();
-        let e = self.local_sel_end();
-        self.undo_redo.borrow_mut().push(DeleteTextAction {
-            start: s,
-            deleted: self.text_in_range(s, e),
-            is_forward: true,
-        });
-        let new = self.replace_range_text(s, e, "");
-        self.write_text(&new);
-        self.set_cursor(s);
+        self.edit(|c| c.insert_text(inserted));
+        self.restart_blink();
     }
 
     fn backspace(&self) {
-        if self.local_has_sel() {
-            self.del_sel();
-            return;
-        }
-        let pos = self.cursor();
-        if pos == 0 {
-            return;
-        }
-        let start = Graphemes::prev_boundary(&(self.text)(), pos);
-        if start >= pos {
-            return;
-        }
-        self.undo_redo.borrow_mut().push(DeleteTextAction {
-            start,
-            deleted: self.text_in_range(start, pos),
-            is_forward: false,
-        });
-        let new = self.replace_range_text(start, pos, "");
-        self.write_text(&new);
-        self.set_cursor(start);
+        self.edit(|c| c.backspace());
+        self.restart_blink();
     }
 
     fn delete_forward(&self) {
-        if self.local_has_sel() {
-            self.del_sel();
-            return;
-        }
-        let pos = self.cursor();
-        if pos >= self.text_len() {
-            return;
-        }
-        let end = Graphemes::next_boundary(&(self.text)(), pos);
-        if end <= pos {
-            return;
-        }
-        self.undo_redo.borrow_mut().push(DeleteTextAction {
-            start: pos,
-            deleted: self.text_in_range(pos, end),
-            is_forward: false,
-        });
-        let new = self.replace_range_text(pos, end, "");
-        self.write_text(&new);
-        self.set_cursor(pos);
+        self.edit(|c| c.delete());
+        self.restart_blink();
     }
 
     fn delete_word_backward(&self) {
-        if self.local_has_sel() {
-            self.del_sel();
-            return;
-        }
-        let pos = self.cursor();
-        if pos == 0 {
-            return;
-        }
-        let start = Words::prev_boundary(&(self.text)(), pos);
-        if start >= pos {
-            return;
-        }
-        self.undo_redo.borrow_mut().push(DeleteTextAction {
-            start,
-            deleted: self.text_in_range(start, pos),
-            is_forward: false,
-        });
-        let new = self.replace_range_text(start, pos, "");
-        self.write_text(&new);
-        self.set_cursor(start);
-        self.preferred_x.set(None);
+        self.edit(|c| c.delete_word_backward());
+        self.restart_blink();
     }
 
     fn delete_word_forward(&self) {
-        if self.local_has_sel() {
-            self.del_sel();
-            return;
-        }
-        let pos = self.cursor();
-        if pos >= self.text_len() {
-            return;
-        }
-        let end = Words::next_boundary(&(self.text)(), pos);
-        if end <= pos {
-            return;
-        }
-        self.undo_redo.borrow_mut().push(DeleteTextAction {
-            start: pos,
-            deleted: self.text_in_range(pos, end),
-            is_forward: false,
-        });
-        let new = self.replace_range_text(pos, end, "");
-        self.write_text(&new);
-        self.set_cursor(pos);
-        self.preferred_x.set(None);
+        self.edit(|c| c.delete_word_forward());
+        self.restart_blink();
     }
 
+    // ---- 光标 / 选区导航 ----
+
     fn move_left(&self) {
-        let p = self.cursor();
-        if p > 0 {
-            self.set_cursor(Graphemes::prev_boundary(&(self.text)(), p));
-        }
+        self.with_core(|c| c.move_left());
     }
 
     fn move_right(&self) {
-        let p = self.cursor();
-        if p < self.text_len() {
-            self.set_cursor(Graphemes::next_boundary(&(self.text)(), p));
-        }
+        self.with_core(|c| c.move_right());
     }
 
     fn move_prev_word(&self) {
-        self.set_cursor(Words::prev_boundary(&(self.text)(), self.cursor()));
+        self.with_core(|c| c.move_prev_word());
     }
 
     fn move_next_word(&self) {
-        self.set_cursor(Words::next_boundary(&(self.text)(), self.cursor()));
+        self.with_core(|c| c.move_next_word());
     }
 
     fn select_left(&self) {
-        let a = self.sel_anchor();
-        let f = self.focus_index().unwrap_or(a);
-        if f > 0 {
-            self.caret_pair
-                .set(Some([a, Graphemes::prev_boundary(&(self.text)(), f)]));
-        }
+        self.with_core(|c| c.select_left());
     }
 
     fn select_right(&self) {
-        let a = self.sel_anchor();
-        let f = self.focus_index().unwrap_or(a);
-        if f < self.text_len() {
-            self.caret_pair
-                .set(Some([a, Graphemes::next_boundary(&(self.text)(), f)]));
-        }
+        self.with_core(|c| c.select_right());
     }
 
-    // ---- 撤销 / 重做 ----
-
-    fn apply_state(&self, s: &TextState) {
-        self.write_text(&s.text);
-        self.set_cursor(s.cursor);
-    }
+    // ---- 撤销 / 重做（组合态内的拦截在核里）----
 
     fn undo(&self) {
-        if self.composing_text.get().chars().count() > 0 {
-            return;
-        }
-        let s = self.undo_redo.borrow_mut().undo(&TextState {
-            text: (self.text)(),
-            cursor: self.cursor(),
-        });
-        if let Some(s) = s {
-            self.apply_state(&s);
-        }
+        self.edit(|c| c.undo());
+        self.restart_blink();
     }
 
     fn redo(&self) {
-        if self.composing_text.get().chars().count() > 0 {
-            return;
-        }
-        let s = self.undo_redo.borrow_mut().redo(&TextState {
-            text: (self.text)(),
-            cursor: self.cursor(),
-        });
-        if let Some(s) = s {
-            self.apply_state(&s);
-        }
+        self.edit(|c| c.redo());
+        self.restart_blink();
     }
 
-    // ---- 选区吸收 / IME ----
+    // ---- 选区吸收 / IME（逻辑全在核里，这里只做全局选区吸收与外部回写）----
 
     /// 若本地光标未定位，吸收全局（指针）选区为本地点对。
+    ///
+    /// 纯逻辑层的 `on_composing` 只看得见本地 `anchor`/`focus`，所以必须先把跨组件
+    /// 选区写进核，组合窗口才会落在用户真正选中的那一段上。
     fn absorb_global_selection(&self) {
         if self.anchor_index().is_some() && self.focus_index().is_some() {
             return;
         }
         if let Some(m) = self.manager() {
             if let Some((a, b)) = m.range_of(&self.self_sel()) {
-                self.caret_pair.set(Some([a, b]));
+                self.core.borrow_mut().select_range(a, b);
             }
         }
-    }
-
-    /// 提交组合串：清掉组合态但保留已上屏文本。
-    fn commit_composition(&self) {
-        let start = self.composition_base.borrow().as_ref().map(|b| b.0);
-        let win_len = self.composing_text.get().chars().count();
-        *self.composition_base.borrow_mut() = None;
-        self.composing_text.set(String::new());
-        self.composing_cursor_pos.set(0);
-        self.preferred_x.set(None);
-        if let Some(start) = start {
-            self.set_cursor(coerce(start + win_len, 0, self.text_len()));
-        }
-    }
-
-    /// 结束组合：回退窗口文本（`restore` = 还原到原始）。
-    fn end_composition(&self, restore: bool) {
-        let base = self.composition_base.borrow_mut().take();
-        let win_len = self.composing_text.get().chars().count();
-        self.composing_text.set(String::new());
-        self.composing_cursor_pos.set(0);
-        self.preferred_x.set(None);
-        let (start, restored) = match base {
-            None => {
-                if win_len == 0 {
-                    return;
-                }
-                (coerce(self.cursor(), 0, self.text_len()), String::new())
-            }
-            Some((s, orig)) => (s, if restore { orig } else { String::new() }),
-        };
-        let cur = (self.text)();
-        if start <= cur.chars().count() {
-            let byte_start = char_to_byte(&cur, start);
-            let byte_end = char_to_byte(&cur, (start + win_len).min(cur.chars().count()));
-            let new = format!(
-                "{}{}{}",
-                &cur[..byte_start],
-                restored,
-                &cur[byte_end.min(cur.len())..]
-            );
-            if new != cur {
-                self.write_text(&new);
-            }
-        }
-        self.set_cursor(start);
     }
 
     fn on_composing(&self, t: &str, cursor_position: usize) {
         if (self.read_only)() {
             return;
         }
-        if t.is_empty() {
-            // 空串 = 平台上报「本次组合结束」，只**移除窗口**，已确认文本由平台
-            // 经常规路径（键盘 / `Commit`）另行写入。
-            //
-            // 这里跟 **Kotlin** 走（`onComposing(text.isEmpty()) → endComposition(false)`，
-            // 见 `EditableComposingTest.composingFramesReplaceWindowAndCommitRemovesIt`），
-            // 不跟 TS 的 `commitComposition()`——TS 那个分支会把窗口文本留在正文里并把
-            // 光标推到窗口尾；winit 在 Windows 上是「先 `Preedit("")` 清窗、再 `Commit`」，
-            // 走 TS 语义就会得到「nihao你好」这种残留串。
-            self.end_composition(false);
-            return;
-        }
         self.absorb_global_selection();
-        let cur = (self.text)();
-        // 先取快照再分支。**不要**写成 `if let Some(b) = self.composition_base.borrow()`
-        // ——edition 2021 里那个临时 `Ref` 会活到整个 `if let`（含 `else` 块）结束，
-        // 于是在 `else` 里 `borrow_mut()` 同一格必 panic（`RefCell already borrowed`）。
-        // TS 那边是普通局部变量 `compositionBase`，没有这层借用，所以这个坑只在 Rust 侧。
-        let base_start = self.composition_base.borrow().as_ref().map(|b| b.0);
-        let (start, win_len) = if let Some(s) = base_start {
-            (s, self.composing_text.get().chars().count())
-        } else {
-            let s = if self.local_has_sel() {
-                self.local_sel_start()
-            } else {
-                coerce(self.cursor(), 0, cur.chars().count())
-            };
-            let e = if self.local_has_sel() {
-                self.local_sel_end()
-            } else {
-                s
-            };
-            self.composition_base
-                .borrow_mut()
-                .replace((s, self.text_in_range(s, e)));
-            (s, e - s)
-        };
-        let head_end = start.min(cur.chars().count());
-        let tail_start = (start + win_len).min(cur.chars().count());
-        let byte_head = char_to_byte(&cur, head_end);
-        let byte_tail = char_to_byte(&cur, tail_start);
-        let new = format!(
-            "{}{}{}",
-            &cur[..byte_head],
-            t,
-            &cur[byte_tail.min(cur.len())..]
-        );
-        self.write_text(&new);
-        self.set_cursor(start + t.chars().count());
-        self.composing_text.set(t.to_string());
-        self.composing_cursor_pos
-            .set(coerce(cursor_position, 0, t.chars().count()));
+        self.edit(|c| c.on_composing(t, cursor_position));
+        self.restart_blink();
+    }
+
+    /// 提交组合串：清掉组合态，保留已上屏的窗口文本。
+    fn commit_composition(&self) {
+        self.edit(|c| c.commit_composition());
+        self.restart_blink();
+    }
+
+    /// 结束组合：`restore = true` 还原被替换的原文（取消语义）。
+    fn end_composition(&self, restore: bool) {
+        self.edit(|c| c.end_composition(restore));
+        self.restart_blink();
     }
 
     fn commit_composing_text(&self, final_text: &str) {
@@ -1326,18 +1092,9 @@ impl EditableTextController {
         self.commit_composition();
     }
 
-    fn composing_start(&self) -> usize {
-        // 先取快照、再钳制：不在同一条表达式里「借用着 `composition_base`
-        // 又调 `self.cursor()`」。edition 2021 下 `if let` / 方法链里的临时
-        // `Ref` 会活到整条语句结束，后续任何 `borrow_mut()` 都会 panic
-        // （参见 [`Self::on_composing`] 的同类注释）。
-        let start = self.composition_base.borrow().as_ref().map(|b| b.0);
-        coerce(start.unwrap_or_else(|| self.cursor()), 0, self.text_len())
-    }
-
     /// 鼠标按下：落点定位光标并塌缩（已有分配选区时由拖拽接管）。
     fn mouse_down(&self, local_x: f32, local_y: f32) {
-        self.preferred_x.set(None);
+        self.set_preferred_x(None);
         if let Some(m) = self.manager() {
             if let Some((a, b)) = m.range_of(&self.self_sel()) {
                 if b > a {
@@ -1498,13 +1255,12 @@ impl EditableTextController {
         }
 
         // 组合串高亮 + 下划线。
-        if self.composing_text.get().chars().count() > 0 {
+        // 显示区间由核直接给（`composing_display_range`），与光标绘制共用同一套
+        // 「逻辑索引 → 显示索引」换算，避免这里再手算一次起点+长度。
+        let composing_range = self.core.borrow().composing_display_range();
+        if let Some((cs, ce)) = composing_range {
             if let Some(p) = &p {
                 let dt = self.display_text();
-                let cs = self.logic_to_display_index(self.composing_start());
-                let ce = self.logic_to_display_index(
-                    self.composing_start() + self.composing_text.get().chars().count(),
-                );
                 let sb = char_to_byte(&dt, cs);
                 let eb = char_to_byte(&dt, ce);
                 let bg = Color::rgba(200, 200, 255, 50);
@@ -1560,7 +1316,7 @@ impl EditableTextController {
                 } else {
                     self.backspace();
                 }
-                self.preferred_x.set(None);
+                self.set_preferred_x(None);
                 true
             }
             KeyCode2::DELETE => {
@@ -1569,15 +1325,12 @@ impl EditableTextController {
                 } else {
                     self.delete_forward();
                 }
-                self.preferred_x.set(None);
+                self.set_preferred_x(None);
                 true
             }
             KeyCode2::LEFT => {
                 if e.ctrl && e.shift {
-                    let a = self.sel_anchor();
-                    let f = self.focus_index().unwrap_or(a);
-                    self.caret_pair
-                        .set(Some([a, Words::prev_boundary(&(self.text)(), f)]));
+                    self.with_core(|c| c.select_prev_word());
                 } else if e.ctrl {
                     self.move_prev_word();
                 } else if e.shift {
@@ -1585,15 +1338,12 @@ impl EditableTextController {
                 } else {
                     self.move_left();
                 }
-                self.preferred_x.set(None);
+                self.set_preferred_x(None);
                 true
             }
             KeyCode2::RIGHT => {
                 if e.ctrl && e.shift {
-                    let a = self.sel_anchor();
-                    let f = self.focus_index().unwrap_or(a);
-                    self.caret_pair
-                        .set(Some([a, Words::next_boundary(&(self.text)(), f)]));
+                    self.with_core(|c| c.select_next_word());
                 } else if e.ctrl {
                     self.move_next_word();
                 } else if e.shift {
@@ -1601,7 +1351,7 @@ impl EditableTextController {
                 } else {
                     self.move_right();
                 }
-                self.preferred_x.set(None);
+                self.set_preferred_x(None);
                 true
             }
             KeyCode2::HOME => {
@@ -1614,7 +1364,7 @@ impl EditableTextController {
                 } else {
                     self.set_cursor(self.line_start(self.focus_index().unwrap_or(0)));
                 }
-                self.preferred_x.set(None);
+                self.set_preferred_x(None);
                 true
             }
             KeyCode2::END => {
@@ -1627,7 +1377,7 @@ impl EditableTextController {
                 } else {
                     self.set_cursor(self.line_end(self.focus_index().unwrap_or(0)));
                 }
-                self.preferred_x.set(None);
+                self.set_preferred_x(None);
                 true
             }
             KeyCode2::PAGE_UP => {
@@ -1663,7 +1413,7 @@ impl EditableTextController {
                 } else {
                     self.insert_text("\n");
                 }
-                self.preferred_x.set(None);
+                self.set_preferred_x(None);
                 true
             }
             KeyCode2::TAB => {
@@ -1679,7 +1429,7 @@ impl EditableTextController {
                     return false;
                 }
                 // 组合态下键盘由输入法独占，不再按可打印字符插入。
-                if self.composing_text.get().chars().count() > 0 {
+                if self.core.borrow().in_composing() {
                     return false;
                 }
                 // 只认单字符（与旧版 canvasRender 同口径）。
@@ -1691,7 +1441,7 @@ impl EditableTextController {
                 if code < 0x20 || code == 0x7f {
                     return false;
                 }
-                self.preferred_x.set(None);
+                self.set_preferred_x(None);
                 self.end_composition(false);
                 self.insert_text(&e.key);
                 true
@@ -1819,7 +1569,7 @@ impl EditableTextHandle for EditableTextController {
             return;
         }
         clipboard_set_text(&self.text_in_range(self.local_sel_start(), self.local_sel_end()));
-        self.del_sel();
+        self.edit(|c| c.delete_selection());
     }
 
     fn copy(&self) {
@@ -1835,30 +1585,22 @@ impl EditableTextHandle for EditableTextController {
         if t.is_empty() {
             return;
         }
-        self.preferred_x.set(None);
+        self.set_preferred_x(None);
         self.end_composition(false);
         self.insert_text(&t);
     }
 
     fn select_all(&self) {
-        self.caret_pair.set(Some([0, self.text_len()]));
+        self.with_core(|c| c.select_all());
     }
 
     fn select_range(&self, anchor_offset: usize, focus_offset: usize) {
-        let len = self.text_len();
-        self.preferred_x.set(None);
-        self.caret_pair.set(Some([
-            coerce(anchor_offset, 0, len),
-            coerce(focus_offset, 0, len),
-        ]));
+        self.set_preferred_x(None);
+        self.with_core(|c| c.select_range(anchor_offset, focus_offset));
     }
 
     fn collapse_external_selection(&self) {
-        if let (Some(a), Some(f)) = (self.anchor_index(), self.focus_index()) {
-            if f != a {
-                self.caret_pair.set(Some([a, a]));
-            }
-        }
+        self.with_core(|c| c.collapse_selection());
     }
 
     fn on_composing(&self, text: &str, cursor: usize) {
@@ -1896,6 +1638,9 @@ mod tests {
     use super::*;
     use crate::canvas_render2::build_root_node2;
     use crate::canvas_render2::node2::Node2Props;
+    // 编辑态搬进 `EditCore` 之后，顶层不再依赖 `wy_signal`；测试要自建信号，
+    // 在这里单独引入（比让生产代码挂着用不到的 import 干净）。
+    use wy_signal::{create_signal, GetValue, SetValue, Signal};
 
     /// 建一个最小的编辑器节点（挂到空根下取出来）。
     fn editor_node() -> Node2 {

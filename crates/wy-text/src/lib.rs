@@ -7,15 +7,25 @@
 //! - [`build_paragraph`] — 排版入口函数
 //! - [`EditableParagraph`] — 可编辑段落（封装 Parley PlainEditor）
 //!
-//! # 两套编辑内核（现状说明，清理代码前必读）
+//! # 编辑内核：`EditCore` 是唯一真相源
 //!
-//! | 实现 | 状态 |
+//! | 层 | 归谁 |
 //! |---|---|
-//! | `wy-mve::canvas_render2::editable_text_node` | **在用**：节点自带光标/选区/IME/剪贴板，编辑框组件就是它 |
-//! | 本 crate 的 [`EditCore`] / [`EditableParagraph`] / [`TextBuffer`] | **未接线**：Kotlin `EditableTextNode` 的逐条复刻，74 条测试（字素/词边界、IME 组合、obscure 掩码、样式段边界表） |
+//! | 文本 / 光标 / 选区 / undo / IME 组合态 / 掩码显示映射 | 本 crate 的 [`EditCore`] |
+//! | 段落缓存与排版、光标矩形、垂直移动、命中、绘制、闪烁、跨组件选区 | `wy-mve::canvas_render2::editable_text_node` |
 //!
-//! 后者没有任何调用方，但它**不是死代码**：它是移植进度的记录，也是把编辑器
-//! 切到统一内核时的落点。判断"能否删"要看它有没有替代品，不能只看引用数。
+//! 判据只有一条：**纯逻辑层给不出答案的才留在组件**。垂直移动是典型例子——
+//! `move_to_line` 要行盒，所以行号解析留在组件，内核只负责"第几行第几列"。
+//!
+//! 历史：这套内核曾是 Kotlin `EditableTextNode` 的逐条复刻、**零调用**，而组件层
+//! 自己又写了一份（`caret_pair` / `composing_text` / `undo_redo` / `preferred_x`
+//! 六个字段各管一摊）。2026-11-01 已完成统一，组件层不再持有编辑状态；
+//! 审计记录见 `docs/05-canvasRender2对标审计.md` §15。
+//!
+//! [`EditCore`] 内部用 [`TextBuffer`]（`editing` 模块）存文本与样式段边界表——
+//! 它是内核的存储层，不是并列的第二实现。另一条线 [`EditableParagraph`] 是
+//! Parley `PlainEditor` 那一派的封装，目前没有编辑框在走它；删它要先确认没有
+//! 替代品，不能只看引用数。
 
 mod build_paragraph;
 mod edit_core;
