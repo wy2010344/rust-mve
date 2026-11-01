@@ -932,3 +932,89 @@ TS 给内层编辑器写的是 `width: 342`（= 356 − 6×2 − 1×2）与 `hei
 验证：`cargo test --workspace --lib` **546 passed**；`--example canvas2-todo` 3 passed；
 `wy-mve-macros` 4 passed；`--fill "note=第一行\n\n第三行"` 出图确认空行占位正常
 （427 图元，字体排版与行距不变）。
+
+## 15. 编辑内核统一：两套变一套（2026-11-01 收尾）
+
+### 15.1 起点：2503 行零消费的 `EditCore`
+
+`wy-text` 里躺着 `edit_core.rs`(1687) + `editable.rs`(341) + `editing.rs`(475)
+= 2503 行、74 条测试，是 Kotlin `EditableTextNode` 纯逻辑层的逐条复刻，全绿，
+**但在 `wy-text` 之外一个调用点都没有**。
+`canvas_render2::editable_text_node` 自己在 2368 行里又写了一份：
+`caret_pair` / `composing_text` / `composing_cursor_pos` / `composition_base` /
+`undo_redo` / `preferred_x` 六个字段各管一摊，`undo_redo.rs` 单独 297 行。
+
+两套实现 = 两份真相。空行、掩码、IME 组合态这类行为一旦只改一边，症状是
+"某个入口对、另一个入口不对"，最难查。本轮把组件层**统一到 `EditCore`**上。
+
+### 15.2 职责切分（谁管什么，边界在哪）
+
+| 层 | 归 `EditCore`（`wy-text`） | 归组件（`canvas_render2`） |
+|---|---|---|
+| 文本 | 正文、`replace_text` | 对外 `Signal<String>` 的双向同步 |
+| 光标 / 选区 | 字符索引、锚点、扩展、词/字素边界 | 全局选区协调（`SelectionManager2`） |
+| 撤销重做 | `undo` / `redo` + 历史栈 | 快捷键路由 |
+| IME | 组合串、组合态、掩码映射、`commit_composition` | 候选窗定位（要行几何） |
+| 段落 | — | `ParagraphCache` 与失效 |
+| 几何 | — | 光标矩形、垂直移动 `preferred_x` 消费方、命中、绘制、闪烁 |
+
+判据只有一条：**纯逻辑层给不出答案的才留在组件**。垂直移动是典型例子——
+`move_to_line` 要行盒，`EditCore` 没有排版，所以行号解析留在组件，`EditCore`
+只负责"给我第几行第几列"。
+
+### 15.3 三个适配壳：`sync_params` / `edit` / `with_core`
+
+组件层不再直接摸字段，只剩三条通路：
+
+```rust
+fn sync_params(&self);                        // 外部 Signal → 内核（text/placeholder/obscure/single_line）
+fn edit(&self, f: impl FnOnce(&mut EditCore)) -> bool;  // 可能改文本的动作；改了就写回
+fn with_core(&self, f: impl FnOnce(&mut EditCore));     // 只动光标/选区
+```
+
+`edit` 用"前后文本比对"决定要不要 `write_text`——内核的每个增删都自带这个
+判断太啰嗦，而 `Signal::set` 同值写会白白唤醒一次重绘。
+
+### 15.4 借用纪律：`Signal::set` 是同步 flush，`BatchGuard` 是必需品
+
+这是本轮踩得最深的一处。`Signal::set` **同步**通知观察者，观察者
+（`SelectionManager2` 派生的选区 memo）会回头 `core.borrow()`。而
+`edit()` 里 `borrow_mut()` 还活着 → `RefCell already mutably borrowed`，
+`wy-engine` 三条 IME 测试直接崩。
+
+第一反应是"改成 flush 后再借"，但那要求把借用切碎、把中间状态外露。正解是把
+**flush 推迟到借用释放之后**，靠析构顺序而不是手工调用：
+
+```rust
+let _batch = begin_batch();        // ① 先声明
+let mut core = cell.borrow_mut();  // ② 后声明
+// ← ② 先析构：借用释放
+// ← ① 后析构：此刻 flush，观察者读到的已经不是借用中的状态
+```
+
+声明顺序反过来写就失效（守卫先析构 → 借用还在时就 flush）。`wy-signal` 因此
+新增 `BatchGuard` / `begin_batch()`：与 `batch(|| ..)` 的区别是**不包闭包**，
+能给"借用 + 批次"规定析构次序。
+
+### 15.5 顺带删掉的三个旧模块
+
+| 删除 | 行数 | 理由 |
+|---|---|---|
+| `canvas_render2/undo_redo.rs` | 297 | 内核已有 `undo`/`redo`，这份是第二实现 |
+| `canvas_render2/tab.rs` 的 `logic_to_display` / `display_to_logic` | 净 −25 | 用 `text.len()`（字节）当字符索引上界，多字节文本必 panic；且无调用点 |
+| `canvas_render2/graphemes.rs` 的 `Graphemes` | 净 −55 | 与内核字素边界重复；`Words`（双击选词）保留 |
+
+`tab.rs` 只留 `expand_tabs` / `SPACES_PER_TAB`（排版前把 `\t` 换成空格，纯字体层）。
+
+### 15.6 回归门
+
+| 层 | 测试 | 锁什么 |
+|---|---|---|
+| `wy-text` | `commit_composition_keeps_window_text` | 组合提交**保留**已上屏文本（不同于 `end_composition(false)`） |
+| `wy-text` | `commit_composition_without_window_is_harmless` | 无组合态时调用是空操作 |
+| `wy-engine` | `empty_preedit_ends_composing` 等 8 条 | 借用纪律：`Signal::set` 同步 flush 不再撞借用 |
+
+验证：`cargo test --workspace --lib` **543 passed**；`--example canvas2-todo`
+3 passed（427 图元）；快照 480×1240 与统一前 **像素级 `bbox = None`**；
+`cargo clippy --workspace --all-targets` 与 `RUSTDOCFLAGS=-D warnings cargo doc`
+均无代码告警。
