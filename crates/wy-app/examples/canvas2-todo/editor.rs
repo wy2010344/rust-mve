@@ -389,6 +389,91 @@ mod tests {
         );
     }
 
+    /// 真机全链路复现：多行备注里，末行第 3/4 字之后按**上键**必须保持视觉列，
+    /// 绝不能落回行首（用户报告的回归）。
+    ///
+    /// 与上面的单测不同，这条走 `WyApp` 真实路径：指针聚焦 → Tab 切字段 →
+    /// 键盘字符 + IME `Commit` 输入 → 方向键定位 → 上键。焦点链、SelectionManager、
+    /// 外部 text 信号的同步 flush、IME guard 全部在场——编辑器单测覆盖不到的
+    /// 正是这些。
+    #[test]
+    fn up_from_mid_last_line_keeps_column_real_app() {
+        use winit::dpi::PhysicalPosition;
+        use winit::event::{ElementState, MouseButton, WindowEvent};
+        use wy_engine::runner::WyApp;
+        use wy_mve::canvas_render2::focus;
+        use wy_mve::ImeEvent;
+        use wy_render::event::{Key, KeyEvent};
+
+        let mut app = crate::make_app();
+        let (w, h) = (480.0f32, 1240.0f32);
+        let mut scene = wy_render::Scene::new();
+        app.draw(&mut scene, w, h);
+
+        // 扫描点击进第一个输入框（真机指针路径），再 Tab 到多行备注（focus_order 2）。
+        let mut focused_at: Option<(i32, i32)> = None;
+        'sweep: for y in (4..h as i32).step_by(12) {
+            for x in (4..w as i32).step_by(12) {
+                let pos = PhysicalPosition::new(f64::from(x), f64::from(y));
+                app.handle_event(&WindowEvent::CursorMoved {
+                    device_id: winit::event::DeviceId::dummy(),
+                    position: pos,
+                });
+                app.handle_event(&WindowEvent::MouseInput {
+                    device_id: winit::event::DeviceId::dummy(),
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                });
+                app.handle_event(&WindowEvent::MouseInput {
+                    device_id: winit::event::DeviceId::dummy(),
+                    state: ElementState::Released,
+                    button: MouseButton::Left,
+                });
+                if focus::active_editor().is_some() {
+                    focused_at = Some((x, y));
+                    break 'sweep;
+                }
+            }
+        }
+        assert!(focused_at.is_some(), "点不进任何输入框");
+
+        let key = |k: Key| KeyEvent::new(k, true);
+        // Tab 一次：draft(1) → note(2)。
+        app.handle_key_event(&key(Key::Tab));
+        // 输入第一行：键盘字符路径。
+        for c in "abcd".chars() {
+            app.handle_key_event(&key(Key::Char(c)));
+        }
+        assert_eq!(note_text(), "abcd", "Tab 后应聚焦在多行备注字段");
+
+        // 换行（多行 = 插入 \n），再 IME Commit 末行文字（真机中文路径）。
+        app.handle_key_event(&key(Key::Enter));
+        app.handle_ime_event(&ImeEvent::Commit("最后一行测试".into()));
+
+        let h = focus::active_editor().expect("输入后活跃编辑器必须在");
+        let caret = || h.cursor_sel_pair().map_or(0, |p| p.focus.offset);
+        eprintln!("[REAL] note={:?} caret={}", note_text(), caret());
+        assert_eq!(note_text(), "abcd\n最后一行测试", "IME 提交应上屏");
+        assert_eq!(caret(), 11, "IME 提交后光标应在末尾（4 + 1 + 6 = 11）");
+
+        // 左移 2 次：光标到末行第 4 字之后（"最后一行 | 测试"）。
+        app.handle_key_event(&key(Key::ArrowLeft));
+        app.handle_key_event(&key(Key::ArrowLeft));
+        let before = caret();
+        eprintln!("[REAL] before UP = {before}");
+        assert_eq!(before, 9, "左移两次应停在末行第 4 字之后");
+
+        // 上键：保持视觉列 → 落在行 0 的 x 对应列（>0），绝不能回行首。
+        app.handle_key_event(&key(Key::ArrowUp));
+        let after = caret();
+        eprintln!("[REAL] after UP = {after}");
+        assert!(
+            after > 0,
+            "末行第 4 字之后按上键不能回到行首（offset 0），实际 {after}"
+        );
+        assert!(after <= 4, "上键应落在上一行内，实际 {after}");
+    }
+
     /// 建一棵"视口 → 面板"的树，返回面板节点（布局在首次读几何时惰性求值）。
     fn mount_panel() -> Node2 {
         let root = build_root_fc(node2! {

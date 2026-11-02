@@ -73,7 +73,7 @@ use crate::canvas_render2::text_metric::ink_shift_y_of;
 use crate::canvas_render2::util::MAX_LAYOUT_WIDTH;
 use crate::primitives::ImeEvent;
 use crate::{rec, Node2Props};
-use wy_signal::begin_batch;
+use wy_signal::{create_signal, GetValue, SetValue, Signal};
 use wy_text::EditCore;
 
 thread_local! {
@@ -289,6 +289,9 @@ pub fn editable_text_node(
         has_explicit_height,
         explicit_height,
         selection_manager,
+        caret_pair: create_signal(None),
+        composing_text: create_signal(String::new()),
+        composing_cursor_pos: create_signal(0usize),
         core: RefCell::new({
             let mut c = EditCore::with_text(text());
             c.single_line = single_line();
@@ -410,8 +413,20 @@ struct EditableTextController {
     has_explicit_height: bool,
     explicit_height: Get<f32>,
     selection_manager: Option<Rc<SelectionManager2>>,
-    /// 编辑内核 [`EditCore`]：文本 / 光标 / 选区 / IME 组合 / undo / 掩码显示
-    /// 映射的唯一真相源（对标 Kotlin `EditableTextNode` 的纯逻辑层）。
+    /// 唯一可置信信号源：本地光标 / 选区（原子写入，复刻 Kotlin `caretPair`）。
+    ///
+    /// 单一 `Option<(anchor, focus)>` 信号，保证 anchor 与 focus 永远同步更新、
+    /// 不存在半新半旧的中间态。`localSelStart` / `cursor` / `cursorSelPair` /
+    /// `composing*` 等所有派生量都**直接读它**（不再进 `RefCell<EditCore>` 去借用），
+    /// 这样 SelectionManager 的派生 memo 订阅的是这个信号——正是之前把信号塞进
+    /// `RefCell` 而丢失的响应式链条。
+    caret_pair: Signal<Option<(usize, usize)>>,
+    /// IME 组合串（信号承载，绘制依赖追踪）。
+    composing_text: Signal<String>,
+    /// 组合串内 IME 光标偏移（overlay 候选框定位参考）。
+    composing_cursor_pos: Signal<usize>,
+    /// 编辑内核 [`EditCore`]：文本缓冲 / undo / 掩码显示映射的**纯逻辑**（已无信号，
+    /// 仅剩 `RefCell` 包裹的可变数据）。光标 / 选区 / 组合态的信号由上方控制器字段持有。
     ///
     /// 控制器自己只保留「几何与呈现」：段落缓存、光标矩形、垂直移动、绘制、
     /// 命中、闪烁。**借用纪律**：`RefCell` 的借用绝不跨外部回调——`write_text`
@@ -488,19 +503,19 @@ impl EditableTextController {
         self.core.borrow().text_len()
     }
 
-    // ---- 光标 / 选区（真相在 `core`：`anchor` / `focus` 字符索引）----
+    // ---- 光标 / 选区（唯一真相源是控制器信号 `caret_pair`，派生量直接读它）----
 
     fn anchor_index(&self) -> Option<usize> {
-        self.core.borrow().anchor()
+        self.caret_pair.get().map(|(a, _)| a)
     }
 
     fn focus_index(&self) -> Option<usize> {
-        self.core.borrow().focus()
+        self.caret_pair.get().map(|(_, f)| f)
     }
 
     /// 钳制后的光标（塌缩时返回 0 或文本末尾）。
     fn cursor(&self) -> usize {
-        self.core.borrow().cursor()
+        self.anchor_index().unwrap_or(0).min(self.text_len())
     }
 
     /// 垂直移动的视觉列（TS `preferredX`）。`None` = 还没定过。
@@ -517,36 +532,63 @@ impl EditableTextController {
     }
 
     fn local_sel_start(&self) -> usize {
-        self.core.borrow().sel_start()
+        match self.caret_pair.get() {
+            Some((a, f)) => a.min(f).min(self.text_len()),
+            None => 0,
+        }
     }
 
     fn local_sel_end(&self) -> usize {
-        self.core.borrow().sel_end()
+        match self.caret_pair.get() {
+            Some((a, f)) => a.max(f).min(self.text_len()),
+            None => 0,
+        }
     }
 
     /// 用钳制后的边界比较：文本被外部改短时残留的越界端点不应算"有选区"，
     /// 否则替换选区会回落到"按光标插入"形成相互递归（栈溢出）。
     fn local_has_sel(&self) -> bool {
-        self.core.borrow().has_selection()
+        matches!(self.caret_pair.get(), Some((a, f)) if a != f)
     }
 
     /// **就地改内核的唯一入口**。任何 `borrow_mut()` 都必须走这里。
     ///
-    /// 原因是 `Signal::set` 会**同步** flush：内核的光标 / 选区是信号，写它们
-    /// 会立刻唤醒选区的派生 memo，而那条链会回头调本节点的
-    /// `position_for_point` → `paragraph()` → `sync_params()` → 又是 `borrow_mut()`。
-    /// 借用还握着时就是 `RefCell already borrowed`——在 winit 事件循环里 panic
-    /// 等于进程直接退出，现象就是"点一下输入框就闪退"。
-    ///
-    /// 守卫**必须声明在借用之前**（析构顺序相反）：借用先释放、批次后 flush。
+    /// 光标 / 选区 / IME 组合态的信号已提升到控制器字段（`caret_pair` 等），内核
+    /// `EditCore` 不再持有信号，所以这里只负责把纯数据的 `borrow_mut` 收口——不再有
+    /// "写信号触发同步 flush、观察者回头借 `core`" 的双借陷阱（旧版闪退的根因）。
+    /// 信号在 [`Self::publish_sel`] 里、于 `core` 借用释放后统一发布。
     fn with_core_mut(&self, f: impl FnOnce(&mut EditCore)) {
-        let _batch = begin_batch();
         f(&mut self.core.borrow_mut());
+    }
+
+    /// 把核内纯字段态发布为控制器的响应式信号。
+    ///
+    /// 必须在 `core` 借用**释放后**调用：发布即 `Signal::set`，会同步 flush 观察者
+    /// （如 SelectionManager 的派生 memo）。若 flush 发生在 `core.borrow_mut()` 仍持有
+    /// 期间，观察者读 `core` 会 `RefCell already borrowed` 直接 panic；在借用释放后发布，
+    /// 观察者读的是控制器信号字段（无需借 `core`），安全。
+    fn publish_sel(&self) {
+        let (a, f, ct, ccp) = {
+            let c = self.core.borrow();
+            (
+                c.anchor(),
+                c.focus(),
+                c.composing_text(),
+                c.composing_cursor_pos(),
+            )
+        };
+        self.caret_pair.set(match (a, f) {
+            (Some(a), Some(f)) => Some((a, f)),
+            _ => None,
+        });
+        self.composing_text.set(ct);
+        self.composing_cursor_pos.set(ccp);
     }
 
     fn set_cursor(&self, idx: usize) {
         self.sync_params();
         self.with_core_mut(|c| c.set_cursor(idx));
+        self.publish_sel();
         // 光标位置变了：重新从"亮"开始闪，点击 / 方向键之后都不会有空窗。
         self.restart_blink();
     }
@@ -554,33 +596,41 @@ impl EditableTextController {
     fn extend_to(&self, new_pos: usize) {
         self.sync_params();
         self.with_core_mut(|c| c.extend_to(new_pos));
+        self.publish_sel();
+        // 光标位置变了：重新从"亮"开始闪，方向键 / 拖选之后都不会有空窗。
+        self.restart_blink();
     }
 
     fn move_to(&self, new_pos: usize, extend: bool) {
         self.sync_params();
         self.with_core_mut(|c| c.move_to(new_pos, extend));
+        self.publish_sel();
+        // 光标位置变了：重新从"亮"开始闪，方向键 / 点击之后都不会有空窗。
+        self.restart_blink();
     }
 
     // ---- 显示层（占位 / 掩码 / tab 展开）----
 
-    /// 把节点参数同步进内核。
+    /// 把外部真相源同步进内核。
     ///
     /// `text` / `placeholder` / `obscure` / `single_line` 都是**外部真相源**
     /// （调用方的信号），内核持有的是编辑期副本。任何"读内核"的入口先同步一次，
     /// 外部改动（程序化 `set` 文本、切主题换占位文案、切掩码）才立刻生效。
     ///
-    /// **只在值真的变了时才写**：`set_placeholder` / `set_obscure_text` 会递增
-    /// 修订号（信号写），无条件写会在绘制期自我触发重绘。
+    /// 只把**外部真相源**（`text` / `placeholder` / `obscure` / `single_line` 这些
+    /// 调用方信号）同步进内核副本。**绝不碰光标 / 选区**。
+    ///
+    /// 之前这里曾把控制器信号 `caret_pair` 回写进核（`set_pair` / `clear_pair`），
+    /// 那是错误的双向同步：在 `edit` 里 `write_text` 触发同步 flush、而此刻
+    /// `caret_pair` 还是旧值，回写会把刚被编辑动作更新的核内光标覆盖回旧值，
+    /// 于是换行的光标停在上一个位置、上下键因光标落在空矩形退化成乱跳。
+    /// 光标 / 选区是**单向**从核经 [`Self::publish_sel`] 流向 `caret_pair` 的，
+    /// 核内 `anchor` / `focus` 由各编辑动作自己维护，无需在这里回灌。
+    ///
+    /// **只在值真的变了时才写**：无条件写会在绘制期做无谓的副本更新。
+    /// 内核 `EditCore` 已无信号，本函数不再触发同步 flush（旧版依赖 `is_computing`
+    /// 闸避免的断言已不存在——信号提升为控制器字段后即消除）。
     fn sync_params(&self) {
-        // memo 计算途中禁止写信号（`wy_signal::signal` 的 `!g.computing` 硬断言）。
-        // 此时内核已被触发本次重算的那个入口（`set_cursor` / `edit` / …）同步过，
-        // 跳过不会读到过期数据；计算结束后首次正常读会补上同步。
-        // 若不加这道闸，点输入框时选区 memo 重算会经
-        // `position_for_point → paragraph → display_text → sync_params` 回头写信号，
-        // 直接触发断言（表现同 RefCell 双借：进程退出 / 测试 panic）。
-        if wy_signal::is_computing() {
-            return;
-        }
         self.with_core_mut(|c| {
             let t = (self.text)();
             if c.text() != t {
@@ -701,10 +751,11 @@ impl EditableTextController {
             None => return Vec::new(),
         };
         let dt = self.display_text();
-        let fi = match self.focus_index() {
-            Some(v) => v,
-            None => return Vec::new(),
-        };
+        // 用 `cursor()`（缺省 0、钳到文末）而非 `focus_index().unwrap()`：
+        // 编辑器刚聚焦、光标尚未落位时 `caret_pair` 为 `None`，仍应在位置 0
+        // 画出光标（首帧可见性门禁要求），与 TS `cursor()` 的 `anchorIndex() >= 0 ? ... : 0`
+        // 对齐；这也是此前内联副本的既有行为，不能因换成 `caret_rect()` 而丢。
+        let fi = self.cursor();
         let dpos = self.logic_to_display_index(fi);
         let byte = char_to_byte(&dt, dpos);
         let end_byte = char_to_byte(&dt, (dpos + 1).min(dt.chars().count()));
@@ -724,7 +775,11 @@ impl EditableTextController {
         }
         if dpos > 0 {
             let b2 = char_to_byte(&dt, dpos - 1);
-            return p.rects_for_range(b2, byte, RectStyle::Tight);
+            if let Some(prev) = p.rects_for_range(b2, byte, RectStyle::Tight).first() {
+                // 文末插入点 = 前一字的**右缘**（而非左缘），保证光标画在最后一个
+                // 字符之后；否则会画在最后一个字符之前，看起来"光标无法到末尾"。
+                return vec![TextRect::new(prev.right, prev.top, prev.right, prev.bottom)];
+            }
         }
         Vec::new()
     }
@@ -787,6 +842,17 @@ impl EditableTextController {
     }
 
     /// 光标矩形 + 光标插入点横坐标（供上下移动保持视觉列）。
+    /// 光标矩形 + 光标插入点横坐标（供上下移动保持视觉列）。
+    ///
+    /// 与 TS `caretMetrics` 对齐：优先取光标**后一个字符**的矩形（其 `left` 即插入点）；
+    /// 文末取不到时退回**前一个字符**的矩形，插入点取它的 `right` 缘（而非 `left`），
+    /// 这样文末光标落在最后一个字符**之后**，否则会画在最后一个字符之前。
+    ///
+    /// 注意：`preferredX` 用插入点（TS `at.left` / `prev.right`），**不用矩形中心**——
+    /// 中心点恰好落在字符间的临界点上，CanvasKit 取整方向会让视觉列左右抖动
+    /// （见 TS `caret.ts` 注释）；Kotlin 虽然在 `moveUp` 里写的是 `r.left + r.width / 2f`，
+    /// 但其 `cursorRect` 取的是 `pos+1`（后一字）或 `pos-1` 的矩形、`r.width` 在该语境下
+    /// 通常即字符宽，等价于插入点；本端口沿用 TS 的插入点语义，保持与 `caretRectsOf` 一致。
     fn caret_metrics(&self) -> Option<(TextRect, f32)> {
         let p = self.paragraph()?;
         let dt = self.display_text();
@@ -794,8 +860,7 @@ impl EditableTextController {
         let dpos = self.logic_to_display_index(fi);
         let byte = char_to_byte(&dt, dpos);
         let end_byte = char_to_byte(&dt, (dpos + 1).min(dt.chars().count()));
-        let at = p.rects_for_range(byte, end_byte, RectStyle::Tight);
-        if let Some(at) = at.first() {
+        if let Some(at) = p.rects_for_range(byte, end_byte, RectStyle::Tight).first() {
             return Some((*at, at.left));
         }
         if dpos > 0 {
@@ -986,6 +1051,15 @@ impl EditableTextController {
             });
             changed
         };
+        // 先把核内新光标 / 选区发布为控制器信号，**早于** `write_text`。
+        //
+        // `write_text` 会经 `on_text_change` 写外部 `text` 信号并触发**同步** flush；
+        // 若此刻 `caret_pair` 还是旧值，订阅它的绘制 / 命中链在 flush 中读到的就是
+        // 过期光标，下一次 `publish` 反而会把刚被编辑算好的新光标覆盖回旧值——
+        // 表现为"插入换行后光标停在上一个位置、上下键因光标落在空矩形退化成乱跳"。
+        // 先发布，保证任何 flush 期间 `caret_pair` 都已是新值（单一可信源原则：
+        // 核 → `caret_pair` 单向流出）。
+        self.publish_sel();
         match changed {
             Some(t) => {
                 self.write_text(&t);
@@ -999,6 +1073,8 @@ impl EditableTextController {
     fn with_core(&self, f: impl FnOnce(&mut EditCore)) {
         self.sync_params();
         self.with_core_mut(f);
+        // 光标 / 选区变了就发布到控制器信号（`caret_pair` 等）。
+        self.publish_sel();
         self.restart_blink();
     }
 
@@ -1083,6 +1159,8 @@ impl EditableTextController {
         if let Some(m) = self.manager() {
             if let Some((a, b)) = m.range_of(&self.self_sel()) {
                 self.with_core_mut(|c| c.select_range(a, b));
+                // 跨组件选区已写进核，发布到控制器信号让派生量同步。
+                self.publish_sel();
             }
         }
     }
@@ -1195,6 +1273,12 @@ impl EditableTextController {
             }
         }
         let p = self.paragraph();
+        // 光标位置必须作为绘制依赖被**无条件读取一次**：`draw` 经 `range_of`
+        // 读的是选区 memo，而塌缩光标（纯光标、无选区）下移动光标不会改变该
+        // memo 的输出，于是绘制 RecordMemo 收不到任何信号变化、复用旧帧，光标
+        // 停在上一位置甚至消失。这里直接读 `caret_pair`，让它成为绘制依赖——
+        // 光标一动就触发重绘，光标跟上。详见 docs/08 §10「单一可置信信号源」。
+        let _caret_tracked = self.cursor();
         let pad_x = n.padding_inline_start();
         let pad_y = n.padding_block_start();
         // 文本原点 y = padding 起点 + 单行墨迹补偿（TS `textOriginY`）。
@@ -1241,39 +1325,23 @@ impl EditableTextController {
         }
 
         // 光标：无分配选区且聚焦且（闪烁）可见时绘制。
+        //
+        // **复用 `caret_rect()` 这一唯一几何源**——它已含末尾空行 / 行首的兜底
+        // （parley 不给末尾换行处的字形矩形，要在「下一行行首」造一个零宽矩形）。
+        // 此前这里另抄了一份内联 `rects_for_range`，漏掉了换行分支，于是换行后
+        // 光标被画在上一行末尾、上下键在行边界退化。单一几何源杜绝这类分叉。
         if range.is_none() && focused && self.cursor_visible() {
-            if let Some(p) = &p {
-                let dt = self.display_text();
-                let dpos = self.logic_to_display_index(self.cursor());
-                let byte = char_to_byte(&dt, dpos);
-                let end_byte = char_to_byte(&dt, (dpos + 1).min(dt.chars().count()));
-                let mut rect: Option<TextRect> = None;
-                let rects = p.rects_for_range(byte, end_byte, RectStyle::Tight);
-                if !rects.is_empty() {
-                    rect = Some(rects[0]);
-                } else if dpos > 0 {
-                    let b2 = char_to_byte(&dt, dpos - 1);
-                    if let Some(rr) = p.rects_for_range(b2, byte, RectStyle::Tight).first() {
-                        rect = Some(TextRect::new(
-                            rr.right - CURSOR_WIDTH,
-                            rr.top,
-                            rr.right,
-                            rr.bottom,
-                        ));
-                    }
-                }
-                if let Some(r) = rect {
-                    let col = text_color();
-                    s.fill_rect(
-                        Rect::new(
-                            r.left + pad_x,
-                            r.top + origin_y,
-                            CURSOR_WIDTH,
-                            r.bottom - r.top,
-                        ),
-                        col,
-                    );
-                }
+            if let Some(r) = self.caret_rect().into_iter().next() {
+                let col = text_color();
+                s.fill_rect(
+                    Rect::new(
+                        r.left + pad_x,
+                        r.top + origin_y,
+                        CURSOR_WIDTH,
+                        r.bottom - r.top,
+                    ),
+                    col,
+                );
             }
         }
 
@@ -1572,6 +1640,11 @@ impl EditableTextHandle for EditableTextController {
             SelPoint2::new(Rc::clone(&sel), coerce(a, 0, len)),
             SelPoint2::new(sel, coerce(f, 0, len)),
         ))
+    }
+
+    fn caret_rect(&self) -> Vec<TextRect> {
+        // 复用固有几何源，避免又抄一份（此前 `draw` 内联副本漏了换行分支）。
+        EditableTextController::caret_rect(self)
     }
 
     fn has_selection(&self) -> bool {
@@ -2229,5 +2302,169 @@ mod tests {
         assert_eq!(caret(), 2, "最后一行再按下不应移动");
         assert!(node.handle_key(&key(KeyCode2::UP)));
         assert_eq!(caret(), 0, "上键能离开末尾空行");
+    }
+
+    /// 回归：换行后光标必须前进到新行，不能停留在上一行末尾。
+    ///
+    /// 曾经的 bug：`sync_params` 把控制器信号 `caret_pair` **回写**进核
+    /// （`set_pair` / `clear_pair`），而 `edit` 在 `write_text` 之后才 `publish_sel`。
+    /// `write_text` 触发同步 flush、刷新布局，期间 `display_text → sync_params` 用
+    /// **还是旧值**的 `caret_pair` 把核里刚被编辑动作算好的新光标覆盖回旧值，
+    /// 于是插入 `\n` 后光标停在上一行、上下键因光标落在空矩形退化成乱跳。
+    /// 修复后光标是单向从核经 `publish_sel` 流向 `caret_pair`，不再回灌，换行即前进。
+    #[test]
+    fn enter_advances_caret_to_new_line() {
+        let node = multiline_node("hello");
+        focus::request_focus(&node);
+        let h = focus::active_editor().expect("聚焦后应取到编辑器句柄");
+        let caret = || h.cursor_sel_pair().map_or(0, |p| p.focus.offset);
+        let key = |code: &str| KeyEvent2 {
+            key: String::new(),
+            code: code.to_string(),
+            ctrl: false,
+            shift: false,
+            alt: false,
+            meta: false,
+        };
+
+        h.select_range(5, 5); // 光标在 "hello" 末尾
+        assert_eq!(caret(), 5);
+
+        // 多行裸回车 = 换行：光标应前进到换行符之后（第 6 个字符 = 新行起点）。
+        assert!(node.handle_key(&key(KeyCode2::ENTER)));
+        assert_eq!(caret(), 6, "换行后光标必须前进到新行，不能停在上一行");
+
+        // 再按一次回车：连续换行光标继续前进（中间空行也是落脚点）。
+        assert!(node.handle_key(&key(KeyCode2::ENTER)));
+        assert_eq!(caret(), 7, "连续换行光标应继续前进");
+
+        // 换行后上下键应基于正确的新行光标工作，而非退化成跳到文首/文末。
+        assert!(node.handle_key(&key(KeyCode2::UP)));
+        assert_eq!(caret(), 6, "上键回到上一行行首（preferredX 列），不应漂走");
+    }
+
+    /// 回归：换行后光标**矩形**必须落到下一行（top 从 ≈0 抬升到行高）。
+    ///
+    /// 之前 `draw` 内联了一份 `rects_for_range` 副本、漏掉末尾空行兜底，于是
+    /// 逻辑光标虽前进到新行（offset 正确），视觉矩形却被画在上一行末尾。这条测试
+    /// 直接断言 `caret_rect()` 的 `top` 在换行后明显下移，抓住"画在上一行"的视觉 bug。
+    #[test]
+    fn newline_caret_rect_moves_to_next_line() {
+        let node = multiline_node("abc");
+        focus::request_focus(&node);
+        let h = focus::active_editor().expect("聚焦后应取到编辑器句柄");
+        let caret = || h.cursor_sel_pair().map_or(0, |p| p.focus.offset);
+        let rect_top = || h.caret_rect().into_iter().next().map_or(-1.0, |r| r.top);
+        let key = |code: &str| KeyEvent2 {
+            key: String::new(),
+            code: code.to_string(),
+            ctrl: false,
+            shift: false,
+            alt: false,
+            meta: false,
+        };
+
+        h.select_range(3, 3); // 光标在 "abc" 末尾（第 0 行）
+        assert_eq!(caret(), 3);
+        assert!(
+            rect_top() < 1.0,
+            "换行前光标矩形应在第 0 行（top ≈ 0），实际 top = {}",
+            rect_top()
+        );
+
+        // 回车换行：逻辑光标前进到新行起点。
+        assert!(node.handle_key(&key(KeyCode2::ENTER)));
+        assert_eq!(caret(), 4, "换行后逻辑光标前进到新行起点");
+        let top_after = rect_top();
+        assert!(
+            top_after > 1.0,
+            "换行后光标矩形必须落到下一行（top 抬升到行高），实际 top = {}",
+            top_after
+        );
+    }
+
+    /// 回归：末行极短（单字符）时，**文末**上键不能甩到行首。
+    ///
+    /// 文本 `"ab\nc"`：行 0 = `ab`、行 1 = `c`（极短）。`caret_metrics` 文末回退取
+    /// 前一字符矩形时，插入点必须是它的**右缘**（`prev.right`）——若误用左缘
+    /// （`prev.left`），末行极短时左缘退化为 0，上键被甩到上一行行首（offset 0）。
+    ///
+    /// 同时锁定 TS 规范行为：光标在末字**之前**（即行 1 的列 0）时，视觉列本来就是 0
+    /// （TS `caretMetrics` 取 `at.left` = 行首），上键落上一行列 0 是正确的，不是 bug。
+    #[test]
+    fn up_from_short_last_line_keeps_column() {
+        let node = multiline_node("ab\nc");
+        focus::request_focus(&node);
+        let h = focus::active_editor().expect("聚焦后应取到编辑器句柄");
+        let caret = || h.cursor_sel_pair().map_or(0, |p| p.focus.offset);
+        let key = |code: &str| KeyEvent2 {
+            key: String::new(),
+            code: code.to_string(),
+            ctrl: false,
+            shift: false,
+            alt: false,
+            meta: false,
+        };
+
+        // 文末（最后一个字符之后）：插入点 = 'c' 右缘（非零），上键不能落行首。
+        h.select_range(4, 4);
+        assert_eq!(caret(), 4);
+        assert!(node.handle_key(&key(KeyCode2::UP)));
+        let after = caret();
+        assert!(
+            after > 0,
+            "文末上键不能甩到行首（offset 0），实际 offset = {after}"
+        );
+        assert!(
+            after <= 2,
+            "文末上键应落在上一行（行 0 共 2 字符），实际 offset = {after}"
+        );
+
+        // 末字之前（行 1 列 0）：TS 规范行为——上键落上一行列 0。
+        h.select_range(3, 3);
+        assert_eq!(caret(), 3);
+        assert!(node.handle_key(&key(KeyCode2::UP)));
+        assert_eq!(
+            caret(),
+            0,
+            "光标在行首（列 0）时上键应落上一行列 0（TS 规范行为）"
+        );
+    }
+
+    /// 回归（IME 后 preferredX 重置）：TS 在 `commitComposition` / `endComposition`
+    /// 里都重置 `preferredX = NaN`（editor.ts:551/562）。Rust 对应重置在
+    /// `EditCore` 的组合 / 提交路径内部完成——此测试锁住"IME 提交后上键必须用
+    /// 当前光标插入点，不得沿用历史 preferredX"这一行为。
+    #[test]
+    fn ime_commit_resets_preferred_x() {
+        let node = multiline_node("abcdefgh\nxyz");
+        focus::request_focus(&node);
+        let h = focus::active_editor().unwrap();
+        let caret = || h.cursor_sel_pair().map_or(0, |p| p.focus.offset);
+        let key = |code: &str| KeyEvent2 {
+            key: String::new(),
+            code: code.to_string(),
+            ctrl: false,
+            shift: false,
+            alt: false,
+            meta: false,
+        };
+
+        // 光标在行 0 行首（x=0），按一次下键 → preferred_x 被记成 Some(0.0)。
+        h.select_range(0, 0);
+        assert!(node.handle_key(&key(KeyCode2::DOWN)));
+        assert_eq!(caret(), 9, "从行首下键应落在下一行（行 1 = 'xyz'）行首");
+
+        // IME 提交打字（真实中文输入路径）：TS 在 commit 时重置 preferredX。
+        h.commit_composing_text("测试");
+
+        // 此时上键必须用**当前光标**的插入点，而不是残留的 0。
+        assert!(node.handle_key(&key(KeyCode2::UP)));
+        let after = caret();
+        assert!(
+            after > 0,
+            "IME 提交后上键不能沿用残留 preferredX=0 落到行首，实际 offset = {after}"
+        );
+        assert!(after <= 8, "上键应落在上一行内，实际 offset = {after}");
     }
 }

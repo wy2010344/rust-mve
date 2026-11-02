@@ -101,6 +101,13 @@ impl TextParagraph {
     /// 与 [`Self::glyph_position_at_coordinate`] 的差别：坐标查找是"全段落找最近
     /// 簇"，空行没有簇可命中，会落到"文末"兜底——上下键于是**跳过空行**。
     /// 这里把**行范围当硬边界**：命中簇也钳到本行，空行 / 行内无字形则返回行首。
+    ///
+    /// 钳制上界是**可见行末**（行尾换行符之前），不是 `range.end`：Parley 的行区间
+    /// 左闭右开且把 `\n` 归上一行，`dx` 超出短行宽度时 `Cluster::from_point` 会命中
+    /// `\n` 簇的**右侧**（= 下一行行首）——上下键于是"回到行首且永远卡在本行"
+    /// （`line_index_of_byte` 又把该位置归回本行，再按上键原地打转）。Skia 的
+    /// `getGlyphPositionAtCoordinate`（Kotlin 同名原语）对越界 x 返回的是换行符
+    /// **之前**的行末位置，这里对齐它。
     pub fn position_in_line(&self, line_index: usize, dx: f32) -> usize {
         let Some(line) = self.layout.lines().nth(line_index) else {
             return self.text.len();
@@ -113,6 +120,17 @@ impl TextParagraph {
         }
         let m = line.metrics();
         let y = (m.block_min_coord + m.block_max_coord) / 2.0;
+        // 可见行末：剥掉行尾的 `\r`/`\n`（软行没有，硬行末尾必有）。
+        let bytes = self.text.as_bytes();
+        let mut visible_end = range.end.min(bytes.len());
+        while visible_end > range.start {
+            let b = bytes[visible_end - 1];
+            if b == b'\n' || b == b'\r' {
+                visible_end -= 1;
+            } else {
+                break;
+            }
+        }
         match Cluster::from_point(&self.layout, dx, y) {
             Some((cluster, side)) => {
                 let r = cluster.text_range();
@@ -120,7 +138,7 @@ impl TextParagraph {
                     ClusterSide::Left => r.start,
                     ClusterSide::Right => r.end,
                 };
-                pos.clamp(range.start, range.end)
+                pos.clamp(range.start, visible_end)
             }
             // 点在行外：落在行首（空行已在上面短路，这里是非空行的左侧空白）。
             None => range.start,
@@ -431,6 +449,23 @@ mod tests {
         assert_eq!(p.position_in_line(1, 500.0), 2, "空行不能兜底到文末");
         assert_eq!(p.position_in_line(2, 0.0), 3, "非空行仍按横向位置取");
         assert_eq!(p.position_in_line(99, 0.0), 4, "越界行归文末");
+    }
+
+    /// 回归（上下键卡在本行）：`dx` 超出**短行**宽度时，落点必须钳到**可见行末**
+    /// （换行符之前），不能钳到含 `\n` 的 `range.end`。
+    ///
+    /// `"ab\n中文测试"`：行 0 = `ab`（约 2 字宽）。末行光标在第 4 个中文字之后，
+    /// `dx` 远超行 0 宽度——旧行为命中 `\n` 簇右侧并钳到 `range.end`（= 3，`\n`
+    /// 之后 = 下一行行首），上下键视觉上"回到行首且永远卡在本行"。Skia 的
+    /// `getGlyphPositionAtCoordinate`（Kotlin 同名原语）对越界 x 返回换行符之前。
+    #[test]
+    fn position_in_line_clamps_before_trailing_newline() {
+        let p = paragraph("ab\n中文测试");
+        // dx 超出行 0 宽度：落行 0 可见末（= 2，`\n` 之前），绝不是 3。
+        assert_eq!(p.position_in_line(0, 500.0), 2, "越界 dx 钳到可见行末");
+        assert_eq!(p.position_in_line(0, 0.0), 0, "dx=0 落行首");
+        // 末行没有换行符：越界仍归文末（字节偏移："ab\n" 3 字节 + 4 中文字 × 3 = 15）。
+        assert_eq!(p.position_in_line(1, 500.0), 15, "无换行行不受影响");
     }
 
     /// 末尾空行（`"a\n"` 排成两行）同样要能被识别，否则文末光标会画在上一行。

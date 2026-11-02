@@ -23,6 +23,7 @@ use crate::canvas_render2::node2::Node2;
 use crate::canvas_render2::protocol::EditorHandleExt;
 use crate::canvas_render2::selection::{SelPair2, Selectable2};
 use crate::canvas_render2::tree::engine_global;
+use wy_text::TextRect;
 
 pub use crate::canvas_render2::tree::engine_global::{
     active_editor_ext, apply_modifiers, clear_modifiers, is_pressed, modifiers, notify_key_press,
@@ -232,6 +233,10 @@ pub trait EditableTextHandle {
     fn commit_composing_text(&self, final_text: &str);
     /// 原生输入控件的期望位置（光标处），供宿主定位 textarea 让候选框跟随光标。
     fn input_overlay(&self) -> Option<InputOverlayRect>;
+    /// 光标矩形（段落坐标系，已含 padding 偏移与末尾空行 / 行首兜底）。
+    ///
+    /// 绘制与命中共用这一唯一几何源；测试用它断言"换行后光标确实落在下一行"。
+    fn caret_rect(&self) -> Vec<TextRect>;
     /// 键盘事件处理；返回 `true` 表示已消费。
     fn handle_key(&self, e: &KeyEvent2) -> bool;
     /// 返回自身作为 [`Selectable2`]（供 SelectionManager 派生范围与端点）。
