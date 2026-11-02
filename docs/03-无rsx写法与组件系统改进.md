@@ -37,14 +37,14 @@
 |---|---|
 | `examples/todo.rs` | 无 `rsx!` 的完整 todo 组件（增 / 删 / 勾选 / 计数 / 清除已完成） |
 | `examples/ooc_preview.rs` | 更小一版的金融看板无 `rsx!` 预览（`#[component]` + `#[getter]` 形态） |
-| `docs/shot-todo.png` | `todo.rs` 离屏快照 |
-| `docs/shot-ooc-preview.png` | `ooc_preview.rs` 离屏快照 |
+| `docs/images/shot-todo.png` | `todo.rs` 离屏快照 |
+| `docs/images/shot-ooc-preview.png` | `ooc_preview.rs` 离屏快照 |
 
 状态模型刻意对齐 `docs/02` 第 5.5 节：**结构信号 `Signal<Vec<u64>>` + 每项独立信号**
 （`Signal<String>` / `Signal<bool>`），不用 `Signal<Vec<Todo>>`。勾选只写该项 `done` →
 只那一行重绘；增删只写 `ids` → `for_each` 按 key diff。
 
-渲染验证：`cargo run -p wy-app --example todo -- --snapshot docs/shot-todo.png`
+渲染验证：`cargo run -p wy-app --example todo -- --snapshot docs/images/shot-todo.png`
 （1440×900，结构 / 勾选 / 删除线 / 分隔线 / 状态行全部在位）。
 
 ---
@@ -497,7 +497,7 @@ scroll_view! { children: rows }
 "父容器主轴尺寸确定"时才分配剩余空间。新写法在 `scroll_view` 里用
 `exts: vec![grow(1.0)]` 贯穿两级容器，滚轮 / 裁剪 / 滚动条一个不少。
 
-像素级验证（`docs/shot-scroll2-*.png`）：视口高 820 时滑块 ≈343px、高 360 时 ≈39px、
+像素级验证（`docs/images/shot-scroll2-*.png`）：视口高 820 时滑块 ≈343px、高 360 时 ≈39px、
 `todo2` 压到 170px 高时滑块重新出现且图元数 107→108——即"窗口变矮立刻可滚"。
 单元测试见 `canvas_render2::scroll::tests`（6 条：钳制、滑块几何、`len` 参数、
 双向换算互逆、无内容不滚）。

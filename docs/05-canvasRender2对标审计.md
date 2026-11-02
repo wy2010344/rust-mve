@@ -804,7 +804,7 @@ TS 给内层编辑器写的是 `width: 342`（= 356 − 6×2 − 1×2）与 `hei
 
 验证：`cargo test --workspace --lib` **536 passed**（新增 1 条编辑器测试）；
 `cargo test -p wy-app --example canvas2-todo` 3 passed；finance 68 passed；
-`tsc --noEmit` 通过。快照 480×1240 共 427 图元，`docs/shot-canvas2-todo{,-scroll,-select,-editor}.png`。
+`tsc --noEmit` 通过。快照 480×1240 共 427 图元，`docs/images/shot-canvas2-todo{,-scroll,-select,-editor}.png`。
 
 ---
 
@@ -1102,3 +1102,56 @@ memo 评估 compute_ranges
 (a) 借用内核期间（双借）或 (b) memo 计算期间（写断言）。`sync_params` 这种"读前顺手
 同步"是个陷阱：它看起来是读辅助，实则带写。凡是会经 memo 重算链走到的读路径，都不能
 直接调用它——要么只在显式写入入口调，要么在计算期自避。
+
+## 16. 信号架构 faithful 复刻终态（2026-11-02）
+
+§15.4 / §15.7 的 `BatchGuard` 补偿方案**已被架构级修复取代，本节为终态记录**。
+那两条的教训（同步 flush 撞借用）依然成立，但修法从"打补丁"换成了"消除根因"。
+
+### 16.1 根因与终态修法
+
+§15 的崩溃根因不是"少了个守卫"，而是**把含信号的 `EditCore` 塞进 `RefCell`**：
+`set` 的同步 flush 让观察者回头借同一 `RefCell` → `RefCell already borrowed`。
+守卫只能堵住已知的调用点，漏一处就闪退。终态修法对齐 TS/Kotlin 的原生形态：
+
+1. **信号出核，提升为控制器直接字段**：`caret_pair: Signal<Option<(usize,usize)>>`
+   （唯一光标/选区真相源，Kotlin `caretPair` / TS `caretPair` 的对应物）+
+   `composing_text` / `composing_cursor_pos` 两个单信号。`EditCore` 退化为无信号纯逻辑，
+   光标态在核内只是普通字段。`begin_batch` / `is_computing` 补偿随根因一并删除。
+2. **单向流：核 → `publish_sel` → 信号，绝不回灌**。曾在 `sync_params` 里把
+   `caret_pair` 写回核（`set_pair`），双向同步在 `edit` 的 `write_text` 触发同步
+   flush 期间用旧值覆盖新光标 → 换行光标停上一行。修复后 `edit` **先 `publish_sel`
+   再 `write_text`**，任何 flush 期间真相源已是新值。
+3. **绘制依赖直接读真相源**：绘制走 `RecordMemo`（redraw_tracker），只有被读到的
+   信号变化才重录。塌缩光标下经选区 memo 读光标 = memo 输出不变 = 不重绘（上下键
+   光标消失）。修复：`draw` 顶部无条件 `self.cursor()` 一次；`move_to`/`extend_to`
+   后 `restart_blink`。
+
+### 16.2 对 TS/Kotlin 逐层判定：对齐 / 补偿 / 有意偏离
+
+| 层 | 结论 | 说明 |
+|---|---|---|
+| 光标/选区真相源 | ✅ 对齐 | `caret_pair` 单原子信号 + 整对原子写 + 纯 getter 派生，三方一致 |
+| composing 态 | ✅ 对齐 | 两个单信号，与 TS `composingText`/`composingCursorPos` 同构 |
+| 文本写入钩子 | ✅ 对齐 | 核内 `replace_text` 统一入口 ≈ Kotlin `writeText` 钩子 |
+| undo/选词在编辑核 | ✅ 对齐 | TS `UndoRedo` 类同样在 editor 内部（editor.ts:247） |
+| `position_in_line` 行钳制 | ⚠️ 必要补偿 | parley 行区间把 `\n` 归上一行且 `Cluster::from_point` 越界命中 `\n` 右侧；Skia `getGlyphPositionAtCoordinate` 返回换行符**之前**。钳制上界取**可见行末**（剥 `\r\n`）对齐 Skia |
+| 光标矩形文末回退 | ⚠️ 必要补偿 | 文末 `rects_for_range(pos,pos+1)` 为空，回退取末字矩形、插入点取 `right` 缘（Kotlin `cursorRect` 同语义）；不用矩形中心（TS `caret.ts` 警告的字符间临界抖动） |
+| 文本双源 | ⚠️ 有意偏离 | TS：外部 text 单源 + `onTextChange` 回调；Kotlin：`rawText` 信号单源。Rust：外部 text **闭包**（无所有权）+ `EditCore` 内部缓冲（undo/组合态需要），靠 `sync_params`（拉）/`write_text`（推）缝合。**接口形态决定的偏离**，风险（双向同步出 bug）靠 §10 单向流原则约束 |
+| 段落缓存 | ⚠️ 等价替代 | TS `createEditableParagraph` memo；Rust 手动内容键缓存（文本+样式+宽度）。语义等价，Kotlin 则是普通 getter 不缓存 |
+| `EditCore` 纯逻辑分层 | ⚠️ 分层重组 | Kotlin 一个类 = Rust `EditCore`（`wy-text`，纯逻辑 74 测试）+ 控制器（几何/呈现）。职责切分见 §15.2，语义等价 |
+
+### 16.3 几何修复史（2026-11-02，三条链）
+
+| 症状 | 根因 | 修复 |
+|---|---|---|
+| 换行后光标画在上一行 | `draw` 里另抄了一份内联 `rects_for_range` 副本、漏换行分支（违反单一几何源） | 删副本，复用 `caret_rect()`（含末尾空行兜底）；新增几何回归测试锁 `top` 抬升 |
+| 上下键光标消失 | 绘制 RecordMemo 未把 `caret_pair` 登记为依赖（见 16.1-3） | `draw` 无条件读真相源 + `restart_blink` |
+| 末行上键回行首且卡死 | `position_in_line` 钳制上界含 `\n`（见 16.2 补偿行） | 可见行末钳制；真机全链路复现测试锁死 |
+
+方法论教训：编辑器单测桩（`multiline_node` + 直接 `handle_key`）覆盖不到真机路径
+（外部信号 flush、SelectionManager、IME guard、指针聚焦）。**几何/导航类 bug 直接在
+canvas2-todo 用 `WyApp::handle_event`/`handle_key_event`/`handle_ime_event` 无头复现**。
+
+验证：wy-text 107 / wy-mve 152 / canvas2-todo 5 全过；clippy 两 crate 零真实告警。
+
